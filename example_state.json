@@ -1,0 +1,61 @@
+{
+  "turn": 7,
+  "phase": "axis_initial_movement",
+  "active_side": "axis",
+  "map": {
+    "coordinate_format": "vassal_numeric_hv_2digit_concat",
+    "zone": "Map",
+    "max_col": 49,
+    "max_row": 34
+  },
+  "terrain": {
+    "3711": ["alamein_box"],
+    "0606": ["hill_or_ridge"],
+    "0607": ["hill_or_ridge"]
+  },
+  "control": {
+    "3711": "allies"
+  },
+  "units": {
+    "5-panzer-a": {
+      "side": "axis",
+      "hex": "0202",
+      "state": "fresh",
+      "attack": 6,
+      "defense": 6,
+      "movement": 10,
+      "size": "regiment",
+      "kind": "ground"
+    },
+    "16-it-inf": {
+      "side": "axis",
+      "hex": "0203",
+      "state": "fresh",
+      "attack": 2,
+      "defense": 2,
+      "movement": 3,
+      "size": "division",
+      "kind": "ground"
+    },
+    "2-sa-inf": {
+      "side": "allies",
+      "hex": "0304",
+      "state": "fresh",
+      "attack": 3,
+      "defense": 3,
+      "movement": 4,
+      "size": "division",
+      "kind": "ground"
+    },
+    "7th-armoured-desert-rats": {
+      "side": "allies",
+      "hex": "3711",
+      "state": "fresh",
+      "attack": 7,
+      "defense": 7,
+      "movement": 10,
+      "size": "division",
+      "kind": "ground"
+    }
+  }
+}

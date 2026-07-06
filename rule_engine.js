@@ -1,0 +1,1250 @@
+/*
+ * First Alamein rule engine for the Web Studio.
+ *
+ * This file is intentionally dependency-free and usable from both the browser
+ * and Node-based tests. It owns the rule decisions; app.js owns rendering,
+ * history, logging, and user interaction.
+ */
+(function initRuleEngine(root, factory) {
+  const engine = factory();
+  if (typeof module === "object" && module.exports) module.exports = engine;
+  root.AlameinRules = engine;
+})(typeof globalThis !== "undefined" ? globalThis : window, function makeRuleEngine() {
+  const COLUMN_ROW_BOUNDS = {
+    1: [1, 7], 2: [1, 7], 3: [1, 8], 4: [1, 8], 5: [1, 9],
+    6: [1, 9], 7: [1, 10], 8: [1, 10], 9: [1, 11], 10: [1, 11],
+    11: [1, 12], 12: [1, 12], 13: [1, 13], 14: [1, 13], 15: [1, 14],
+    16: [1, 14], 17: [1, 15], 18: [1, 17], 19: [1, 18], 20: [1, 19],
+    21: [1, 21], 22: [1, 21], 23: [1, 34], 24: [2, 33], 25: [3, 34],
+    26: [3, 33], 27: [4, 34], 28: [4, 33], 29: [5, 34], 30: [5, 33],
+    31: [6, 34], 32: [6, 33], 33: [7, 34], 34: [7, 33], 35: [8, 34],
+    36: [8, 33], 37: [9, 34], 38: [9, 33], 39: [10, 34], 40: [10, 33],
+    41: [10, 34], 42: [10, 33], 43: [10, 34], 44: [10, 33], 45: [10, 34],
+    46: [10, 33], 47: [10, 34], 48: [10, 33], 49: [10, 34]
+  };
+
+  const DEFAULT_RULES = {
+    turn_sequence: [
+      "axis_initial_movement",
+      "axis_combat",
+      "axis_mechanized_movement",
+      "axis_supply_movement",
+      "allies_initial_movement",
+      "allies_combat",
+      "allies_mechanized_movement",
+      "allies_supply_movement",
+      "end_game_turn"
+    ],
+    stacking: {
+      allied_max_units_per_hex: 3,
+      axis_max_units_per_hex: 4,
+      max_divisions_per_hex: 2,
+      one_side_per_hex: true
+    },
+    movement: {
+      default_hex_cost: 1,
+      mechanized_threshold: 6,
+      terrain_costs: {
+        clear: { mechanized: 1, non_mechanized: 1 },
+        hill_or_ridge: { mechanized: 5, non_mechanized: 2 },
+        depression: { mechanized: 4, non_mechanized: 2 },
+        sea: { mechanized: null, non_mechanized: null },
+        enemy_minefield: { mechanized: 9, non_mechanized: 3 }
+      },
+      road_mode: { mechanized_entry_cost: 3, non_mechanized_entry_cost: 1, multiplier: 5 }
+    },
+    combat: {
+      odds_columns: ["1-4", "1-3", "1-2", "1-1", "2-1", "3-1", "4-1", "5-1", "6-1", "7-1"],
+      crt: {
+        1: ["A3", "A2", "A1", "D1", "D1", "D1", "Ex", "Ex", "De", "De"],
+        2: ["Ae", "A3", "A2", "A1", "D1", "D1", "D3", "Ex", "Ex", "De"],
+        3: ["Ae", "A3", "A2", "A1", "A1", "D1", "D2", "D3", "Ex", "De"],
+        4: ["Ae", "Ae", "A3", "A2", "A2", "A1", "D2", "D2", "Ex", "Ex"],
+        5: ["Ae", "Ae", "A3", "A2", "A2", "A2", "D2", "D2", "D3", "Ex"],
+        6: ["Ae", "Ae", "A3", "A3", "A3", "A2", "D1", "D1", "D3", "Ex"]
+      }
+    }
+  };
+
+  const SCENARIO_META = {
+    july: {
+      first_player: "axis",
+      final_turn: 7,
+      starting_vp: 25,
+      needs_review: false
+    },
+    september: {
+      first_player: "axis",
+      final_turn: 7,
+      starting_vp: 35,
+      skip_phases: [{ turn: 1, phase: "allies_initial_movement", next: "allies_combat" }],
+      needs_review: false
+    },
+    october: {
+      first_player: "allies",
+      final_turn: 15,
+      starting_vp: -20,
+      needs_review: true,
+      review_notes: ["Axis withdrawal/start-line coordinates need map review."]
+    }
+  };
+
+  const DEFAULT_ROAD_PATH = [
+    "0101", "0201", "0302", "0402", "0503", "0603", "0704", "0804", "0905", "1005",
+    "1106", "1206", "1307", "1407", "1508", "1608", "1709", "1809", "1910", "2010",
+    "2111", "2211", "2312", "2412", "2513", "2613", "2714", "2814", "2915", "3015",
+    "3116", "3216", "3317", "3417", "3518", "3618", "3719", "3819", "3920", "4020",
+    "4121", "4221", "4322", "4422", "4523", "4623", "4724", "4824", "4925"
+  ];
+
+  function clone(value) {
+    return typeof structuredClone === "function"
+      ? structuredClone(value)
+      : JSON.parse(JSON.stringify(value));
+  }
+
+  function normalizeHex(raw) {
+    const match = String(raw || "").trim().toUpperCase().match(/(?:MAP\s*)?([0-9]{2})\s*[,/ -]?\s*([0-9]{2})/);
+    if (!match) throw new Error(`invalid hex: ${raw}`);
+    const col = Number(match[1]);
+    const row = Number(match[2]);
+    const bounds = COLUMN_ROW_BOUNDS[col];
+    if (!bounds || row < bounds[0] || row > bounds[1]) throw new Error(`hex outside map: ${match[1]}${match[2]}`);
+    return `${String(col).padStart(2, "0")}${String(row).padStart(2, "0")}`;
+  }
+
+  function splitHex(hex) {
+    const hx = normalizeHex(hex);
+    return [Number(hx.slice(0, 2)), Number(hx.slice(2, 4))];
+  }
+
+  function onMap(hex) {
+    try {
+      normalizeHex(hex);
+      return true;
+    }
+    catch {
+      return false;
+    }
+  }
+
+  function neighbors(hex) {
+    const [col, row] = splitHex(hex);
+    const even = (col - 1) % 2 === 0;
+    const offsets = [
+      [0, -1],
+      [1, even ? -1 : 0],
+      [1, even ? 0 : 1],
+      [0, 1],
+      [-1, even ? 0 : 1],
+      [-1, even ? -1 : 0]
+    ];
+    return offsets
+      .map(([dc, dr]) => `${String(col + dc).padStart(2, "0")}${String(row + dr).padStart(2, "0")}`)
+      .filter(onMap);
+  }
+
+  function normalizeEdge(a, b) {
+    const items = [normalizeHex(a), normalizeHex(b)];
+    items.sort((x, y) => {
+      const [xc, xr] = splitHex(x);
+      const [yc, yr] = splitHex(y);
+      return xc === yc ? xr - yr : xc - yc;
+    });
+    return `${items[0]}-${items[1]}`;
+  }
+
+  function oppositeSide(side) {
+    return side === "axis" ? "allies" : "axis";
+  }
+
+  function phaseSide(phase) {
+    if (String(phase).startsWith("axis_")) return "axis";
+    if (String(phase).startsWith("allies_")) return "allies";
+    return null;
+  }
+
+  function phaseKind(phase) {
+    return String(phase || "").replace(/^axis_/, "").replace(/^allies_/, "");
+  }
+
+  function scenarioFinalTurn(scenario) {
+    return SCENARIO_META[scenario]?.final_turn || 7;
+  }
+
+  function scenarioStartingVp(scenario, fallback = 0) {
+    return SCENARIO_META[scenario]?.starting_vp ?? fallback;
+  }
+
+  function createContext(input) {
+    const state = input.state;
+    const rules = { ...DEFAULT_RULES, ...(input.rules || {}) };
+    rules.stacking = { ...DEFAULT_RULES.stacking, ...(input.rules?.stacking || {}) };
+    rules.movement = { ...DEFAULT_RULES.movement, ...(input.rules?.movement || {}) };
+    rules.movement.terrain_costs = { ...DEFAULT_RULES.movement.terrain_costs, ...(input.rules?.movement?.terrain_costs || {}) };
+    rules.movement.road_mode = { ...DEFAULT_RULES.movement.road_mode, ...(input.rules?.movement?.road_mode || {}) };
+    rules.combat = { ...DEFAULT_RULES.combat, ...(input.rules?.combat || {}) };
+    const terrain = input.terrain || { hexes: {}, edges: {} };
+    const roadPath = state?.scenario_meta?.road_path || input.roadPath || terrain.notes?.coastal_road || DEFAULT_ROAD_PATH;
+    const roadEdges = new Set();
+    for (let i = 1; i < roadPath.length; i += 1) {
+      try {
+        roadEdges.add(normalizeEdge(roadPath[i - 1], roadPath[i]));
+      }
+      catch {
+        // Keep data-review placeholders from breaking the engine.
+      }
+    }
+    return {
+      state,
+      rules,
+      terrain,
+      roadPath: roadPath.map((hex) => {
+        try { return normalizeHex(hex); }
+        catch { return null; }
+      }).filter(Boolean),
+      roadEdges
+    };
+  }
+
+  function isPlayableSide(side) {
+    return side === "axis" || side === "allies";
+  }
+
+  function isTrackMarker(unit) {
+    const text = `${unit?.id || ""} ${unit?.name || ""} ${unit?.image || ""}`.toLowerCase();
+    return text.includes("game-turn") || text.includes("turn marker") || text.includes("turn-record");
+  }
+
+  function isMapCounter(unit) {
+    return !!unit && !unit.off_map && !isTrackMarker(unit);
+  }
+
+  function isEngineer(unit) {
+    const text = `${unit?.name || ""} ${unit?.piece_type || ""} ${unit?.kind || ""}`.toLowerCase();
+    return unit?.kind === "engineer" || text.includes("eng") || text.includes("engineer");
+  }
+
+  function isCombatUnit(unit) {
+    return isMapCounter(unit) && isPlayableSide(unit.side) && (unit.kind || "ground") === "ground" && !unit.eliminated;
+  }
+
+  function isSupplyUnit(unit) {
+    const name = String(unit?.name || "").toLowerCase();
+    return isMapCounter(unit) && isPlayableSide(unit.side) && unit.kind === "supply" && !name.includes("vanguard") && Number(unit.movement || 0) > 0 && !unit.eliminated;
+  }
+
+  function isMineUnit(unit) {
+    return isMapCounter(unit) && unit.kind === "mine" && !unit.eliminated && unit.hex && !unit.cleared;
+  }
+
+  function isMechanized(ctx, unit) {
+    const type = String(unit?.piece_type || "").toLowerCase();
+    if (type.includes("non")) return false;
+    if (type.includes("mech") || type.includes("armor") || type.includes("armour") || type.includes("recon") || type.includes("tank")) return true;
+    return Number(unit?.movement || 0) >= Number(ctx.rules.movement?.mechanized_threshold || 6);
+  }
+
+  function unitsArray(ctx, sourceState = ctx.state) {
+    return Object.entries(sourceState.units || {}).map(([id, unit]) => ({ ...unit, id }));
+  }
+
+  function unitsByHex(ctx, units = unitsArray(ctx)) {
+    const grouped = {};
+    for (const unit of units) {
+      if (!isMapCounter(unit) || !unit.hex || unit.eliminated) continue;
+      const hx = normalizeHex(unit.hex);
+      grouped[hx] ||= [];
+      grouped[hx].push(unit);
+    }
+    return grouped;
+  }
+
+  function combatUnitsArray(ctx) {
+    return unitsArray(ctx).filter(isCombatUnit);
+  }
+
+  function friendlyUnits(ctx, side) {
+    return combatUnitsArray(ctx).filter((unit) => unit.side === side);
+  }
+
+  function enemyUnits(ctx, side) {
+    return combatUnitsArray(ctx).filter((unit) => unit.side === oppositeSide(side));
+  }
+
+  function mineUnits(ctx) {
+    return unitsArray(ctx).filter(isMineUnit);
+  }
+
+  function minesByHex(ctx) {
+    const grouped = {};
+    for (const mine of mineUnits(ctx)) {
+      const hx = normalizeHex(mine.hex);
+      grouped[hx] ||= [];
+      grouped[hx].push(mine);
+    }
+    return grouped;
+  }
+
+  function minesAt(ctx, hex) {
+    return minesByHex(ctx)[normalizeHex(hex)] || [];
+  }
+
+  function enemyMinesAt(ctx, side, hex) {
+    const enemy = oppositeSide(side);
+    return minesAt(ctx, hex).filter((mine) => mine.side === enemy && !mine.cleared);
+  }
+
+  function friendlyMinesAt(ctx, side, hex) {
+    return minesAt(ctx, hex).filter((mine) => mine.side === side && !mine.cleared);
+  }
+
+  function edgeTags(ctx, edge) {
+    const tags = ctx.terrain.edges?.[edge] || [];
+    const list = Array.isArray(tags) ? tags : [tags];
+    return ctx.roadEdges.has(edge) && !list.includes("road") ? [...list, "road"] : list;
+  }
+
+  function hexTags(ctx, hex) {
+    const tags = ctx.terrain.hexes?.[normalizeHex(hex)] || [];
+    return Array.isArray(tags) ? tags : [tags];
+  }
+
+  function hexDirection(origin, target) {
+    return neighbors(origin).indexOf(normalizeHex(target));
+  }
+
+  function roadModeZocHexes(unit) {
+    const facing = unit.road_facing ?? unit.facing;
+    if (!unit.road_mode || facing == null) return [];
+    const nbs = neighbors(unit.hex);
+    return [nbs[Number(facing)], nbs[(Number(facing) + 3) % 6]].filter(Boolean);
+  }
+
+  function zocHexes(unit) {
+    if (!isCombatUnit(unit)) return [];
+    return unit.road_mode ? roadModeZocHexes(unit) : neighbors(unit.hex);
+  }
+
+  function enemyZocSources(ctx, side, hex, options = {}) {
+    const hx = normalizeHex(hex);
+    return new Set(enemyUnits(ctx, side)
+      .filter((unit) => options.ignoreUnitId !== unit.id)
+      .filter((unit) => zocHexes(unit).includes(hx))
+      .map((unit) => unit.id));
+  }
+
+  function occupiedByEnemy(ctx, side) {
+    return unitsByHex(ctx, enemyUnits(ctx, side));
+  }
+
+  function occupiedByFriendly(ctx, side) {
+    return unitsByHex(ctx, unitsArray(ctx).filter((unit) => unit.side === side && !unit.eliminated && isMapCounter(unit)));
+  }
+
+  function terrainKeyForMove(ctx, unit, target) {
+    const tags = hexTags(ctx, target);
+    if (tags.includes("sea") || tags.includes("all_sea")) return "sea";
+    if (enemyMinesAt(ctx, unit.side, target).length && !isEngineer(unit)) return "enemy_minefield";
+    if (tags.includes("depression")) return "depression";
+    if (tags.includes("hill_or_ridge")) return "hill_or_ridge";
+    return "clear";
+  }
+
+  function stepMovementCost(ctx, unit, origin, target, options = {}) {
+    const edge = normalizeEdge(origin, target);
+    const tags = edgeTags(ctx, edge);
+    const roadMode = options.mode === "road";
+    const mechanized = isMechanized(ctx, unit);
+    if (tags.includes("sea") || hexTags(ctx, target).includes("all_sea")) {
+      return { cost: Infinity, reason: `${origin} -> ${target} 是不可通过海边/海域` };
+    }
+    if (roadMode) {
+      if (!tags.includes("road")) return { cost: Infinity, reason: "道路模式必须沿道路移动" };
+      if (hexTags(ctx, target).includes("hill_or_ridge")) return { cost: Infinity, reason: "道路模式不能进入 ridge hex" };
+      if (enemyMinesAt(ctx, unit.side, target).length) return { cost: Infinity, reason: "道路模式不能进入敌方雷区" };
+      return { cost: 1, terrain: "road_mode", road: true };
+    }
+    const key = tags.includes("road") ? "clear" : terrainKeyForMove(ctx, unit, target);
+    const table = ctx.rules.movement?.terrain_costs || DEFAULT_RULES.movement.terrain_costs;
+    const value = table?.[key]?.[mechanized ? "mechanized" : "non_mechanized"];
+    if (value == null) return { cost: Infinity, reason: `${target} 是禁止进入地形` };
+    return { cost: Number(value || ctx.rules.movement.default_hex_cost || 1), terrain: tags.includes("road") ? "clear_road" : key, road: tags.includes("road") };
+  }
+
+  function effectiveMovement(ctx, unit) {
+    let value = Number(unit.movement || 0);
+    const supply = unit.supply_state || (unit.id ? supplyState(ctx, unit.id) : "supplied");
+    if (supply === "unsupplied" || supply === "isolated") value = Math.floor(value / 2);
+    return Math.max(0, value);
+  }
+
+  function movementAllowance(ctx, unit, options = {}) {
+    const base = effectiveMovement(ctx, unit);
+    if (options.mode !== "road") return base;
+    return Math.floor(base * Number(ctx.rules.movement?.road_mode?.multiplier || 5));
+  }
+
+  function effectiveAttack(ctx, unit) {
+    let value = Number(unit.attack || 0);
+    const supply = unit.supply_state || (unit.id ? supplyState(ctx, unit.id) : "supplied");
+    if (ctx.state.scenario === "september" && Number(ctx.state.turn || 1) === 1 && unit.side === "axis") value *= 2;
+    if (unit.road_mode) value = Math.floor(value / 2);
+    if (supply === "partially_supplied" || supply === "unsupplied") value = Math.floor(value / 2);
+    if (supply === "isolated") value = 0;
+    return Math.max(0, value);
+  }
+
+  function effectiveDefense(ctx, unit, hex = unit.hex) {
+    let value = Number(unit.defense ?? unit.attack ?? 0);
+    const supply = unit.supply_state || (unit.id ? supplyState(ctx, unit.id) : "supplied");
+    if (unit.road_mode) value = Math.floor(value / 2);
+    if (supply === "isolated") value = Math.floor(value / 2);
+    if (friendlyMinesAt(ctx, unit.side, hex).length) value *= 2;
+    return Math.max(supply === "isolated" ? 1 : 0, value);
+  }
+
+  function checkStacking(ctx, sourceState = ctx.state, options = {}) {
+    const checkedHexes = options.hexes ? new Set(options.hexes.map(normalizeHex)) : null;
+    const grouped = unitsByHex(
+      ctx,
+      Object.entries(sourceState.units || {})
+        .map(([id, unit]) => ({ ...unit, id }))
+        .filter((unit) => isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))
+    );
+    const issues = [];
+    for (const [hex, units] of Object.entries(grouped)) {
+      if (checkedHexes && !checkedHexes.has(hex)) continue;
+      const sides = new Set(units.map((unit) => unit.side).filter(isPlayableSide));
+      if (ctx.rules.stacking.one_side_per_hex && sides.size > 1) issues.push(`${hex}: 敌我同格`);
+      for (const side of sides) {
+        const counted = units.filter((unit) => unit.side === side && !isEngineer(unit));
+        const maxUnits = side === "axis"
+          ? Number(ctx.rules.stacking.axis_max_units_per_hex || 4)
+          : Number(ctx.rules.stacking.allied_max_units_per_hex || 3);
+        if (counted.length > maxUnits) issues.push(`${hex}: ${side} ${counted.length} 个单位，超过 ${maxUnits}`);
+      }
+      const divisions = units.filter((unit) => unit.size === "division" && !isEngineer(unit)).length;
+      if (divisions > Number(ctx.rules.stacking.max_divisions_per_hex || 2)) issues.push(`${hex}: ${divisions} 个师，超过 ${ctx.rules.stacking.max_divisions_per_hex || 2}`);
+      if (units.some((unit) => unit.road_mode) && units.length > 1) issues.push(`${hex}: 道路模式单位不能堆叠`);
+    }
+    return { legal: issues.length === 0, reason: issues.length ? issues.join("\n") : "堆叠合法" };
+  }
+
+  function canMoveInCurrentPhase(ctx, unit) {
+    const kind = phaseKind(ctx.state.phase);
+    if (kind === "initial_movement") return (isCombatUnit(unit) || isEngineer(unit)) && unit.side === ctx.state.active_side;
+    if (kind === "mechanized_movement") {
+      return isCombatUnit(unit) && isMechanized(ctx, unit) && !unit.attacked_this_turn && !unit.attacked_this_phase && unit.side === ctx.state.active_side;
+    }
+    if (kind === "supply_movement") return isSupplyUnit(unit) && unit.side === ctx.state.active_side;
+    return false;
+  }
+
+  function roadIndex(ctx, hex) {
+    return ctx.roadPath.indexOf(normalizeHex(hex));
+  }
+
+  function isRoadHex(ctx, hex) {
+    const hx = normalizeHex(hex);
+    return ctx.roadPath.includes(hx) || Object.keys(ctx.terrain.edges || {}).some((edge) => edge.includes(hx) && edgeTags(ctx, edge).includes("road"));
+  }
+
+  function friendlyUnitsAt(ctx, side, hex, options = {}) {
+    return (occupiedByFriendly(ctx, side)[normalizeHex(hex)] || []).filter((unit) => unit.id !== options.ignoreUnitId);
+  }
+
+  function mayLeaveEnemyZoc(ctx, unit, origin) {
+    if (!enemyZocSources(ctx, unit.side, origin).size) return true;
+    return friendlyUnitsAt(ctx, unit.side, origin, { ignoreUnitId: unit.id }).length > 0;
+  }
+
+  function enteringRoadModeCost(ctx, unit, path, options) {
+    const entering = options.mode === "road" && !unit.road_mode;
+    if (!entering) return { legal: true, cost: 0 };
+    if (supplyState(ctx, unit.id) !== "supplied") return { legal: false, reason: "进入道路模式必须有补给" };
+    if (enemyZocSources(ctx, unit.side, path[0]).size) return { legal: false, reason: "敌 ZOC 中不能进入道路模式" };
+    if (enemyMinesAt(ctx, unit.side, path[0]).length) return { legal: false, reason: "敌方雷区中不能进入道路模式" };
+    if (friendlyUnitsAt(ctx, unit.side, path[0], { ignoreUnitId: unit.id }).length) return { legal: false, reason: "堆叠中不能进入道路模式" };
+    const tags = hexTags(ctx, path[0]);
+    if (tags.includes("depression") || tags.includes("hill_or_ridge")) return { legal: false, reason: "ridge/depression 中不能进入道路模式" };
+    if (isMechanized(ctx, unit) && !isRoadHex(ctx, path[0])) return { legal: false, reason: "机械化单位只能在道路上进入道路模式" };
+    return {
+      legal: true,
+      cost: isMechanized(ctx, unit)
+        ? Number(ctx.rules.movement.road_mode.mechanized_entry_cost || 3)
+        : Number(ctx.rules.movement.road_mode.non_mechanized_entry_cost || 1)
+    };
+  }
+
+  function checkScenarioMoveRestriction(ctx, unit, path) {
+    if (ctx.state.scenario === "october" && unit.side === "axis" && Number(ctx.state.turn || 1) <= 10) {
+      const startCol = Number(path[0].slice(0, 2));
+      const movedWest = path.some((hex) => Number(hex.slice(0, 2)) < startCol);
+      if (movedWest && path.some((hex) => Number(hex.slice(0, 2)) < 18)) {
+        return { legal: false, reason: "October 特殊规则：第 10 回合结束前 Axis 不能向西越过撤退线" };
+      }
+    }
+    if (ctx.state.scenario === "july" && unit.side === "allies" && ctx.state.boxed_areas_active !== false) {
+      const startsBoxed = !!unit.box_restricted || hexTags(ctx, unit.hex).includes("alamein_box");
+      if (startsBoxed && path.some((hex) => !hexTags(ctx, hex).includes("alamein_box"))) {
+        return { legal: false, reason: "July Boxed Area：受限 Allied 单位不能自愿离开方框区域" };
+      }
+    }
+    return { legal: true };
+  }
+
+  function checkMove(ctx, unitId, rawPath, options = {}) {
+    const unit = ctx.state.units?.[unitId];
+    if (!unit) return { legal: false, reason: `未知单位 ${unitId}` };
+    const fullUnit = { ...unit, id: unitId };
+    if (fullUnit.side !== ctx.state.active_side) return { legal: false, reason: `${unitId} 属于 ${fullUnit.side}，当前主动方是 ${ctx.state.active_side}` };
+    if (!canMoveInCurrentPhase(ctx, fullUnit)) return { legal: false, reason: `${ctx.state.phase} 阶段不允许该单位移动` };
+    if ((fullUnit.state || "fresh") !== "fresh") return { legal: false, reason: `${unitId} 已 spent，不能移动` };
+    if (fullUnit.temporary_overstack && phaseKind(ctx.state.phase).includes("movement")) {
+      return { legal: false, reason: `${unitId} 所在堆叠需先修复临时超堆叠` };
+    }
+
+    let path;
+    try { path = rawPath.map(normalizeHex); }
+    catch (error) { return { legal: false, reason: error.message }; }
+    if (path.length < 2) return { legal: false, reason: "路径至少需要起点和终点" };
+    if (normalizeHex(fullUnit.hex) !== path[0]) return { legal: false, reason: `路径起点是 ${path[0]}，但单位在 ${fullUnit.hex}` };
+    if (!mayLeaveEnemyZoc(ctx, fullUnit, path[0])) return { legal: false, reason: "单个单位不能自愿离开敌方 ZOC，必须有友军留守" };
+    if (enemyMinesAt(ctx, fullUnit.side, path[0]).length && !fullUnit.mine_cleared_entry && !isEngineer(fullUnit)) {
+      return { legal: false, reason: `${path[0]} 是敌方雷区，非工兵不能自愿离开，必须先清雷` };
+    }
+    const scenarioRule = checkScenarioMoveRestriction(ctx, fullUnit, path);
+    if (!scenarioRule.legal) return scenarioRule;
+
+    const roadCost = enteringRoadModeCost(ctx, fullUnit, path, options);
+    if (!roadCost.legal) return roadCost;
+    let spent = roadCost.cost;
+    const steps = roadCost.cost ? [{ from: path[0], to: path[0], cost: roadCost.cost, terrain: "enter_road_mode" }] : [];
+    const enemyByHex = occupiedByEnemy(ctx, fullUnit.side);
+    const allowance = movementAllowance(ctx, fullUnit, options);
+
+    for (let i = 1; i < path.length; i += 1) {
+      const origin = path[i - 1];
+      const target = path[i];
+      if (!neighbors(origin).includes(target)) return { legal: false, reason: `${origin} -> ${target} 不是相邻格` };
+      if (enemyByHex[target]) return { legal: false, reason: `${target} 有敌军，不能进入` };
+      if (isSupplyUnit(fullUnit) && enemyMinesAt(ctx, fullUnit.side, target).length) return { legal: false, reason: "补给单位不能进入敌方雷区" };
+      if (!mayLeaveEnemyZoc(ctx, fullUnit, origin)) return { legal: false, reason: "单个单位不能自愿离开敌方 ZOC，必须有友军留守" };
+
+      const cost = stepMovementCost(ctx, fullUnit, origin, target, options);
+      if (!Number.isFinite(cost.cost)) return { legal: false, reason: cost.reason || `${origin} -> ${target} 禁止移动` };
+      spent += cost.cost;
+
+      const originFriendlies = friendlyUnitsAt(ctx, fullUnit.side, origin, { ignoreUnitId: fullUnit.id });
+      const targetFriendlies = friendlyUnitsAt(ctx, fullUnit.side, target, { ignoreUnitId: fullUnit.id });
+      const stackCost = isMechanized(ctx, fullUnit) ? 3 : 1;
+      if (originFriendlies.length) {
+        spent += stackCost;
+        steps.push({ from: origin, to: origin, cost: stackCost, terrain: "leave_stack" });
+      }
+      if (targetFriendlies.length) {
+        spent += stackCost;
+        steps.push({ from: target, to: target, cost: stackCost, terrain: "enter_stack" });
+      }
+
+      steps.push({ from: origin, to: target, cost: cost.cost, terrain: cost.terrain || "clear", road: !!cost.road });
+      if (options.mode === "road" && i > 1) {
+        const previousDirection = hexDirection(path[i - 2], origin);
+        const currentDirection = hexDirection(origin, target);
+        const delta = Math.abs(previousDirection - currentDirection);
+        if (!(delta === 0 || delta === 1 || delta === 5)) return { legal: false, reason: "道路模式每格最多只能转向相邻方向" };
+      }
+      const targetZoc = enemyZocSources(ctx, fullUnit.side, target);
+      if (targetZoc.size && i !== path.length - 1) return { legal: false, reason: `${unitId} 进入敌 ZOC ${target} 后必须停止` };
+    }
+
+    if (spent > allowance) return { legal: false, reason: `移动力 ${allowance}，路径消耗 ${spent}`, details: { spent, allowance } };
+    const projected = clone(ctx.state);
+    projected.units[unitId].hex = path[path.length - 1];
+    projected.units[unitId].road_mode = options.mode === "road";
+    projected.units[unitId].road_facing = path.length > 1 ? hexDirection(path[path.length - 2], path[path.length - 1]) : projected.units[unitId].road_facing;
+    projected.units[unitId].facing = projected.units[unitId].road_facing;
+    const stacking = checkStacking(ctx, projected, { hexes: [path[0], path[path.length - 1]] });
+    if (!stacking.legal) return stacking;
+    return { legal: true, reason: "移动合法", details: { spent, allowance, destination: path[path.length - 1], mode: options.mode || "normal", steps } };
+  }
+
+  function findLegalPath(ctx, unitId, targetHex, options = {}) {
+    const unit = ctx.state.units?.[unitId];
+    if (!unit || !unit.hex) return null;
+    let target;
+    try { target = normalizeHex(targetHex); }
+    catch { return null; }
+    const start = normalizeHex(unit.hex);
+    if (start === target) return [start];
+    const queue = [{ hex: start, path: [start], cost: 0 }];
+    const best = new Map([[start, 0]]);
+    while (queue.length) {
+      queue.sort((a, b) => a.cost - b.cost);
+      const current = queue.shift();
+      for (const nb of neighbors(current.hex)) {
+        const path = [...current.path, nb];
+        const verdict = checkMove(ctx, unitId, path, options);
+        if (!verdict.legal) continue;
+        const spent = Number(verdict.details?.spent || 0);
+        if (best.has(nb) && best.get(nb) <= spent) continue;
+        best.set(nb, spent);
+        if (nb === target) return path;
+        queue.push({ hex: nb, path, cost: spent });
+      }
+    }
+    return null;
+  }
+
+  function reachableHexes(ctx, unitId, options = {}) {
+    const unit = ctx.state.units?.[unitId];
+    if (!unit || !unit.hex) return new Map();
+    const start = normalizeHex(unit.hex);
+    const result = new Map([[start, { cost: 0, path: [start] }]]);
+    const queue = [{ hex: start, path: [start], cost: 0 }];
+    while (queue.length && result.size <= 240) {
+      queue.sort((a, b) => a.cost - b.cost);
+      const current = queue.shift();
+      for (const nb of neighbors(current.hex)) {
+        const path = [...current.path, nb];
+        const verdict = checkMove(ctx, unitId, path, options);
+        if (!verdict.legal) continue;
+        const spent = Number(verdict.details?.spent || 0);
+        if (result.has(nb) && result.get(nb).cost <= spent) continue;
+        result.set(nb, { cost: spent, path });
+        queue.push({ hex: nb, path, cost: spent });
+      }
+    }
+    return result;
+  }
+
+  function supplyBlockedHexes(ctx, side) {
+    const blocked = new Set();
+    const friendlyHexes = new Set(unitsArray(ctx).filter((unit) => unit.side === side && !unit.eliminated && isMapCounter(unit)).map((unit) => normalizeHex(unit.hex)));
+    for (const enemy of enemyUnits(ctx, side)) {
+      blocked.add(normalizeHex(enemy.hex));
+      for (const hx of zocHexes(enemy)) {
+        if (!friendlyHexes.has(hx)) blocked.add(hx);
+      }
+    }
+    for (const mine of mineUnits(ctx).filter((mine) => mine.side === oppositeSide(side))) blocked.add(normalizeHex(mine.hex));
+    for (const [hex, tagsRaw] of Object.entries(ctx.terrain.hexes || {})) {
+      const tags = Array.isArray(tagsRaw) ? tagsRaw : [tagsRaw];
+      if (tags.includes("depression") || tags.includes("sea") || tags.includes("all_sea")) blocked.add(normalizeHex(hex));
+    }
+    return blocked;
+  }
+
+  function edgeSupplySources(ctx, side) {
+    const sources = new Set();
+    const west = side === "axis";
+    for (const [col, bounds] of Object.entries(COLUMN_ROW_BOUNDS)) {
+      if ((west && Number(col) !== 1) || (!west && Number(col) !== 49)) continue;
+      for (let row = bounds[0]; row <= bounds[1]; row += 1) sources.add(`${String(col).padStart(2, "0")}${String(row).padStart(2, "0")}`);
+    }
+    return sources;
+  }
+
+  function roadMarkerHex(ctx, side) {
+    const marker = ctx.state.road_supply_markers?.[side];
+    if (marker) return normalizeHex(marker);
+    const markerUnit = unitsArray(ctx).find((unit) => unit.side === side && /supply.vanguard|vanguard/i.test(`${unit.name || ""} ${unit.image || ""}`) && unit.hex);
+    return markerUnit ? normalizeHex(markerUnit.hex) : null;
+  }
+
+  function activeRoadSegment(ctx, side) {
+    const marker = roadMarkerHex(ctx, side);
+    if (!marker) return new Set();
+    const markerIndex = roadIndex(ctx, marker);
+    if (markerIndex < 0) return new Set();
+    const range = side === "axis"
+      ? ctx.roadPath.slice(0, markerIndex + 1)
+      : ctx.roadPath.slice(markerIndex);
+    const blocked = supplyBlockedHexes(ctx, side);
+    const segment = new Set();
+    for (const hex of range) {
+      if (blocked.has(hex) && hex !== marker) break;
+      segment.add(hex);
+    }
+    return segment;
+  }
+
+  function supplyDistancesFromSources(ctx, side, sources) {
+    const blocked = supplyBlockedHexes(ctx, side);
+    const distances = new Map();
+    const queue = [];
+    for (const source of sources) {
+      if (!source || !onMap(source)) continue;
+      distances.set(normalizeHex(source), 0);
+      queue.push(normalizeHex(source));
+    }
+    while (queue.length) {
+      const hex = queue.shift();
+      const distance = distances.get(hex);
+      for (const nb of neighbors(hex)) {
+        if (distances.has(nb)) continue;
+        if (blocked.has(nb) && !sources.has(nb)) continue;
+        distances.set(nb, distance + 1);
+        queue.push(nb);
+      }
+    }
+    return distances;
+  }
+
+  function buildSupplyNetwork(ctx, side) {
+    const edgeSources = edgeSupplySources(ctx, side);
+    const roadSources = activeRoadSegment(ctx, side);
+    const baseSources = new Set([...edgeSources, ...roadSources]);
+    const sources = new Set(baseSources);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const distances = supplyDistancesFromSources(ctx, side, sources);
+      for (const unit of unitsArray(ctx).filter((item) => item.side === side && isSupplyUnit(item))) {
+        const hx = normalizeHex(unit.hex);
+        if (!sources.has(hx) && distances.has(hx) && distances.get(hx) <= 4) {
+          sources.add(hx);
+          changed = true;
+        }
+      }
+    }
+    const unitSources = new Set([...sources].filter((hex) => !baseSources.has(hex)));
+    return {
+      sources,
+      unitSources,
+      baseSources,
+      roadSources,
+      edgeSources,
+      distances: supplyDistancesFromSources(ctx, side, sources),
+      edgeDistances: supplyDistancesFromSources(ctx, side, edgeSources),
+      roadDistances: supplyDistancesFromSources(ctx, side, roadSources),
+      unitDistances: supplyDistancesFromSources(ctx, side, unitSources)
+    };
+  }
+
+  function supplyState(ctx, unitId, network = null) {
+    const raw = ctx.state.units?.[unitId];
+    if (!raw) return "unknown";
+    if (raw.eliminated) return "eliminated";
+    const unit = { ...raw, id: unitId };
+    if (ctx.state.scenario === "july" && unit.side === "allies" && hexTags(ctx, unit.hex).includes("alamein_box")) return "supplied";
+    const net = network || buildSupplyNetwork(ctx, unit.side);
+    const start = normalizeHex(unit.hex);
+    const distance = net.distances.get(start);
+    if (distance == null) return "isolated";
+    const roadRange = isSupplyUnit(unit) ? 4 : 6;
+    const genericRange = isSupplyUnit(unit) ? 4 : Number(unit.attack_supply_range || 6);
+    const edgeDistance = net.edgeDistances?.get(start);
+    if (edgeDistance != null && edgeDistance <= 4) return "supplied";
+    const roadDistance = net.roadDistances?.get(start);
+    if (roadDistance != null && roadDistance <= roadRange) return "supplied";
+    const unitDistance = net.unitDistances?.get(start);
+    if (unitDistance != null && unitDistance <= genericRange) return "supplied";
+    if (
+      (edgeDistance != null && edgeDistance <= 8) ||
+      (roadDistance != null && roadDistance <= roadRange * 2) ||
+      (unitDistance != null && unitDistance <= genericRange * 2)
+    ) return "partially_supplied";
+    return "unsupplied";
+  }
+
+  function checkSupply(ctx, side = ctx.state.active_side) {
+    const result = {};
+    const network = buildSupplyNetwork(ctx, side);
+    for (const unit of unitsArray(ctx).filter((item) => item.side === side && (isCombatUnit(item) || isSupplyUnit(item) || isEngineer(item)))) {
+      result[unit.id] = supplyState(ctx, unit.id, network);
+    }
+    return result;
+  }
+
+  function traceSupplyPath(ctx, unitId) {
+    const unit = ctx.state.units?.[unitId];
+    if (!unit || !unit.hex || !isPlayableSide(unit.side)) return [];
+    const network = buildSupplyNetwork(ctx, unit.side);
+    const start = normalizeHex(unit.hex);
+    if (!network.distances.has(start)) return [];
+    const sources = new Set([...network.sources].map(normalizeHex));
+    const path = [start];
+    let current = start;
+    let guard = 0;
+    while (!sources.has(current) && guard < 240) {
+      guard += 1;
+      const distance = network.distances.get(current);
+      const next = neighbors(current)
+        .filter((hex) => network.distances.has(hex))
+        .sort((a, b) => network.distances.get(a) - network.distances.get(b))[0];
+      if (!next || network.distances.get(next) >= distance) break;
+      path.push(next);
+      current = next;
+    }
+    return sources.has(current) ? path : [];
+  }
+
+  function combatOddsColumn(ctx, attack, defense) {
+    if (defense <= 0) return "7-1";
+    const columns = ctx.rules.combat?.odds_columns || DEFAULT_RULES.combat.odds_columns;
+    const ratios = { "1-4": 0.25, "1-3": 1 / 3, "1-2": 0.5, "1-1": 1, "2-1": 2, "3-1": 3, "4-1": 4, "5-1": 5, "6-1": 6, "7-1": 7 };
+    const value = attack / defense;
+    if (value < ratios["1-4"]) return "1-4";
+    let chosen = columns[0];
+    for (const column of columns) if (value >= ratios[column]) chosen = column;
+    return chosen;
+  }
+
+  function adjacentCombats(ctx, side = ctx.state.active_side) {
+    const enemyByHex = unitsByHex(ctx, enemyUnits(ctx, side));
+    const pairs = [];
+    for (const unit of friendlyUnits(ctx, side)) {
+      for (const nb of neighbors(unit.hex)) {
+        if (enemyByHex[nb]) pairs.push({ attacker: unit.id, attacker_hex: normalizeHex(unit.hex), defender_hex: nb, defenders: enemyByHex[nb].map((item) => item.id) });
+      }
+    }
+    return pairs;
+  }
+
+  function requiredDefenderHexes(ctx, attackers) {
+    const side = attackers[0]?.side;
+    const enemyByHex = unitsByHex(ctx, enemyUnits(ctx, side));
+    const required = new Set();
+    for (const attacker of attackers) {
+      for (const nb of neighbors(attacker.hex)) {
+        if (enemyByHex[nb]?.length) required.add(nb);
+      }
+    }
+    return required;
+  }
+
+  function terrainDefenseMultiplier(ctx, hex) {
+    const tags = hexTags(ctx, hex);
+    if (tags.includes("hill_or_ridge")) return 2;
+    return 1;
+  }
+
+  function terrainDefenseBonus(ctx, hex) {
+    const tags = hexTags(ctx, hex);
+    if (tags.includes("alamein_box")) return 3;
+    return 0;
+  }
+
+  function checkCombat(ctx, action) {
+    const side = ctx.state.active_side;
+    if (phaseKind(ctx.state.phase) !== "combat") return { legal: false, reason: "只能在 Combat Phase 结算战斗" };
+    if (!action.attackers?.length) return { legal: false, reason: "请选择攻击单位" };
+    if (!action.defender_hexes?.length) return { legal: false, reason: "请选择防御 hex" };
+    let defenderHexes;
+    try { defenderHexes = action.defender_hexes.map(normalizeHex); }
+    catch (error) { return { legal: false, reason: error.message }; }
+    const attackers = action.attackers.map((id) => ({ ...(ctx.state.units?.[id] || {}), id })).filter((unit) => ctx.state.units?.[unit.id]);
+    if (attackers.length !== action.attackers.length) return { legal: false, reason: "攻击单位包含未知 id" };
+    if (attackers.some((unit) => unit.side !== side)) return { legal: false, reason: "攻击单位必须属于当前主动方" };
+    if (attackers.some((unit) => !isCombatUnit(unit))) return { legal: false, reason: "只有作战单位可以攻击" };
+    if (attackers.some((unit) => unit.state !== "fresh" || unit.attacked_this_turn || unit.attacked_this_phase)) return { legal: false, reason: "已行动或已攻击单位不能再次攻击" };
+    if (attackers.some((unit) => supplyState(ctx, unit.id) === "isolated")) return { legal: false, reason: "孤立单位不能攻击" };
+    if (attackers.some((unit) => enemyMinesAt(ctx, unit.side, unit.hex).length && !unit.mine_cleared_entry)) return { legal: false, reason: "位于未清除敌方雷区中的单位不能攻击" };
+    if (attackers.some((unit) => unit.just_cleared_mine_hex && normalizeHex(unit.hex) === normalizeHex(unit.just_cleared_mine_hex))) return { legal: false, reason: "本玩家回合刚清除雷区的单位不能从该 hex 攻击" };
+    if (attackers.some((unit) => !defenderHexes.some((hex) => neighbors(unit.hex).includes(hex)))) {
+      return { legal: false, reason: "每个攻击单位必须邻接至少一个本次攻击的防御 hex" };
+    }
+
+    const enemyByHex = unitsByHex(ctx, enemyUnits(ctx, side));
+    const defenders = [];
+    for (const hex of defenderHexes) {
+      const stack = enemyByHex[hex] || [];
+      if (!stack.length) return { legal: false, reason: `${hex} 没有敌军` };
+      if (!attackers.some((unit) => neighbors(unit.hex).includes(hex))) return { legal: false, reason: `没有攻击单位邻接 ${hex}` };
+      if (stack.some((unit) => unit.defended_this_phase)) return { legal: false, reason: `${hex} 中已有单位本阶段防御过` };
+      defenders.push(...stack);
+    }
+
+    const required = requiredDefenderHexes(ctx, attackers);
+    const missing = [...required].filter((hex) => !defenderHexes.includes(hex));
+    if (missing.length) return { legal: false, reason: "相邻敌军必须一并攻击", details: { missing } };
+    const mineTargetCount = defenderHexes.filter((hex) => friendlyMinesAt(ctx, oppositeSide(side), hex).length || enemyMinesAt(ctx, side, hex).length).length;
+    if (mineTargetCount && defenderHexes.length > 1) return { legal: false, reason: "不能在同一次攻击中同时攻击雷区内敌军和其他 hex" };
+
+    const attack = attackers.reduce((sum, unit) => sum + effectiveAttack(ctx, unit), 0);
+    let defense = 0;
+    for (const defender of defenders) {
+      const hex = normalizeHex(defender.hex);
+      defense += effectiveDefense(ctx, defender, hex) * terrainDefenseMultiplier(ctx, hex);
+    }
+    defense += defenderHexes.reduce((sum, hex) => sum + terrainDefenseBonus(ctx, hex), 0);
+    const column = combatOddsColumn(ctx, attack, defense);
+    const outcome = action.die ? ctx.rules.combat?.crt?.[String(action.die)]?.[(ctx.rules.combat?.odds_columns || DEFAULT_RULES.combat.odds_columns).indexOf(column)] : null;
+    const ruggedDefense = defenderHexes.some((hex) => hexTags(ctx, hex).includes("hill_or_ridge"));
+    const finalOutcome = ruggedDefense && /^D[123]$/.test(outcome || "") ? "No Effect" : outcome;
+    return {
+      legal: true,
+      reason: "战斗合法",
+      details: {
+        attack,
+        defense,
+        odds_column: column,
+        die: action.die,
+        outcome: finalOutcome,
+        raw_outcome: outcome,
+        attackers: attackers.map((unit) => unit.id),
+        defender_hexes: defenderHexes,
+        defenders: defenders.map((unit) => unit.id),
+        rugged_defense: ruggedDefense
+      }
+    };
+  }
+
+  function legalRetreatHex(ctx, unit, hex) {
+    if (occupiedByEnemy(ctx, unit.side)[hex]) return false;
+    if (enemyZocSources(ctx, unit.side, hex).size) return false;
+    if (hexTags(ctx, hex).includes("sea") || hexTags(ctx, hex).includes("all_sea")) return false;
+    if (enemyMinesAt(ctx, unit.side, hex).length) return false;
+    return true;
+  }
+
+  function bestRetreatHex(ctx, unit, current, enemySide) {
+    const edgeSources = edgeSupplySources(ctx, unit.side);
+    const score = (hex) => {
+      const tags = hexTags(ctx, hex);
+      const friendlies = friendlyUnitsAt(ctx, unit.side, hex, { ignoreUnitId: unit.id }).length;
+      const clear = tags.includes("hill_or_ridge") || tags.includes("depression") ? 1 : 0;
+      const friendlyMine = friendlyMinesAt(ctx, unit.side, hex).length ? 0 : 1;
+      const sourceDistance = Math.min(...[...edgeSources].map((source) => hexDistance(hex, source)).slice(0, 20));
+      return sourceDistance * 10 + clear * 3 + friendlyMine + friendlies;
+    };
+    return neighbors(current).filter((hex) => legalRetreatHex(ctx, unit, hex)).sort((a, b) => score(a) - score(b))[0] || null;
+  }
+
+  function hexDistance(a, b) {
+    const [ac, ar] = splitHex(a);
+    const [bc, br] = splitHex(b);
+    return Math.abs(ac - bc) + Math.abs(ar - br);
+  }
+
+  function retreatUnits(ctx, unitIds, count, enemySide) {
+    const eliminated = [];
+    const retreated = [];
+    const overstacked = [];
+    for (const id of unitIds) {
+      const unit = ctx.state.units[id];
+      if (!unit || unit.eliminated) continue;
+      let current = normalizeHex(unit.hex);
+      let failed = false;
+      for (let step = 0; step < count; step += 1) {
+        const next = bestRetreatHex(ctx, { ...unit, id, hex: current }, current, enemySide);
+        if (!next) {
+          failed = true;
+          break;
+        }
+        current = next;
+      }
+      if (failed) {
+        unit.eliminated = true;
+        unit.eliminated_reason = "blocked_retreat";
+        eliminated.push(id);
+      }
+      else {
+        unit.hex = current;
+        const stack = checkStacking(ctx, ctx.state, { hexes: [current] });
+        if (!stack.legal) {
+          unit.temporary_overstack = true;
+          overstacked.push(id);
+        }
+        retreated.push(id);
+      }
+    }
+    return { eliminated, retreated, overstacked };
+  }
+
+  function eliminateUnits(ctx, unitIds, reason) {
+    const eliminated = [];
+    for (const id of unitIds) {
+      const unit = ctx.state.units[id];
+      if (!unit || unit.eliminated) continue;
+      unit.eliminated = true;
+      unit.eliminated_reason = reason;
+      unit.eliminated_turn = Number(ctx.state.turn || 1);
+      unit.eliminated_phase = ctx.state.phase;
+      eliminated.push(id);
+    }
+    return eliminated;
+  }
+
+  function exchangeLosses(ctx, attackerIds, defenderIds) {
+    const defenderStrength = defenderIds.reduce((sum, id) => sum + Number(ctx.state.units[id]?.defense || ctx.state.units[id]?.attack || 0), 0);
+    const eliminatedDefenders = eliminateUnits(ctx, defenderIds, "exchange");
+    let removed = 0;
+    const eliminatedAttackers = [];
+    for (const id of [...attackerIds].sort((a, b) => Number(ctx.state.units[b]?.attack || 0) - Number(ctx.state.units[a]?.attack || 0))) {
+      if (removed >= defenderStrength) break;
+      removed += Number(ctx.state.units[id]?.attack || 0);
+      eliminatedAttackers.push(...eliminateUnits(ctx, [id], "exchange"));
+    }
+    return { eliminated_attackers: eliminatedAttackers, eliminated_defenders: eliminatedDefenders };
+  }
+
+  function advanceAfterCombat(ctx, unitIds, targetHex) {
+    const target = normalizeHex(targetHex);
+    if (hexTags(ctx, target).includes("hill_or_ridge") || hexTags(ctx, target).includes("depression")) return null;
+    const first = unitIds.find((id) => ctx.state.units[id] && !ctx.state.units[id].eliminated && neighbors(ctx.state.units[id].hex).includes(target));
+    if (!first) return null;
+    ctx.state.units[first].hex = target;
+    ctx.state.units[first].road_mode = false;
+    ctx.state.units[first].road_facing = null;
+    return first;
+  }
+
+  function resolveCombat(ctx, action) {
+    const verdict = checkCombat(ctx, action);
+    if (!verdict.legal) return verdict;
+    if (!action.die) return { legal: false, reason: "结算战斗需要选择骰子" };
+    const outcome = verdict.details.outcome;
+    const attackerIds = verdict.details.attackers;
+    const defenderIds = verdict.details.defenders;
+    for (const id of attackerIds) {
+      ctx.state.units[id].attacked_this_turn = true;
+      ctx.state.units[id].attacked_this_phase = true;
+      ctx.state.units[id].state = "spent";
+      if (ctx.state.units[id].road_mode) {
+        ctx.state.units[id].road_mode = false;
+        ctx.state.units[id].road_facing = null;
+      }
+    }
+    for (const id of defenderIds) ctx.state.units[id].defended_this_phase = true;
+    const effects = { outcome, eliminated: [], retreated: [], advanced: null, exchange: null };
+    if (/^A[123]$/.test(outcome)) effects.retreated = retreatUnits(ctx, attackerIds, Number(outcome.slice(1)), oppositeSide(ctx.state.active_side));
+    else if (/^D[123]$/.test(outcome)) {
+      effects.retreated = retreatUnits(ctx, defenderIds, Number(outcome.slice(1)), ctx.state.active_side);
+      effects.advanced = advanceAfterCombat(ctx, attackerIds, verdict.details.defender_hexes[0]);
+    }
+    else if (outcome === "Ae") effects.eliminated = eliminateUnits(ctx, attackerIds, "combat");
+    else if (outcome === "De") {
+      effects.eliminated = eliminateUnits(ctx, defenderIds, "combat");
+      effects.advanced = advanceAfterCombat(ctx, attackerIds, verdict.details.defender_hexes[0]);
+    }
+    else if (outcome === "Ex") {
+      effects.exchange = exchangeLosses(ctx, attackerIds, defenderIds);
+      effects.advanced = advanceAfterCombat(ctx, attackerIds.filter((id) => !ctx.state.units[id].eliminated), verdict.details.defender_hexes[0]);
+    }
+    return { legal: true, reason: `战斗已结算：${outcome}`, details: { ...verdict.details, effects } };
+  }
+
+  function clearMine(ctx, unitId, rawHex, die = null) {
+    const unit = ctx.state.units?.[unitId];
+    if (!unit) return { legal: false, reason: "请选择清雷单位" };
+    const full = { ...unit, id: unitId };
+    if (full.side !== ctx.state.active_side) return { legal: false, reason: "只能使用当前主动方单位清雷" };
+    const hex = normalizeHex(rawHex);
+    const mines = enemyMinesAt(ctx, full.side, hex);
+    if (!mines.length) return { legal: false, reason: `${hex} 没有敌方雷区` };
+    if (full.mine_cleared_this_turn || full.cleared_mine_this_turn) return { legal: false, reason: "该单位本回合已清雷" };
+    if (isEngineer(full)) {
+      if (phaseKind(ctx.state.phase) !== "initial_movement") return { legal: false, reason: "工兵清雷应在初始移动阶段进入雷区时发生" };
+      if (![normalizeHex(full.hex), ...neighbors(full.hex)].includes(hex)) return { legal: false, reason: "工兵必须在雷区内或相邻 hex" };
+    }
+    else {
+      if (!isCombatUnit(full)) return { legal: false, reason: "只有工兵或战斗单位可以清雷" };
+      if (phaseKind(ctx.state.phase) !== "combat") return { legal: false, reason: "战斗单位只能在战斗阶段开始尝试清雷" };
+      if (normalizeHex(full.hex) !== hex) return { legal: false, reason: "战斗单位必须位于敌方雷区内才能尝试清雷" };
+      if (die == null) return { legal: false, reason: "战斗单位清雷需要骰子" };
+      if ((full.side === "allies" && Number(die) === 1) || (full.side === "axis" && Number(die) <= 2)) {
+        unit.mine_cleared_this_turn = true;
+        unit.cleared_mine_this_turn = true;
+        return { legal: true, reason: `清雷失败，骰子 ${die}`, details: { unit: unitId, mine_hex: hex, die: Number(die), cleared: false, removed: [] } };
+      }
+    }
+    for (const mine of mines) {
+      const stateMine = ctx.state.units[mine.id];
+      stateMine.eliminated = true;
+      stateMine.cleared = true;
+      stateMine.eliminated_reason = "mine_cleared";
+      stateMine.cleared_by_side = full.side;
+      stateMine.cleared_turn = Number(ctx.state.turn || 1);
+      stateMine.cleared_phase = ctx.state.phase;
+    }
+    unit.mine_cleared_this_turn = true;
+    unit.cleared_mine_this_turn = true;
+    unit.just_cleared_mine_hex = hex;
+    return { legal: true, reason: `已清除 ${hex} 敌方雷区`, details: { unit: unitId, mine_hex: hex, removed: mines.map((mine) => mine.id) } };
+  }
+
+  function calculateVictoryPoints(ctx) {
+    const scenario = ctx.state.scenario || "custom";
+    const breakdown = [];
+    let vp = scenarioStartingVp(scenario, Number(ctx.state.victory_points || 0));
+    breakdown.push({ id: "scenario_start", label: `${scenario} 初始 VP`, points: vp });
+    const alliedCombatEliminated = unitsArray(ctx).filter((unit) => unit.eliminated && unit.side === "allies" && (unit.kind || "ground") === "ground" && ["combat", "blocked_retreat"].includes(unit.eliminated_reason || ""));
+    if (alliedCombatEliminated.length) {
+      vp += alliedCombatEliminated.length;
+      breakdown.push({ id: "allied_combat_eliminated", label: "Allied 作战单位因 Ae/De/阻断撤退被消灭", points: alliedCombatEliminated.length, units: alliedCombatEliminated.map((unit) => unit.id) });
+    }
+    const isolatedEliminated = unitsArray(ctx).filter((unit) => unit.eliminated && unit.side === "allies" && (unit.kind || "ground") === "ground" && unit.eliminated_reason === "isolation");
+    if (isolatedEliminated.length) {
+      vp += isolatedEliminated.length;
+      breakdown.push({ id: "allied_isolated_eliminated", label: "Allied 作战单位因孤立被消灭", points: isolatedEliminated.length, units: isolatedEliminated.map((unit) => unit.id) });
+    }
+    if (scenario === "july") {
+      const eastAxis = unitsArray(ctx).filter((unit) => isMapCounter(unit) && !unit.eliminated && unit.side === "axis" && (unit.kind || "ground") === "ground" && unit.hex && Number(unit.hex.slice(0, 2)) > 34 && ["supplied", "partially_supplied"].includes(supplyState(ctx, unit.id)));
+      const farthestCol = eastAxis.reduce((max, unit) => Math.max(max, Number(unit.hex.slice(0, 2))), 34);
+      const points = Math.max(0, farthestCol - 34) * 3;
+      if (points) {
+        vp += points;
+        breakdown.push({ id: "july_east_of_3400", label: "July: Axis 最东补给/部分补给作战单位超过 3400 列", points, farthest_column: farthestCol });
+      }
+    }
+    if (scenario === "september") {
+      const cleared = unitsArray(ctx).filter((unit) => unit.kind === "mine" && unit.side === "allies" && unit.eliminated && unit.eliminated_reason === "mine_cleared" && unit.cleared_by_side === "axis");
+      if (cleared.length) {
+        const points = cleared.length * 3;
+        vp += points;
+        breakdown.push({ id: "september_axis_cleared_mines", label: "September: Axis 清除 Allied 雷区", points, mines: cleared.map((unit) => unit.id) });
+      }
+    }
+    if (scenario === "october") {
+      const exited = unitsArray(ctx).filter((unit) => unit.side === "axis" && unit.eliminated !== true && (unit.exited_edge || unit.exit_edge || unit.exited) === "west" && Number(unit.exited_turn || unit.exit_turn || 0) > 10);
+      const supply = exited.filter((unit) => unit.kind === "supply");
+      const combat = exited.filter((unit) => (unit.kind || "ground") === "ground");
+      if (supply.length) {
+        const points = supply.length * 10;
+        vp += points;
+        breakdown.push({ id: "october_supply_exited_west", label: "October: Axis Supply units 在 Turn 10 后从西边撤出", points, units: supply.map((unit) => unit.id) });
+      }
+      const combatPoints = combat.reduce((sum, unit) => sum + Number(unit.attack || unit.defense || 0), 0);
+      if (combatPoints) {
+        vp += combatPoints;
+        breakdown.push({ id: "october_combat_exited_west", label: "October: Axis Combat units 在 Turn 10 后从西边撤出", points: combatPoints, units: combat.map((unit) => unit.id) });
+      }
+    }
+    return { victory_points: vp, breakdown };
+  }
+
+  function victoryLevel(vp) {
+    if (vp >= 60) return { winner: "axis", label: "Axis Decisive" };
+    if (vp >= 50) return { winner: "axis", label: "Axis Substantive" };
+    if (vp >= 40) return { winner: "axis", label: "Axis Marginal" };
+    if (vp >= 30) return { winner: null, label: "Draw" };
+    if (vp >= 20) return { winner: "allies", label: "Allied Marginal" };
+    if (vp >= 10) return { winner: "allies", label: "Allied Substantive" };
+    return { winner: "allies", label: "Allied Decisive" };
+  }
+
+  function checkVictory(ctx) {
+    const result = calculateVictoryPoints(ctx);
+    const level = victoryLevel(result.victory_points);
+    const final = ctx.state.phase === "end_game_turn" && Number(ctx.state.turn || 1) >= scenarioFinalTurn(ctx.state.scenario);
+    return {
+      winner: final ? level.winner : null,
+      level: level.label,
+      final,
+      final_turn: scenarioFinalTurn(ctx.state.scenario),
+      reason: final
+        ? `${level.label} (${result.victory_points} VP)`
+        : `未到最终结算：当前预计 ${level.label} (${result.victory_points} VP)，${ctx.state.scenario || "custom"} 场景最终 Turn ${scenarioFinalTurn(ctx.state.scenario)} 的 End of Game-Turn 判定`,
+      ...result
+    };
+  }
+
+  function nextPhase(ctx) {
+    const sequence = ctx.rules.turn_sequence || DEFAULT_RULES.turn_sequence;
+    const current = sequence.indexOf(ctx.state.phase);
+    let next = sequence[(current + 1) % sequence.length] || sequence[0];
+    const skip = SCENARIO_META[ctx.state.scenario]?.skip_phases?.find((item) => item.turn === Number(ctx.state.turn || 1) && item.phase === next);
+    if (skip) next = skip.next;
+    const turnEnds = ctx.state.phase === "end_game_turn" || next === sequence[0];
+    return { phase: next, turn_increment: turnEnds ? 1 : 0, active_side: phaseSide(next) || ctx.state.active_side };
+  }
+
+  function applyStateDefaults(state) {
+    state.rules_version ||= "first-alamein-standard-v1";
+    state.scenario_meta = { ...(SCENARIO_META[state.scenario] || {}), ...(state.scenario_meta || {}), standard_scenario_only: true };
+    if (state.scenario === "october" && (!state.phase || state.phase === "axis_initial_movement")) {
+      state.phase = "allies_initial_movement";
+      state.active_side = "allies";
+    }
+    state.road_supply_markers ||= {};
+    for (const side of ["axis", "allies"]) {
+      const marker = roadMarkerHex(createContext({ state, rules: DEFAULT_RULES, terrain: {} }), side);
+      if (marker) state.road_supply_markers[side] ||= marker;
+    }
+    for (const [id, unit] of Object.entries(state.units || {})) {
+      unit.supply_state ||= "supplied";
+      unit.road_mode = !!unit.road_mode;
+      unit.road_facing ??= unit.facing ?? null;
+      unit.attacked_this_turn = !!unit.attacked_this_turn;
+      unit.attacked_this_phase = !!unit.attacked_this_phase;
+      unit.defended_this_phase = !!unit.defended_this_phase;
+      unit.mine_cleared_this_turn = !!(unit.mine_cleared_this_turn || unit.cleared_mine_this_turn);
+      unit.cleared_mine_this_turn = unit.mine_cleared_this_turn;
+      unit.engineer_assisted_this_turn = !!unit.engineer_assisted_this_turn;
+      if (state.scenario === "july" && unit.side === "allies" && unit.hex) unit.box_restricted ??= false;
+      if (id) unit.id = id;
+    }
+    return state;
+  }
+
+  return {
+    COLUMN_ROW_BOUNDS,
+    DEFAULT_RULES,
+    SCENARIO_META,
+    DEFAULT_ROAD_PATH,
+    createContext,
+    normalizeHex,
+    splitHex,
+    onMap,
+    neighbors,
+    normalizeEdge,
+    oppositeSide,
+    phaseSide,
+    phaseKind,
+    scenarioFinalTurn,
+    scenarioStartingVp,
+    isPlayableSide,
+    isTrackMarker,
+    isMapCounter,
+    isEngineer,
+    isCombatUnit,
+    isSupplyUnit,
+    isMechanized,
+    unitsArray,
+    unitsByHex,
+    combatUnitsArray,
+    friendlyUnits,
+    enemyUnits,
+    mineUnits,
+    minesByHex,
+    minesAt,
+    enemyMinesAt,
+    friendlyMinesAt,
+    edgeTags,
+    hexTags,
+    hexDirection,
+    zocHexes,
+    enemyZocSources,
+    stepMovementCost,
+    movementAllowance,
+    effectiveMovement,
+    effectiveAttack,
+    effectiveDefense,
+    checkStacking,
+    canMoveInCurrentPhase,
+    checkMove,
+    findLegalPath,
+    reachableHexes,
+    supplyBlockedHexes,
+    buildSupplyNetwork,
+    supplyState,
+    checkSupply,
+    traceSupplyPath,
+    combatOddsColumn,
+    adjacentCombats,
+    checkCombat,
+    resolveCombat,
+    clearMine,
+    legalRetreatHex,
+    calculateVictoryPoints,
+    victoryLevel,
+    checkVictory,
+    nextPhase,
+    applyStateDefaults,
+    hexDistance,
+    activeRoadSegment
+  };
+});

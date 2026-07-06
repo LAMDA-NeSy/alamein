@@ -1,0 +1,741 @@
+{
+  "schema_version": 1,
+  "map": {
+    "name": "First Alamein",
+    "coordinate_format": "vassal_numeric_hv_2digit_concat",
+    "zone": "Map",
+    "min_col": 1,
+    "max_col": 49,
+    "min_row": 0,
+    "max_row": 34
+  },
+  "hexes": {
+    "2324": [
+      "depression"
+    ],
+    "2327": [
+      "depression"
+    ],
+    "2328": [
+      "depression"
+    ],
+    "2329": [
+      "depression"
+    ],
+    "2330": [
+      "depression"
+    ],
+    "2331": [
+      "depression"
+    ],
+    "2332": [
+      "depression"
+    ],
+    "2426": [
+      "depression"
+    ],
+    "2427": [
+      "depression"
+    ],
+    "2428": [
+      "depression"
+    ],
+    "2429": [
+      "depression"
+    ],
+    "2430": [
+      "depression"
+    ],
+    "2431": [
+      "depression"
+    ],
+    "2524": [
+      "hill_or_ridge"
+    ],
+    "2526": [
+      "depression"
+    ],
+    "2527": [
+      "depression"
+    ],
+    "2528": [
+      "depression"
+    ],
+    "2529": [
+      "depression"
+    ],
+    "2530": [
+      "depression"
+    ],
+    "2531": [
+      "depression"
+    ],
+    "2623": [
+      "hill_or_ridge"
+    ],
+    "2626": [
+      "depression"
+    ],
+    "2627": [
+      "depression"
+    ],
+    "2628": [
+      "depression"
+    ],
+    "2629": [
+      "depression"
+    ],
+    "2630": [
+      "depression"
+    ],
+    "2723": [
+      "hill_or_ridge"
+    ],
+    "2724": [
+      "hill_or_ridge"
+    ],
+    "2727": [
+      "depression"
+    ],
+    "2728": [
+      "depression"
+    ],
+    "2731": [
+      "depression"
+    ],
+    "2732": [
+      "depression"
+    ],
+    "2809": [
+      "hill_or_ridge"
+    ],
+    "2824": [
+      "hill_or_ridge"
+    ],
+    "2829": [
+      "depression"
+    ],
+    "2830": [
+      "depression"
+    ],
+    "2831": [
+      "depression"
+    ],
+    "2911": [
+      "hill_or_ridge"
+    ],
+    "2924": [
+      "hill_or_ridge"
+    ],
+    "2927": [
+      "depression"
+    ],
+    "2928": [
+      "depression"
+    ],
+    "2929": [
+      "depression"
+    ],
+    "2930": [
+      "depression"
+    ],
+    "2931": [
+      "depression"
+    ],
+    "2932": [
+      "depression"
+    ],
+    "3011": [
+      "hill_or_ridge"
+    ],
+    "3023": [
+      "hill_or_ridge"
+    ],
+    "3027": [
+      "depression"
+    ],
+    "3028": [
+      "depression"
+    ],
+    "3029": [
+      "depression"
+    ],
+    "3030": [
+      "depression"
+    ],
+    "3031": [
+      "depression"
+    ],
+    "3109": [
+      "hill_or_ridge"
+    ],
+    "3112": [
+      "hill_or_ridge"
+    ],
+    "3124": [
+      "hill_or_ridge"
+    ],
+    "3128": [
+      "depression"
+    ],
+    "3129": [
+      "depression"
+    ],
+    "3130": [
+      "depression"
+    ],
+    "3131": [
+      "depression"
+    ],
+    "3224": [
+      "hill_or_ridge"
+    ],
+    "3228": [
+      "depression"
+    ],
+    "3229": [
+      "depression"
+    ],
+    "3230": [
+      "depression"
+    ],
+    "3231": [
+      "depression"
+    ],
+    "3321": [
+      "depression"
+    ],
+    "3328": [
+      "depression"
+    ],
+    "3329": [
+      "depression"
+    ],
+    "3331": [
+      "depression"
+    ],
+    "3414": [
+      "hill_or_ridge"
+    ],
+    "3421": [
+      "depression"
+    ],
+    "3428": [
+      "depression"
+    ],
+    "3429": [
+      "depression"
+    ],
+    "3430": [
+      "depression"
+    ],
+    "3431": [
+      "depression"
+    ],
+    "3515": [
+      "hill_or_ridge"
+    ],
+    "3522": [
+      "depression"
+    ],
+    "3529": [
+      "depression"
+    ],
+    "3530": [
+      "depression"
+    ],
+    "3531": [
+      "depression"
+    ],
+    "3610": [
+      "alamein_box"
+    ],
+    "3611": [
+      "alamein_box"
+    ],
+    "3614": [
+      "hill_or_ridge"
+    ],
+    "3622": [
+      "depression"
+    ],
+    "3626": [
+      "hill_or_ridge"
+    ],
+    "3629": [
+      "depression"
+    ],
+    "3630": [
+      "depression"
+    ],
+    "3711": [
+      "alamein_box"
+    ],
+    "3712": [
+      "alamein_box"
+    ],
+    "3714": [
+      "hill_or_ridge"
+    ],
+    "3715": [
+      "hill_or_ridge"
+    ],
+    "3720": [
+      "depression"
+    ],
+    "3723": [
+      "depression"
+    ],
+    "3727": [
+      "hill_or_ridge"
+    ],
+    "3730": [
+      "depression"
+    ],
+    "3731": [
+      "depression"
+    ],
+    "3811": [
+      "alamein_box"
+    ],
+    "3814": [
+      "hill_or_ridge"
+    ],
+    "3822": [
+      "depression"
+    ],
+    "3830": [
+      "depression"
+    ],
+    "3915": [
+      "hill_or_ridge"
+    ],
+    "3918": [
+      "hill_or_ridge"
+    ],
+    "4017": [
+      "hill_or_ridge"
+    ],
+    "4117": [
+      "hill_or_ridge"
+    ],
+    "4123": [
+      "hill_or_ridge"
+    ],
+    "4216": [
+      "hill_or_ridge"
+    ],
+    "4217": [
+      "hill_or_ridge"
+    ],
+    "4222": [
+      "hill_or_ridge"
+    ],
+    "4223": [
+      "hill_or_ridge"
+    ],
+    "4316": [
+      "hill_or_ridge"
+    ],
+    "4317": [
+      "hill_or_ridge"
+    ],
+    "4415": [
+      "hill_or_ridge"
+    ],
+    "4416": [
+      "hill_or_ridge"
+    ],
+    "4515": [
+      "hill_or_ridge"
+    ],
+    "4615": [
+      "hill_or_ridge"
+    ],
+    "4616": [
+      "hill_or_ridge"
+    ],
+    "4715": [
+      "hill_or_ridge"
+    ],
+    "4814": [
+      "hill_or_ridge"
+    ]
+  },
+  "edges": {
+    "0101-0201": [
+      "road"
+    ],
+    "0201-0302": [
+      "road"
+    ],
+    "0302-0401": [
+      "road"
+    ],
+    "0401-0502": [
+      "road"
+    ],
+    "0502-0601": [
+      "road"
+    ],
+    "0601-0702": [
+      "road"
+    ],
+    "0702-0801": [
+      "road"
+    ],
+    "0801-0902": [
+      "road"
+    ],
+    "0902-1002": [
+      "road"
+    ],
+    "1002-1103": [
+      "road"
+    ],
+    "1103-1202": [
+      "road"
+    ],
+    "1202-1303": [
+      "road"
+    ],
+    "1303-1402": [
+      "road"
+    ],
+    "1402-1503": [
+      "road"
+    ],
+    "1503-1603": [
+      "road"
+    ],
+    "1603-1703": [
+      "road"
+    ],
+    "1703-1802": [
+      "road"
+    ],
+    "1802-1903": [
+      "road"
+    ],
+    "1903-2003": [
+      "road"
+    ],
+    "2003-2104": [
+      "road"
+    ],
+    "2104-2203": [
+      "road"
+    ],
+    "2203-2304": [
+      "road"
+    ],
+    "2304-2404": [
+      "road"
+    ],
+    "2404-2505": [
+      "road"
+    ],
+    "2505-2605": [
+      "axis_retreat_line",
+      "road"
+    ],
+    "2506-2605": [
+      "axis_retreat_line"
+    ],
+    "2506-2606": [
+      "axis_retreat_line"
+    ],
+    "2507-2606": [
+      "axis_retreat_line"
+    ],
+    "2507-2607": [
+      "axis_retreat_line"
+    ],
+    "2508-2607": [
+      "axis_retreat_line"
+    ],
+    "2508-2608": [
+      "axis_retreat_line"
+    ],
+    "2509-2608": [
+      "axis_retreat_line"
+    ],
+    "2509-2609": [
+      "axis_retreat_line"
+    ],
+    "2510-2609": [
+      "axis_retreat_line"
+    ],
+    "2510-2610": [
+      "axis_retreat_line"
+    ],
+    "2511-2610": [
+      "axis_retreat_line"
+    ],
+    "2511-2611": [
+      "axis_retreat_line"
+    ],
+    "2512-2611": [
+      "axis_retreat_line"
+    ],
+    "2512-2612": [
+      "axis_retreat_line"
+    ],
+    "2513-2612": [
+      "axis_retreat_line"
+    ],
+    "2513-2613": [
+      "axis_retreat_line"
+    ],
+    "2514-2613": [
+      "axis_retreat_line"
+    ],
+    "2514-2614": [
+      "axis_retreat_line"
+    ],
+    "2515-2614": [
+      "axis_retreat_line"
+    ],
+    "2515-2615": [
+      "axis_retreat_line"
+    ],
+    "2516-2615": [
+      "axis_retreat_line"
+    ],
+    "2516-2616": [
+      "axis_retreat_line"
+    ],
+    "2517-2616": [
+      "axis_retreat_line"
+    ],
+    "2517-2617": [
+      "axis_retreat_line"
+    ],
+    "2518-2617": [
+      "axis_retreat_line"
+    ],
+    "2518-2618": [
+      "axis_retreat_line"
+    ],
+    "2519-2618": [
+      "axis_retreat_line"
+    ],
+    "2519-2619": [
+      "axis_retreat_line"
+    ],
+    "2520-2619": [
+      "axis_retreat_line"
+    ],
+    "2520-2620": [
+      "axis_retreat_line"
+    ],
+    "2521-2620": [
+      "axis_retreat_line"
+    ],
+    "2521-2621": [
+      "axis_retreat_line"
+    ],
+    "2522-2621": [
+      "axis_retreat_line"
+    ],
+    "2522-2622": [
+      "axis_retreat_line"
+    ],
+    "2523-2622": [
+      "axis_retreat_line"
+    ],
+    "2523-2623": [
+      "axis_retreat_line"
+    ],
+    "2524-2623": [
+      "axis_retreat_line"
+    ],
+    "2524-2624": [
+      "axis_retreat_line"
+    ],
+    "2525-2624": [
+      "axis_retreat_line"
+    ],
+    "2525-2625": [
+      "axis_retreat_line"
+    ],
+    "2526-2625": [
+      "axis_retreat_line"
+    ],
+    "2526-2626": [
+      "axis_retreat_line"
+    ],
+    "2527-2626": [
+      "axis_retreat_line"
+    ],
+    "2527-2627": [
+      "axis_retreat_line"
+    ],
+    "2528-2627": [
+      "axis_retreat_line"
+    ],
+    "2528-2628": [
+      "axis_retreat_line"
+    ],
+    "2529-2628": [
+      "axis_retreat_line"
+    ],
+    "2529-2629": [
+      "axis_retreat_line"
+    ],
+    "2530-2629": [
+      "axis_retreat_line"
+    ],
+    "2530-2630": [
+      "axis_retreat_line"
+    ],
+    "2531-2630": [
+      "axis_retreat_line"
+    ],
+    "2531-2631": [
+      "axis_retreat_line"
+    ],
+    "2532-2631": [
+      "axis_retreat_line"
+    ],
+    "2532-2632": [
+      "axis_retreat_line"
+    ],
+    "2533-2632": [
+      "axis_retreat_line"
+    ],
+    "2533-2633": [
+      "axis_retreat_line"
+    ],
+    "2534-2633": [
+      "axis_retreat_line"
+    ],
+    "2605-2705": [
+      "road"
+    ],
+    "2705-2805": [
+      "road"
+    ],
+    "2805-2906": [
+      "road"
+    ],
+    "2906-3006": [
+      "road"
+    ],
+    "3006-3007": [
+      "road"
+    ],
+    "3007-3108": [
+      "road"
+    ],
+    "3108-3208": [
+      "road"
+    ],
+    "3208-3309": [
+      "road"
+    ],
+    "3309-3409": [
+      "road"
+    ],
+    "3409-3510": [
+      "road"
+    ],
+    "3510-3610": [
+      "road"
+    ],
+    "3610-3711": [
+      "road"
+    ],
+    "3711-3811": [
+      "road"
+    ],
+    "3811-3911": [
+      "road"
+    ],
+    "3911-4011": [
+      "road"
+    ],
+    "4011-4111": [
+      "road"
+    ],
+    "4111-4211": [
+      "road"
+    ],
+    "4211-4311": [
+      "road"
+    ],
+    "4311-4411": [
+      "road"
+    ],
+    "4411-4511": [
+      "road"
+    ],
+    "4511-4610": [
+      "road"
+    ],
+    "4610-4711": [
+      "road"
+    ],
+    "4711-4810": [
+      "road"
+    ],
+    "4810-4910": [
+      "road"
+    ]
+  },
+  "notes": {
+    "source": "human-reviewed terrain labels",
+    "coastal_road": [
+      "0101",
+      "0201",
+      "0302",
+      "0401",
+      "0502",
+      "0601",
+      "0702",
+      "0801",
+      "0902",
+      "1002",
+      "1103",
+      "1202",
+      "1303",
+      "1402",
+      "1503",
+      "1603",
+      "1703",
+      "1802",
+      "1903",
+      "2003",
+      "2104",
+      "2203",
+      "2304",
+      "2404",
+      "2505",
+      "2605",
+      "2705",
+      "2805",
+      "2906",
+      "3006",
+      "3007",
+      "3108",
+      "3208",
+      "3309",
+      "3409",
+      "3510",
+      "3610",
+      "3711",
+      "3811",
+      "3911",
+      "4011",
+      "4111",
+      "4211",
+      "4311",
+      "4411",
+      "4511",
+      "4610",
+      "4711",
+      "4810",
+      "4910"
+    ]
+  }
+}
