@@ -78,8 +78,8 @@ const SCENARIO_URLS = {
   october: "./scenarios/october.json"
 };
 
-const APP_VERSION = "v2026.07.06.42";
-const ASSET_VERSION = "20260706-42";
+const APP_VERSION = "v2026.07.06.43";
+const ASSET_VERSION = "20260706-43";
 const SAVE_SLOTS_STORAGE_KEY = "alamein_judge_studio.save_slots.v1";
 const AI_PROFILES_STORAGE_KEY = "alamein_judge_studio.ai_profiles.v1";
 const MAX_SAVE_SLOTS = 12;
@@ -1325,6 +1325,71 @@ function phaseLabel(phase) {
   return labels[phase] || String(phase || "").replaceAll("_", " ");
 }
 
+function phaseShortLabel(phase) {
+  const labels = {
+    axis_initial_movement: "初始移动",
+    axis_combat: "战斗",
+    axis_mechanized_movement: "机械化移动",
+    axis_supply_movement: "补给移动",
+    allies_initial_movement: "初始移动",
+    allies_combat: "战斗",
+    allies_mechanized_movement: "机械化移动",
+    allies_supply_movement: "补给移动",
+    end_game_turn: "回合结束"
+  };
+  return labels[phase] || phaseLabel(phase);
+}
+
+function phaseGuide(phase = state.phase) {
+  const kind = phaseKind(phase);
+  if (phase === "end_game_turn") {
+    return {
+      tab: "judge",
+      tabLabel: "裁判",
+      action: "结算补给、孤立、胜负和回合结束效果。",
+      detail: "确认后点“结束当前阶段”进入下一回合。"
+    };
+  }
+  if (kind === "initial_movement") {
+    return {
+      tab: "move",
+      tabLabel: "移动",
+      action: "移动当前方单位，处理必须修复的堆叠。",
+      detail: "完成所有想移动的单位后结束阶段。"
+    };
+  }
+  if (kind === "combat") {
+    return {
+      tab: "combat",
+      tabLabel: "战斗",
+      action: "选择攻击单位和防御 hex，先预览再结算。",
+      detail: "不想攻击时可以直接结束阶段。"
+    };
+  }
+  if (kind === "mechanized_movement") {
+    return {
+      tab: "move",
+      tabLabel: "移动",
+      action: "只移动合格且本回合未攻击的机械化单位。",
+      detail: "普通步兵和已攻击机械化单位不能在此阶段移动。"
+    };
+  }
+  if (kind === "supply_movement") {
+    return {
+      tab: "move",
+      tabLabel: "移动",
+      action: "移动当前方补给单位，调整补给链。",
+      detail: "补给单位移动完后结束玩家回合。"
+    };
+  }
+  return {
+    tab: "state",
+    tabLabel: "局面",
+    action: "查看当前局面。",
+    detail: "按规则状态选择下一步。"
+  };
+}
+
 function syncActiveSideFromPhase() {
   const side = phaseSide(state.phase);
   if (isPlayableSide(side)) state.active_side = side;
@@ -1440,21 +1505,45 @@ function renderTurnBanner() {
   const banner = el("turnBanner");
   if (!banner) return;
   const side = state.active_side === "allies" ? "allies" : "axis";
+  const isEndTurn = state.phase === "end_game_turn";
+  const sideDisplay = isEndTurn ? "End Turn" : (side === "axis" ? "Axis" : "Allies");
   const controller = playerControllerLabel(playerController(side));
+  const guide = phaseGuide(state.phase);
+  let nextPhaseText = "下一回合";
+  try {
+    nextPhaseText = phaseShortLabel(RulesEngine.nextPhase(rulesContext()).phase);
+  }
+  catch {
+    nextPhaseText = "下一阶段";
+  }
+  const aiControlled = currentPhaseIsAiControlled();
+  const aiState = isEndTurn
+    ? "系统结算阶段"
+    : aiControlled
+    ? (state.ai_autoplay ? "AI 会自动执行" : "AI 已暂停")
+    : "等待人类操作";
   banner.className = `turn-banner ${side}`;
   banner.innerHTML = `
-    <div>
-      <span class="turn-kicker">当前回合</span>
-      <strong>${side === "axis" ? "Axis" : "Allies"}</strong>
-      <span class="turn-controller">${controller}</span>
+    <div class="turn-side">
+      <span class="turn-kicker">${isEndTurn ? "当前结算" : "当前行动方"}</span>
+      <strong>${sideDisplay}</strong>
+      <span class="turn-controller">${isEndTurn ? "系统" : controller}</span>
     </div>
-    <div>
-      <span class="turn-kicker">Turn</span>
-      <strong>${state.turn || 1}</strong>
+    <div class="turn-now">
+      <span class="turn-kicker">现在阶段</span>
+      <strong>${phaseShortLabel(state.phase)}</strong>
+      <span class="turn-phase-code">${phaseLabel(state.phase)}</span>
     </div>
-    <div class="turn-phase">
-      <span class="turn-kicker">Phase</span>
-      <strong>${phaseLabel(state.phase)}</strong>
+    <div class="turn-guide">
+      <span class="turn-kicker">现在做什么</span>
+      <strong>${guide.action}</strong>
+      <span>${guide.detail}</span>
+    </div>
+    <div class="turn-actions">
+      <span class="turn-kicker">Turn ${state.turn || 1}</span>
+      <span class="turn-next">下一阶段：${nextPhaseText}</span>
+      <span class="turn-ai-state">${aiState}</span>
+      <button class="phase-tab-jump" type="button" data-tab="${guide.tab}">打开${guide.tabLabel}面板</button>
     </div>
   `;
 }
@@ -3650,6 +3739,11 @@ function initControls() {
     tab.addEventListener("click", () => {
       switchTab(tab.dataset.tab);
     });
+  });
+  el("turnBanner")?.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-tab]");
+    if (!button?.classList.contains("phase-tab-jump")) return;
+    switchTab(button.dataset.tab);
   });
   document.addEventListener("keydown", (event) => {
     const target = event.target;

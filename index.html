@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-store">
     <meta http-equiv="Pragma" content="no-cache">
     <title>Alamein Judge Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=20260706-42">
+    <link rel="stylesheet" href="./styles.css?v=20260706-43">
   </head>
   <body>
     <section id="setupScreen" class="setup-screen" aria-label="开局配置">
@@ -19,7 +19,7 @@
           </div>
           <div class="setup-badge">
             <span>Judge Studio</span>
-            <strong id="setupVersionText">v2026.07.06.42</strong>
+            <strong id="setupVersionText">v2026.07.06.43</strong>
           </div>
         </div>
 
@@ -110,7 +110,7 @@
       <header class="topbar">
         <div>
           <h1>Alamein Judge Studio</h1>
-          <p>独立裁判调试台：地形、局面、移动、补给、胜负和 AI 设置。<span id="appVersionText" class="version-pill">v2026.07.06.42</span></p>
+          <p>独立裁判调试台：地形、局面、移动、补给、胜负和 AI 设置。<span id="appVersionText" class="version-pill">v2026.07.06.43</span></p>
         </div>
         <div class="top-actions">
           <select id="scenarioSelect" aria-label="预设场景">
@@ -122,7 +122,7 @@
           <button id="openSetupBtn">开局配置</button>
           <button id="aiAutoToggleBtn">恢复 AI</button>
           <button id="loadExampleBtn">示例</button>
-          <button id="nextPhaseBtn">下一阶段</button>
+          <button id="nextPhaseBtn">结束当前阶段</button>
           <button id="importBtn">导入局面 JSON</button>
           <button id="exportBtn">导出局面</button>
           <input id="fileInput" type="file" accept="application/json,.json" hidden>
@@ -205,7 +205,7 @@
                 </select>
               </label>
             </div>
-            <label>阶段
+            <label>阶段（调试）
               <select id="phaseSelect"></select>
             </label>
             <div class="stats" id="stateStats"></div>
@@ -570,7 +570,7 @@
       </main>
     </div>
 
-    <script src="./rule_engine.js?v=20260706-42"></script>
-    <script src="./app.js?v=20260706-42"></script>
+    <script src="./rule_engine.js?v=20260706-43"></script>
+    <script src="./app.js?v=20260706-43"></script>
   </body>
 </html>
