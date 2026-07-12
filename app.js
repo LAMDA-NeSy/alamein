@@ -78,11 +78,30 @@ const SCENARIO_URLS = {
   october: "./scenarios/october.json"
 };
 
-const APP_VERSION = "v2026.07.12.13";
-const ASSET_VERSION = "20260712-13";
+const SETUP_SCENE_INTEL = {
+  july: {
+    date: "01–27 July 1942",
+    operation: "First Battle of El Alamein",
+    situation: "Axis advance halted at the coastal bottleneck"
+  },
+  september: {
+    date: "30 August–05 September 1942",
+    operation: "Battle of Alam el Halfa",
+    situation: "Rommel's southern hook meets prepared Eighth Army defenses"
+  },
+  october: {
+    date: "23 October–11 November 1942",
+    operation: "Second Battle of El Alamein",
+    situation: "Eighth Army opens the decisive offensive in the Western Desert"
+  }
+};
+
+const APP_VERSION = "v2026.07.12.15";
+const ASSET_VERSION = "20260712-15";
 const SAVE_SLOTS_STORAGE_KEY = "alamein_judge_studio.save_slots.v1";
 const AI_PROFILES_STORAGE_KEY = "alamein_judge_studio.ai_profiles.v1";
 const SIDE_PANEL_COLLAPSED_KEY = "alamein_judge_studio.side_panel_collapsed.v1";
+const VISUAL_EFFECTS_STORAGE_KEY = "alamein_judge_studio.visual_effects.v1";
 const MAX_SAVE_SLOTS = 12;
 
 const DEFAULT_COUNTER_IMAGES = {
@@ -128,6 +147,7 @@ let setupMode = "home";
 let gameUiReady = false;
 let saveSlotsCache = null;
 let gameMapPreloadScheduled = false;
+let visualEffectsMode = "full";
 let aiScoreSupplyCache = null;
 let aiVictoryImpactCache = null;
 let aiSupplyScorePhaseCache = null;
@@ -3195,6 +3215,7 @@ function removeClearedMineMarkers() {
 }
 
 function updateSupplyStates() {
+  const changes = [];
   for (const side of ["axis", "allies"]) {
     const supply = checkSupply(side);
     for (const [id, value] of Object.entries(supply)) {
@@ -3202,9 +3223,20 @@ function updateSupplyStates() {
       if (!unit) continue;
       const previous = unit.supply_state;
       unit.supply_state = value;
+      if (previous && previous !== value) {
+        changes.push({ unit: id, side: unit.side, hex: unit.hex || "", from: previous, to: value });
+      }
       if (value === "isolated" && previous !== "isolated") unit.isolated_since = `${state.turn}:${state.phase}`;
       if (value !== "isolated") unit.isolated_since = null;
     }
+  }
+  if (changes.length) {
+    const disrupted = changes.filter((item) => item.to !== "supplied").length;
+    logEvent(
+      "supply_change",
+      disrupted ? `${disrupted} 个单位补给状态恶化` : `${changes.length} 个单位恢复补给`,
+      { changes }
+    );
   }
 }
 
@@ -3646,6 +3678,35 @@ function setupScenarioBrief(scenario = "july") {
   return data[scenario] || data.july;
 }
 
+function effectiveVisualEffectsMode() {
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return "off";
+  if (window.innerWidth <= 520 && visualEffectsMode === "full") return "reduced";
+  return visualEffectsMode;
+}
+
+function applyVisualEffectsMode(mode, options = {}) {
+  visualEffectsMode = ["full", "reduced", "off"].includes(mode) ? mode : "full";
+  document.documentElement.dataset.effects = effectiveVisualEffectsMode();
+  if (el("visualEffectsSelect")) el("visualEffectsSelect").value = visualEffectsMode;
+  if (options.persist !== false) localStorage.setItem(VISUAL_EFFECTS_STORAGE_KEY, visualEffectsMode);
+}
+
+function initializeVisualEffects() {
+  const saved = localStorage.getItem(VISUAL_EFFECTS_STORAGE_KEY) || "full";
+  applyVisualEffectsMode(saved, { persist: false });
+  window.addEventListener("resize", () => applyVisualEffectsMode(visualEffectsMode, { persist: false }));
+}
+
+function syncSetupSceneIntel(scenario = "july") {
+  const key = SETUP_SCENE_INTEL[scenario] ? scenario : "july";
+  const intel = SETUP_SCENE_INTEL[key];
+  const screen = el("setupScreen");
+  if (screen) screen.dataset.scenario = key;
+  if (el("setupIntelDate")) el("setupIntelDate").textContent = intel.date;
+  if (el("setupIntelOperation")) el("setupIntelOperation").textContent = intel.operation;
+  if (el("setupIntelSituation")) el("setupIntelSituation").textContent = intel.situation;
+}
+
 function renderSetupScenarioCard() {
   const target = el("setupScenarioCard");
   if (!target) return;
@@ -3653,6 +3714,7 @@ function renderSetupScenarioCard() {
   const turn = Number(el("setupTurnInput")?.value || setupScenarioTurnDefault(scenario));
   const phase = el("setupPhaseSelect")?.value || setupScenarioPhaseDefault(scenario);
   const brief = setupScenarioBrief(scenario);
+  syncSetupSceneIntel(scenario);
   target.innerHTML = `
     <div class="setup-scenario-head">
       <span>战役概览</span>
@@ -3685,6 +3747,7 @@ function renderSetupHero() {
       ? "North African Campaign"
       : "战役、阶段、双方角色";
   }
+  syncSetupSceneIntel(el("setupScenarioSelect")?.value || state.scenario || "july");
 }
 
 function openSetupScenario(scenario) {
@@ -3893,11 +3956,15 @@ function latestSaveSummary() {
 function renderSetupLatestSave() {
   const target = el("setupLatestSaveText");
   const button = el("setupModeLoadBtn");
-  const hasSaves = saveSlots().length > 0;
+  const latest = saveSlots()[0];
+  const hasSaves = !!latest;
   if (target) target.textContent = latestSaveSummary();
   if (button) {
     button.disabled = !hasSaves;
     button.classList.toggle("disabled", !hasSaves);
+    button.classList.toggle("load-available", hasSaves);
+    if (latest) button.dataset.saveScenario = latest.scenario || "july";
+    else delete button.dataset.saveScenario;
     button.title = hasSaves ? "读取最近保存的局面" : "暂无可加载的本地存档";
   }
 }
@@ -5045,6 +5112,105 @@ function compactDetails(value) {
   }
 }
 
+function cinematicEventHex(entry = {}) {
+  const details = entry.details || {};
+  const action = details.action || {};
+  const path = details.path || action.path || [];
+  if (Array.isArray(path) && path.length) return normalizeHex(path[path.length - 1]);
+  const defender = details.defender_hex || details.defender_hexes?.[0] || action.defender_hexes?.[0] || details.verdict?.defender_hexes?.[0];
+  if (defender) return normalizeHex(defender);
+  const change = details.changes?.find?.((item) => item.hex);
+  if (change?.hex) return normalizeHex(change.hex);
+  const unitId = details.unit || action.unit;
+  return unitId && state.units?.[unitId]?.hex ? normalizeHex(state.units[unitId].hex) : "";
+}
+
+function cinematicPointForHex(hex) {
+  const layer = el("cinematicFxLayer");
+  const stage = el("mapStage");
+  if (!layer || !stage || !hex || !onMap(hex)) return null;
+  const point = hexToPoint(hex);
+  const scale = Number(settings.zoom || 100) / 100;
+  const layerRect = layer.getBoundingClientRect();
+  const stageRect = stage.getBoundingClientRect();
+  return {
+    x: Math.max(60, Math.min(layerRect.width - 60, stageRect.left - layerRect.left + point.x * scale)),
+    y: Math.max(60, Math.min(layerRect.height - 80, stageRect.top - layerRect.top + point.y * scale))
+  };
+}
+
+function showCinematicMapEvent(kind, hex, label) {
+  if (effectiveVisualEffectsMode() === "off") return;
+  const layer = el("cinematicFxLayer");
+  const point = cinematicPointForHex(hex);
+  if (!layer || !point) return;
+  const event = document.createElement("div");
+  event.className = `cinematic-event ${kind}`;
+  event.style.left = `${point.x}px`;
+  event.style.top = `${point.y}px`;
+  if (label) {
+    const caption = document.createElement("span");
+    caption.className = "cinematic-event-label";
+    caption.textContent = label;
+    event.append(caption);
+  }
+  layer.append(event);
+  setTimeout(() => event.remove(), effectiveVisualEffectsMode() === "reduced" ? 900 : 1800);
+}
+
+function showPhaseCinematic(entry = {}) {
+  if (effectiveVisualEffectsMode() === "off") return;
+  const banner = el("phaseCinematicBanner");
+  if (!banner) return;
+  const toPhase = entry.details?.to_phase || state.phase;
+  const toTurn = entry.details?.to_turn || state.turn;
+  banner.innerHTML = `<span>TURN ${escapeHtml(toTurn)} · FIELD ORDER</span><strong>${escapeHtml(phaseDisplayName(toPhase))}</strong>`;
+  banner.classList.remove("hidden");
+  banner.style.animation = "none";
+  void banner.offsetWidth;
+  banner.style.animation = "";
+  setTimeout(() => banner.classList.add("hidden"), effectiveVisualEffectsMode() === "reduced" ? 900 : 1750);
+}
+
+function showAfterActionReport(victory = {}) {
+  const report = el("afterActionReport");
+  if (!report) return;
+  const winner = victory.winner ? `${sideDisplayName(victory.winner)} 胜利` : (victory.level || "战役结束");
+  if (el("afterActionTitle")) el("afterActionTitle").textContent = winner;
+  if (el("afterActionReason")) el("afterActionReason").textContent = victory.reason || "裁判已完成最终结算。";
+  if (el("afterActionFacts")) {
+    el("afterActionFacts").innerHTML = `
+      <div><span>SCENARIO</span><b>${escapeHtml(scenarioShortName(state.scenario))}</b></div>
+      <div><span>FINAL TURN</span><b>T${escapeHtml(victory.final_turn || state.turn || 1)}</b></div>
+      <div><span>VICTORY POINTS</span><b>${escapeHtml(victory.victory_points ?? state.victory_points ?? 0)}</b></div>
+    `;
+  }
+  report.classList.remove("hidden");
+}
+
+function queueCinematicFeedback(entry) {
+  if (!gameUiReady || el("setupScreen")?.classList.contains("hidden") === false) return;
+  requestAnimationFrame(() => {
+    const hex = cinematicEventHex(entry);
+    if (entry.type === "move" || entry.type === "ai_move") {
+      showCinematicMapEvent("move", hex, "命令执行");
+    }
+    else if (entry.type === "combat" || entry.type === "isolation_elimination" || entry.type === "clear_mine") {
+      const outcome = entry.details?.verdict?.outcome || eventTypeLabel(entry.type);
+      showCinematicMapEvent("combat", hex, outcome);
+    }
+    else if (entry.type === "supply_change") {
+      showCinematicMapEvent("supply", hex, entry.summary);
+    }
+    else if (entry.type === "phase") {
+      showPhaseCinematic(entry);
+    }
+    else if (entry.type === "victory") {
+      showAfterActionReport(entry.details || {});
+    }
+  });
+}
+
 function logEvent(type, summary, details = {}) {
   state.game_log ||= [];
   const entry = {
@@ -5060,6 +5226,7 @@ function logEvent(type, summary, details = {}) {
   state.game_log.push(entry);
   renderGameLog();
   renderSideCommandBar();
+  queueCinematicFeedback(entry);
   return entry;
 }
 
@@ -7571,6 +7738,7 @@ async function initData() {
 }
 
 function initControls() {
+  initializeVisualEffects();
   for (const phase of rules.turn_sequence || DEFAULT_RULES.turn_sequence) {
     const option = document.createElement("option");
     option.value = phase;
@@ -7610,6 +7778,11 @@ function initControls() {
   document.addEventListener("keydown", (event) => {
     const target = event.target;
     if (event.key === "Escape") {
+      if (!el("afterActionReport")?.classList.contains("hidden")) {
+        el("afterActionReport")?.classList.add("hidden");
+        event.preventDefault();
+        return;
+      }
       const hadOpenMenus = !!document.querySelector(".phase-dock-more[open], .map-view-menu[open], .map-layer-menu[open]");
       closeDockMenus();
       closeMapToolMenus();
@@ -7711,6 +7884,8 @@ function initControls() {
   });
   el("sidePanelToggleBtn")?.addEventListener("click", toggleSidePanel);
   el("gameSettingsBtn")?.addEventListener("click", () => switchTab("settings", { expandPanel: true }));
+  el("visualEffectsSelect")?.addEventListener("change", () => applyVisualEffectsMode(el("visualEffectsSelect").value));
+  el("closeAfterActionBtn")?.addEventListener("click", () => el("afterActionReport")?.classList.add("hidden"));
   el("unitSearch").addEventListener("input", renderUnitList);
   el("ruleSearch")?.addEventListener("input", filterRulebook);
   el("expandRulesBtn")?.addEventListener("click", () => setRulebookOpen(true));

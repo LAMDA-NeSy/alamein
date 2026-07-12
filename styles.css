@@ -13,6 +13,15 @@
   --bad: #b83c3c;
   --good: #2e7d53;
   --shadow: 0 12px 28px rgb(24 34 31 / 0.12);
+  --command-black: #101916;
+  --command-green: #203a32;
+  --command-paper: #f3f1e8;
+  --command-brass: #b79a55;
+  --command-red: #9f3d32;
+  --command-blue: #3f6270;
+  --motion-fast: 180ms;
+  --motion-medium: 520ms;
+  --motion-cinematic: 1100ms;
 }
 
 * {
@@ -8080,5 +8089,636 @@ h2 {
 
   .rules-table > div:last-child {
     border-bottom: 0;
+  }
+}
+
+/* Cinematic command interface */
+.setup-screen {
+  isolation: isolate;
+  background-color: #17231f;
+}
+
+.setup-screen::after {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  background: repeating-linear-gradient(0deg, transparent 0 3px, rgb(255 255 255 / 0.025) 3px 4px);
+  content: "";
+  pointer-events: none;
+  animation: command-scanlines 12s linear infinite;
+}
+
+.setup-shell {
+  width: min(1180px, calc(100% - 64px));
+  border-color: rgb(235 225 194 / 0.54);
+  background: rgb(243 241 232 / 0.97);
+  box-shadow: 0 28px 80px rgb(0 0 0 / 0.42), 0 0 0 1px rgb(16 25 22 / 0.35);
+}
+
+.setup-hero {
+  min-height: 210px;
+  align-items: center;
+  background-image:
+    linear-gradient(90deg, rgb(11 22 19 / 0.95) 0 34%, rgb(19 54 49 / 0.72) 68%, rgb(69 58 35 / 0.72)),
+    url("./setup-map-bg.jpg");
+  background-position: center, center 34%;
+  background-size: cover;
+}
+
+.setup-screen[data-scenario="september"] .setup-hero {
+  background-image:
+    linear-gradient(90deg, rgb(13 20 18 / 0.96) 0 34%, rgb(63 50 30 / 0.68) 74%, rgb(20 33 29 / 0.72)),
+    url("./mod_images/scene-september-panzer.webp");
+  background-position: center, center 58%;
+}
+
+.setup-screen[data-scenario="october"] .setup-hero {
+  background-image:
+    linear-gradient(90deg, rgb(12 22 20 / 0.96) 0 33%, rgb(26 51 47 / 0.62) 72%, rgb(76 63 37 / 0.62)),
+    url("./mod_images/scene-october-infantry.webp");
+  background-position: center, center 56%;
+}
+
+.setup-hero-copy {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+}
+
+.setup-hero h1 {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 48px;
+  font-weight: 700;
+  text-shadow: 0 3px 18px rgb(0 0 0 / 0.38);
+}
+
+.setup-hero-intel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.setup-hero-intel span {
+  border: 1px solid rgb(236 226 194 / 0.28);
+  border-radius: 4px;
+  background: rgb(12 24 21 / 0.54);
+  padding: 5px 8px;
+  color: rgb(255 250 231 / 0.9);
+  font-size: 10px;
+  font-weight: 850;
+  line-height: 1.2;
+}
+
+.setup-badge {
+  border-color: rgb(237 223 180 / 0.45);
+  background: rgb(12 24 21 / 0.56);
+  backdrop-filter: blur(8px);
+}
+
+.setup-home {
+  background:
+    linear-gradient(90deg, rgb(183 154 85 / 0.07), transparent 30%, rgb(63 98 112 / 0.06)),
+    var(--command-paper);
+}
+
+.setup-campaign-board {
+  border-color: rgb(83 86 70 / 0.34);
+  background: rgb(255 254 248 / 0.68);
+  box-shadow: inset 0 1px 0 #fff, 0 7px 20px rgb(16 25 22 / 0.07);
+}
+
+.setup-choice {
+  border-color: rgb(83 86 70 / 0.34);
+  background: rgb(255 254 248 / 0.88);
+  box-shadow: 0 8px 18px rgb(16 25 22 / 0.08);
+  transition: transform var(--motion-fast) ease;
+}
+
+.setup-choice:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 28px rgb(16 25 22 / 0.14);
+}
+
+.setup-choice.load-available .setup-choice-icon {
+  position: relative;
+  overflow: hidden;
+  width: 58px;
+  height: 46px;
+  border: 1px solid rgb(64 82 74 / 0.34);
+  border-radius: 4px;
+  background: url("./setup-map-bg.jpg") center / cover;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.28);
+}
+
+.setup-choice.load-available {
+  grid-template-columns: 64px minmax(0, 1fr) 40px;
+}
+
+.setup-choice.load-available[data-save-scenario="september"] .setup-choice-icon {
+  background-image: url("./mod_images/scene-september-panzer.webp");
+}
+
+.setup-choice.load-available[data-save-scenario="october"] .setup-choice-icon {
+  background-image: url("./mod_images/scene-october-infantry.webp");
+}
+
+.setup-choice.load-available .setup-choice-icon::after {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  border-radius: 2px;
+  background: rgb(11 22 19 / 0.84);
+  padding: 2px 4px;
+  color: #fff5d4;
+  content: "JUL";
+  font-size: 8px;
+  font-weight: 950;
+}
+
+.setup-choice.load-available[data-save-scenario="september"] .setup-choice-icon::after {
+  content: "SEP";
+}
+
+.setup-choice.load-available[data-save-scenario="october"] .setup-choice-icon::after {
+  content: "OCT";
+}
+
+.setup-choice.load-available .setup-choice-icon img {
+  display: none;
+}
+
+.topbar {
+  position: relative;
+  z-index: 8;
+  min-height: 44px;
+  border-bottom-color: rgb(183 154 85 / 0.32);
+  background: var(--command-black);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.24);
+}
+
+.topbar::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 1px;
+  background: linear-gradient(90deg, var(--command-brass), transparent 42%, var(--command-blue));
+  content: "";
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.topbar-theater {
+  border-left: 1px solid rgb(255 255 255 / 0.18);
+  padding-left: 10px;
+  color: rgb(244 231 192 / 0.7);
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.effects-control {
+  display: flex;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 0.06);
+  padding: 2px 4px 2px 7px;
+  color: rgb(255 255 255 / 0.68);
+}
+
+.effects-control span {
+  font-size: 9px;
+  font-weight: 950;
+}
+
+.effects-control select {
+  width: 62px;
+  border: 0;
+  background: transparent;
+  padding: 3px 2px;
+  color: #fff;
+  font-size: 11px;
+}
+
+.turn-banner {
+  position: relative;
+  z-index: 6;
+  min-height: 72px;
+  border-bottom-color: rgb(15 25 22 / 0.32);
+  box-shadow: 0 7px 18px rgb(0 0 0 / 0.12), inset 0 -1px 0 rgb(255 255 255 / 0.28);
+}
+
+.turn-banner.axis {
+  background: linear-gradient(90deg, #a97d31, #dfc895 64%, #b8c4b6);
+}
+
+.turn-banner.allies {
+  background: linear-gradient(90deg, #385a4b, #789483 64%, #b8c8c2);
+}
+
+.workspace {
+  background: #0d1513;
+}
+
+.map-pane {
+  border-right-color: rgb(183 154 85 / 0.28);
+  box-shadow: inset 0 0 80px rgb(0 0 0 / 0.24);
+}
+
+.map-pane::after {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  box-shadow: inset 0 0 70px rgb(0 0 0 / 0.26);
+  content: "";
+  pointer-events: none;
+}
+
+.map-toolbar {
+  border-color: rgb(229 220 190 / 0.24);
+  background: rgb(15 27 24 / 0.84);
+  color: #f6f0dc;
+  backdrop-filter: blur(10px);
+}
+
+.map-toolbar button,
+.map-toolbar summary {
+  border-color: rgb(255 255 255 / 0.12);
+  background: rgb(255 255 255 / 0.07);
+  color: #f6f0dc;
+}
+
+.map-toolbar button:hover,
+.map-toolbar summary:hover,
+.map-mode-switch button.active {
+  border-color: rgb(213 193 133 / 0.48);
+  background: rgb(183 154 85 / 0.24);
+  color: #fff;
+}
+
+.phase-action-dock {
+  border-color: rgb(220 209 176 / 0.42);
+  background: rgb(244 242 232 / 0.94);
+  box-shadow: 0 16px 36px rgb(0 0 0 / 0.3);
+}
+
+.side-panel {
+  border-left: 1px solid rgb(183 154 85 / 0.24);
+  background: #eef0e9;
+  box-shadow: -16px 0 34px rgb(0 0 0 / 0.2);
+}
+
+.side-command-bar {
+  border-bottom-color: rgb(83 86 70 / 0.28);
+  background:
+    linear-gradient(90deg, rgb(183 154 85 / 0.1), transparent 50%),
+    #e8ece5;
+}
+
+.tabs {
+  border-bottom: 1px solid rgb(83 86 70 / 0.2);
+  background: #d8dfd8;
+}
+
+.cinematic-fx-layer {
+  position: absolute;
+  z-index: 7;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.cinematic-event {
+  position: absolute;
+  width: 120px;
+  height: 120px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.cinematic-event::before,
+.cinematic-event::after {
+  position: absolute;
+  inset: 50%;
+  border-radius: 50%;
+  content: "";
+  transform: translate(-50%, -50%);
+}
+
+.cinematic-event.move::before {
+  width: 22px;
+  height: 22px;
+  border: 2px solid #d4bd76;
+  box-shadow: 0 0 0 8px rgb(212 189 118 / 0.2);
+  animation: move-order-pulse 900ms ease-out forwards;
+}
+
+.cinematic-event.move::after {
+  width: 70px;
+  height: 28px;
+  border-bottom: 3px solid rgb(213 196 143 / 0.7);
+  filter: blur(2px);
+  animation: dust-trail 1000ms ease-out forwards;
+}
+
+.cinematic-event.combat::before {
+  width: 18px;
+  height: 18px;
+  background: #f1d36f;
+  box-shadow: 0 0 18px 8px rgb(222 89 48 / 0.8), 0 0 42px 20px rgb(247 209 101 / 0.32);
+  animation: combat-flash 700ms ease-out forwards;
+}
+
+.cinematic-event.combat::after {
+  width: 24px;
+  height: 24px;
+  border: 3px solid rgb(255 238 185 / 0.88);
+  animation: combat-shockwave 1000ms ease-out forwards;
+}
+
+.cinematic-event.supply::before {
+  width: 26px;
+  height: 26px;
+  border: 3px solid #66a47e;
+  animation: supply-signal 1200ms ease-out forwards;
+}
+
+.cinematic-event-label {
+  position: absolute;
+  top: 84px;
+  left: 50%;
+  width: max-content;
+  max-width: 220px;
+  transform: translateX(-50%);
+  border: 1px solid rgb(244 229 184 / 0.44);
+  border-radius: 4px;
+  background: rgb(14 24 21 / 0.88);
+  padding: 4px 8px;
+  color: #fff5d4;
+  font-size: 10px;
+  font-weight: 900;
+  text-align: center;
+  animation: event-label-rise 1400ms ease forwards;
+}
+
+.phase-cinematic-banner {
+  position: absolute;
+  z-index: 8;
+  top: 92px;
+  left: 50%;
+  width: min(520px, calc(100% - 40px));
+  transform: translateX(-50%);
+  border-block: 1px solid rgb(220 203 151 / 0.54);
+  background: rgb(13 23 20 / 0.9);
+  padding: 12px 20px;
+  color: #fff5d6;
+  text-align: center;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.34);
+  animation: phase-banner-in 1700ms ease forwards;
+  pointer-events: none;
+}
+
+.phase-cinematic-banner.hidden,
+.after-action-report.hidden {
+  display: none;
+}
+
+.phase-cinematic-banner span,
+.phase-cinematic-banner strong {
+  display: block;
+}
+
+.phase-cinematic-banner span {
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.phase-cinematic-banner strong {
+  margin-top: 3px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 22px;
+}
+
+.after-action-report {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.after-action-backdrop {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgb(8 15 13 / 0.93), rgb(12 25 22 / 0.72)),
+    url("./mod_images/scene-october-infantry.webp") center / cover;
+}
+
+.after-action-sheet {
+  position: relative;
+  width: min(640px, 100%);
+  border: 1px solid rgb(228 211 160 / 0.62);
+  background: rgb(242 239 226 / 0.96);
+  padding: 28px;
+  box-shadow: 0 32px 90px rgb(0 0 0 / 0.55);
+}
+
+.after-action-sheet > span {
+  color: #8b6b2f;
+  font-size: 10px;
+  font-weight: 950;
+}
+
+.after-action-sheet h2 {
+  margin: 8px 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 34px;
+}
+
+.after-action-sheet p {
+  color: #53615b;
+  font-weight: 750;
+}
+
+.after-action-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 22px 0;
+  border-block: 1px solid rgb(93 96 78 / 0.32);
+}
+
+.after-action-facts div {
+  padding: 14px;
+  text-align: center;
+}
+
+.after-action-facts div + div {
+  border-left: 1px solid rgb(93 96 78 / 0.24);
+}
+
+.after-action-facts span,
+.after-action-facts b {
+  display: block;
+}
+
+.after-action-facts span {
+  color: #6b766f;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.after-action-facts b {
+  margin-top: 5px;
+  font-size: 18px;
+}
+
+html[data-effects="off"] .setup-battlefield-motion,
+html[data-effects="off"] .cinematic-fx-layer,
+html[data-effects="off"] .phase-cinematic-banner,
+html[data-effects="off"] .setup-campaign-timeline::after {
+  display: none !important;
+}
+
+html[data-effects="reduced"] .setup-aircraft-secondary,
+html[data-effects="reduced"] .setup-tank-column img:nth-child(3) {
+  display: none;
+}
+
+html[data-effects="reduced"] .setup-aircraft-primary,
+html[data-effects="reduced"] .setup-tank-column {
+  animation-duration: 54s;
+  opacity: 0.16;
+}
+
+@keyframes command-scanlines {
+  from { transform: translateY(0); }
+  to { transform: translateY(16px); }
+}
+
+@keyframes move-order-pulse {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.35); }
+  45% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(2.6); }
+}
+
+@keyframes dust-trail {
+  0% { opacity: 0; transform: translate(-70%, -40%) scaleX(0.2); }
+  35% { opacity: 0.75; }
+  100% { opacity: 0; transform: translate(-110%, -20%) scaleX(1.8); }
+}
+
+@keyframes combat-flash {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.2); }
+  18% { opacity: 1; transform: translate(-50%, -50%) scale(1.5); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(3.2); }
+}
+
+@keyframes combat-shockwave {
+  0% { opacity: 0.9; transform: translate(-50%, -50%) scale(0.2); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(4); }
+}
+
+@keyframes supply-signal {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.4); }
+  35% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(3); }
+}
+
+@keyframes event-label-rise {
+  0% { opacity: 0; transform: translate(-50%, 12px); }
+  25%, 72% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -10px); }
+}
+
+@keyframes phase-banner-in {
+  0% { opacity: 0; transform: translate(-50%, -16px) scaleX(0.8); }
+  18%, 72% { opacity: 1; transform: translate(-50%, 0) scaleX(1); }
+  100% { opacity: 0; transform: translate(-50%, 8px) scaleX(1); }
+}
+
+@media (max-width: 1000px) {
+  .setup-shell {
+    width: min(100% - 24px, 1180px);
+  }
+
+  .setup-hero {
+    min-height: 220px;
+  }
+
+  .topbar-theater {
+    display: none;
+  }
+
+  .after-action-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .after-action-facts div + div {
+    border-top: 1px solid rgb(93 96 78 / 0.24);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .setup-choice.load-available {
+    grid-template-columns: 50px minmax(0, 1fr) 30px;
+  }
+
+  .setup-choice.load-available .setup-choice-icon {
+    width: 44px;
+    height: 36px;
+  }
+
+  .setup-shell {
+    width: calc(100% - 20px);
+  }
+
+  .setup-hero {
+    min-height: 0;
+  }
+
+  .setup-hero h1 {
+    font-size: 36px;
+  }
+
+  .setup-hero-intel span:nth-child(3) {
+    display: none;
+  }
+
+  .effects-control span {
+    display: none;
+  }
+
+  .effects-control select {
+    width: 54px;
+  }
+
+  .phase-cinematic-banner {
+    top: 70px;
+  }
+
+  .cinematic-event-label {
+    max-width: 150px;
+  }
+
+  .after-action-report {
+    padding: 10px;
+  }
+
+  .after-action-sheet {
+    padding: 20px;
+  }
+
+  .after-action-sheet h2 {
+    font-size: 28px;
   }
 }

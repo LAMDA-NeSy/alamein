@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-store">
     <meta http-equiv="Pragma" content="no-cache">
     <title>Alamein Judge Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=20260712-13">
+    <link rel="stylesheet" href="./styles.css?v=20260712-15">
   </head>
   <body>
     <section id="setupScreen" class="setup-screen" aria-label="开局配置">
@@ -21,14 +21,19 @@
       </div>
       <div class="setup-shell">
         <div class="setup-hero">
-          <div>
+          <div class="setup-hero-copy">
             <span class="setup-kicker">El Alamein · Egypt · 1942</span>
             <h1 id="setupHeroTitle">Alamein</h1>
             <p id="setupHeroSubtitle">North African Campaign</p>
+            <div class="setup-hero-intel" aria-live="polite">
+              <span id="setupIntelDate">01–27 July 1942</span>
+              <span id="setupIntelOperation">First Battle of El Alamein</span>
+              <span id="setupIntelSituation">Axis advance halted at the coastal bottleneck</span>
+            </div>
           </div>
           <div class="setup-badge">
             <span>Judge Studio</span>
-            <strong id="setupVersionText">v2026.07.12.13</strong>
+            <strong id="setupVersionText">v2026.07.12.15</strong>
           </div>
         </div>
 
@@ -46,18 +51,18 @@
             </div>
             <div class="setup-front-markers" aria-label="交战双方">
               <figure>
-                <img src="./mod_images/dak-insignia.svg?v=20260712-13" alt="德国非洲军团历史编制徽记">
+                <img src="./mod_images/dak-insignia.svg?v=20260712-15" alt="德国非洲军团历史编制徽记">
                 <figcaption>DAK · Axis</figcaption>
               </figure>
               <i aria-hidden="true">VS</i>
               <figure>
-                <img src="./mod_images/eighth-army-insignia.svg?v=20260712-13" alt="英国第八集团军历史编制徽章">
+                <img src="./mod_images/eighth-army-insignia.svg?v=20260712-15" alt="英国第八集团军历史编制徽章">
                 <figcaption>8th Army · Allies</figcaption>
               </figure>
             </div>
           </section>
           <button id="setupModeNewBtn" class="setup-choice" type="button">
-            <span class="setup-choice-icon" aria-hidden="true"><img src="./mod_images/ui-map-2.svg?v=20260712-13" alt=""></span>
+            <span class="setup-choice-icon" aria-hidden="true"><img src="./mod_images/ui-map-2.svg?v=20260712-15" alt=""></span>
             <span class="setup-choice-copy">
               <small>New Campaign</small>
               <strong>开始新游戏</strong>
@@ -65,7 +70,7 @@
             </span>
           </button>
           <button id="setupModeLoadBtn" class="setup-choice" type="button">
-            <span class="setup-choice-icon" aria-hidden="true"><img src="./mod_images/ui-folder-open.svg?v=20260712-13" alt=""></span>
+            <span class="setup-choice-icon" aria-hidden="true"><img src="./mod_images/ui-folder-open.svg?v=20260712-15" alt=""></span>
             <span class="setup-choice-copy">
               <small>Continue</small>
               <strong>加载存档</strong>
@@ -91,7 +96,7 @@
                   </select>
                 </label>
                 <section id="setupScenarioCard" class="setup-scenario-card"></section>
-                <a id="setupRulesBtn" class="setup-rules-button" href="./rules.html?v=20260712-13" target="_blank" rel="noopener">查看规则介绍</a>
+                <a id="setupRulesBtn" class="setup-rules-button" href="./rules.html?v=20260712-15" target="_blank" rel="noopener">查看规则介绍</a>
                 <div class="setup-debug-fields" hidden>
                   <input id="setupTurnInput" type="number" min="1" value="1">
                   <select id="setupPhaseSelect"></select>
@@ -146,11 +151,20 @@
 
     <div class="app">
       <header class="topbar">
-        <div>
+        <div class="topbar-brand">
           <h1 title="Alamein Judge Studio">Alamein</h1>
-          <p><span id="appVersionText" class="version-pill">v2026.07.12.13</span></p>
+          <span class="topbar-theater">WESTERN DESERT · HQ</span>
+          <p><span id="appVersionText" class="version-pill">v2026.07.12.15</span></p>
         </div>
         <div class="top-actions">
+          <label class="effects-control" title="视觉效果">
+            <span aria-hidden="true">FX</span>
+            <select id="visualEffectsSelect" aria-label="视觉效果">
+              <option value="full">完整</option>
+              <option value="reduced">精简</option>
+              <option value="off">关闭</option>
+            </select>
+          </label>
           <button id="sidePanelToggleBtn" class="icon-button" type="button" aria-label="收起右侧面板" title="收起右侧面板" aria-pressed="false"><span aria-hidden="true">◨</span></button>
           <button id="gameSettingsBtn" class="icon-button" type="button" aria-label="游戏设置" title="游戏设置"><span aria-hidden="true">⚙</span></button>
         </div>
@@ -210,6 +224,8 @@
               <svg id="mapOverlay" class="map-overlay" viewBox="0 0 4100 3275" preserveAspectRatio="none"></svg>
             </div>
           </div>
+          <div id="cinematicFxLayer" class="cinematic-fx-layer" aria-hidden="true"></div>
+          <div id="phaseCinematicBanner" class="phase-cinematic-banner hidden" aria-hidden="true"></div>
           <div id="mapSelectionHud" class="map-selection-hud hidden" aria-live="polite"></div>
           <div id="mapActionHint" class="map-action-hint hidden" aria-live="polite"></div>
           <div id="phaseActionDock" class="phase-action-dock" aria-live="polite"></div>
@@ -763,8 +779,19 @@
       </main>
     </div>
 
-    <script src="./ai_config.js?v=20260712-13"></script>
-    <script src="./rule_engine.js?v=20260712-13"></script>
-    <script src="./app.js?v=20260712-13"></script>
+    <section id="afterActionReport" class="after-action-report hidden" aria-live="polite" aria-label="战后报告">
+      <div class="after-action-backdrop"></div>
+      <div class="after-action-sheet">
+        <span>AFTER ACTION REPORT</span>
+        <h2 id="afterActionTitle">战役结束</h2>
+        <p id="afterActionReason"></p>
+        <div id="afterActionFacts" class="after-action-facts"></div>
+        <button id="closeAfterActionBtn" type="button" class="primary-action">返回战区</button>
+      </div>
+    </section>
+
+    <script src="./ai_config.js?v=20260712-15"></script>
+    <script src="./rule_engine.js?v=20260712-15"></script>
+    <script src="./app.js?v=20260712-15"></script>
   </body>
 </html>
