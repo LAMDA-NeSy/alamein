@@ -6,32 +6,76 @@
     <meta http-equiv="Cache-Control" content="no-store">
     <meta http-equiv="Pragma" content="no-cache">
     <title>Alamein Judge Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=20260706-43">
+    <link rel="stylesheet" href="./styles.css?v=20260712-13">
   </head>
   <body>
     <section id="setupScreen" class="setup-screen" aria-label="开局配置">
+      <div class="setup-battlefield-motion" aria-hidden="true">
+        <img class="setup-aircraft setup-aircraft-primary" src="./mod_images/scene-airplane.svg?v=20260712-13" alt="">
+        <img class="setup-aircraft setup-aircraft-secondary" src="./mod_images/scene-airplane.svg?v=20260712-13" alt="">
+        <div class="setup-tank-column">
+          <img src="./mod_images/scene-tank.svg?v=20260712-13" alt="">
+          <img src="./mod_images/scene-tank.svg?v=20260712-13" alt="">
+          <img src="./mod_images/scene-tank.svg?v=20260712-13" alt="">
+        </div>
+      </div>
       <div class="setup-shell">
         <div class="setup-hero">
           <div>
-            <span class="setup-kicker">El Alamein</span>
-            <h1>开局配置</h1>
-            <p>选择战役、阶段和双方控制方式，然后进入自动裁判地图。</p>
+            <span class="setup-kicker">El Alamein · Egypt · 1942</span>
+            <h1 id="setupHeroTitle">Alamein</h1>
+            <p id="setupHeroSubtitle">North African Campaign</p>
           </div>
           <div class="setup-badge">
             <span>Judge Studio</span>
-            <strong id="setupVersionText">v2026.07.06.43</strong>
+            <strong id="setupVersionText">v2026.07.12.13</strong>
           </div>
         </div>
 
         <div id="setupHomePanel" class="setup-home" aria-label="启动方式">
+          <section class="setup-campaign-board" aria-label="1942 年阿拉曼战役时间轴">
+            <div class="setup-campaign-heading">
+              <span>North Africa · 1942</span>
+              <strong>阿拉曼战役</strong>
+              <small>从坚守防线到决定性反攻</small>
+            </div>
+            <div class="setup-campaign-timeline">
+              <button type="button" data-setup-scenario="july" aria-label="部署七月第一次阿拉曼战役"><time>JUL</time><b>第一次阿拉曼</b><small>战线形成</small></button>
+              <button type="button" data-setup-scenario="september" aria-label="部署九月阿拉姆哈勒法战役（Alam el Halfa，1942）" title="Alam el Halfa，1942"><time>SEP</time><b>阿拉姆哈勒法战役</b><small>沙漠攻势</small></button>
+              <button type="button" data-setup-scenario="october" aria-label="部署十月第二次阿拉曼战役"><time>OCT</time><b>第二次阿拉曼</b><small>全面反攻</small></button>
+            </div>
+            <div class="setup-front-markers" aria-label="交战双方">
+              <figure>
+                <img src="./mod_images/dak-insignia.svg?v=20260712-13" alt="德国非洲军团历史编制徽记">
+                <figcaption>DAK · Axis</figcaption>
+              </figure>
+              <i aria-hidden="true">VS</i>
+              <figure>
+                <img src="./mod_images/eighth-army-insignia.svg?v=20260712-13" alt="英国第八集团军历史编制徽章">
+                <figcaption>8th Army · Allies</figcaption>
+              </figure>
+            </div>
+          </section>
           <button id="setupModeNewBtn" class="setup-choice" type="button">
-            <span>开始新游戏</span>
-            <strong>选择战役、阶段和双方控制方式</strong>
+            <span class="setup-choice-icon" aria-hidden="true"><img src="./mod_images/ui-map-2.svg?v=20260712-13" alt=""></span>
+            <span class="setup-choice-copy">
+              <small>New Campaign</small>
+              <strong>开始新游戏</strong>
+              <em>选择战役与双方指挥官</em>
+            </span>
           </button>
           <button id="setupModeLoadBtn" class="setup-choice" type="button">
-            <span>加载已有存档</span>
-            <strong>直接读取最近保存的局面</strong>
+            <span class="setup-choice-icon" aria-hidden="true"><img src="./mod_images/ui-folder-open.svg?v=20260712-13" alt=""></span>
+            <span class="setup-choice-copy">
+              <small>Continue</small>
+              <strong>加载存档</strong>
+              <em id="setupLatestSaveText">检查本地存档...</em>
+            </span>
           </button>
+          <p class="setup-command-quote">
+            <span>AFRIKA KORPS · EIGHTH ARMY</span>
+            <b>北非，1942。补给、时间与每一公里都将决定战局。</b>
+          </p>
         </div>
 
         <div id="setupNewGamePanel" class="setup-mode-panel hidden">
@@ -46,15 +90,13 @@
                     <option value="october">October 18.3 - Second Battle</option>
                   </select>
                 </label>
-                <label>Game Turn
+                <section id="setupScenarioCard" class="setup-scenario-card"></section>
+                <a id="setupRulesBtn" class="setup-rules-button" href="./rules.html?v=20260712-13" target="_blank" rel="noopener">查看规则介绍</a>
+                <div class="setup-debug-fields" hidden>
                   <input id="setupTurnInput" type="number" min="1" value="1">
-                </label>
-                <label>起始阶段
                   <select id="setupPhaseSelect"></select>
-                </label>
-                <label>AI 目标 hex
                   <input id="setupAiTargetInput" value="3711">
-                </label>
+                </div>
               </div>
             </section>
 
@@ -63,34 +105,29 @@
               <div class="side-choice axis">
                 <div>
                   <span>Axis</span>
-                  <strong>西侧进攻方</strong>
+                  <strong>沙漠突击</strong>
                 </div>
                 <select id="setupAxisRoleSelect">
-                  <option value="human">人类</option>
-                  <option value="rules_ai">规则 AI</option>
-                  <option value="heuristic_ai">本地启发式 AI</option>
-                  <option value="external_ai">外部 API AI</option>
+                  <option value="human">玩家</option>
+                  <option value="heuristic_ai">简单规则 AI</option>
+                  <option value="rules_ai">复杂规则 AI</option>
+                  <option value="external_ai">模型指挥官 AI</option>
                 </select>
+                <p>1942 年，隆美尔率领德意联军横越北非沙漠。指挥装甲矛头突破阿拉曼防线，在燃料与补给耗尽前夺取胜利。</p>
               </div>
               <div class="side-choice allies">
                 <div>
                   <span>Allies</span>
-                  <strong>东侧防守方</strong>
+                  <strong>帝国防线</strong>
                 </div>
                 <select id="setupAlliesRoleSelect">
-                  <option value="human">人类</option>
-                  <option value="rules_ai">规则 AI</option>
-                  <option value="heuristic_ai">本地启发式 AI</option>
-                  <option value="external_ai">外部 API AI</option>
+                  <option value="human">玩家</option>
+                  <option value="heuristic_ai">简单规则 AI</option>
+                  <option value="rules_ai">复杂规则 AI</option>
+                  <option value="external_ai">模型指挥官 AI</option>
                 </select>
+                <p>指挥英军第八集团军及英联邦部队守卫埃及门户。依托雷区和纵深阵地拖住敌军，积蓄力量发动决定性反攻。</p>
               </div>
-              <label>默认 AI 类型
-                <select id="setupAiModeSelect">
-                  <option value="rules">规则 AI</option>
-                  <option value="heuristic">本地启发式</option>
-                  <option value="external">外部 API</option>
-                </select>
-              </label>
             </section>
 
             <section class="setup-panel summary">
@@ -104,234 +141,287 @@
           </div>
         </div>
       </div>
+
     </section>
 
     <div class="app">
       <header class="topbar">
         <div>
-          <h1>Alamein Judge Studio</h1>
-          <p>独立裁判调试台：地形、局面、移动、补给、胜负和 AI 设置。<span id="appVersionText" class="version-pill">v2026.07.06.43</span></p>
+          <h1 title="Alamein Judge Studio">Alamein</h1>
+          <p><span id="appVersionText" class="version-pill">v2026.07.12.13</span></p>
         </div>
         <div class="top-actions">
-          <select id="scenarioSelect" aria-label="预设场景">
-            <option value="july">July 18.1</option>
-            <option value="september">September 18.2</option>
-            <option value="october">October 18.3</option>
-          </select>
-          <button id="loadScenarioBtn">加载场景</button>
-          <button id="openSetupBtn">开局配置</button>
-          <button id="aiAutoToggleBtn">恢复 AI</button>
-          <button id="loadExampleBtn">示例</button>
-          <button id="nextPhaseBtn">结束当前阶段</button>
-          <button id="importBtn">导入局面 JSON</button>
-          <button id="exportBtn">导出局面</button>
-          <input id="fileInput" type="file" accept="application/json,.json" hidden>
+          <button id="sidePanelToggleBtn" class="icon-button" type="button" aria-label="收起右侧面板" title="收起右侧面板" aria-pressed="false"><span aria-hidden="true">◨</span></button>
+          <button id="gameSettingsBtn" class="icon-button" type="button" aria-label="游戏设置" title="游戏设置"><span aria-hidden="true">⚙</span></button>
         </div>
       </header>
       <section id="turnBanner" class="turn-banner axis" aria-live="polite"></section>
 
       <main class="workspace">
         <section class="map-pane" aria-label="地图">
-          <div class="map-toolbar">
-            <button id="zoomOutBtn">-</button>
-            <input id="zoomSlider" type="range" min="35" max="180" value="72">
-            <button id="zoomInBtn">+</button>
-            <button id="fitBtn">适合窗口</button>
-            <label>查看
-              <select id="mapViewModeSelect">
-                <option value="command">指挥</option>
-                <option value="move">移动</option>
-                <option value="combat">战斗</option>
-                <option value="supply">补给</option>
-                <option value="terrain">地形</option>
-                <option value="zoc">ZOC</option>
-                <option value="all">全部</option>
-              </select>
-            </label>
-            <label><input id="showUnitsToggle" type="checkbox" checked> 棋子</label>
-            <label><input id="showMarkersToggle" type="checkbox" checked> 标记</label>
-            <label><input id="expandStacksToggle" type="checkbox" checked> 展开堆叠</label>
-            <label><input id="showMinesToggle" type="checkbox" checked> 雷区</label>
-            <label><input id="showReachableToggle" type="checkbox"> 可达</label>
-            <label><input id="showZocToggle" type="checkbox"> ZOC</label>
-            <label><input id="showTerrainToggle" type="checkbox"> 地形</label>
-            <label><input id="showHexToggle" type="checkbox"> hex 标签</label>
+          <div class="map-toolbar" aria-label="棋盘工具">
+            <div class="map-mode-switch" aria-label="地图主模式">
+              <button type="button" data-map-mode="command">指挥</button>
+              <button type="button" data-map-mode="move">移动</button>
+              <button type="button" data-map-mode="combat">战斗</button>
+              <button type="button" data-map-mode="supply">补给</button>
+            </div>
+            <div class="map-tool-cluster zoom-tools" aria-label="地图缩放">
+              <button id="zoomOutBtn" type="button" aria-label="缩小" title="缩小">-</button>
+              <input id="zoomSlider" type="range" min="35" max="180" value="72" aria-label="缩放比例">
+              <output id="zoomValue" class="zoom-value" for="zoomSlider">72%</output>
+              <button id="zoomInBtn" type="button" aria-label="放大" title="放大">+</button>
+              <button id="fitBtn" class="icon-text-button" type="button" title="适合窗口"><span aria-hidden="true">□</span><b>适合</b></button>
+            </div>
+            <div class="map-tool-cluster board-tools" aria-label="视图和图层">
+              <details class="map-view-menu">
+                <summary title="高级查看"><span aria-hidden="true">◇</span><b>视图</b><output id="viewModeBadge" class="view-mode-badge">指挥</output></summary>
+                <label class="map-view-control">高级查看
+                  <select id="mapViewModeSelect">
+                    <option value="command">指挥</option>
+                    <option value="move">移动</option>
+                    <option value="combat">战斗</option>
+                    <option value="supply">补给</option>
+                    <option value="terrain">地形</option>
+                    <option value="zoc">ZOC</option>
+                    <option value="all">全部</option>
+                  </select>
+                </label>
+              </details>
+              <details class="map-layer-menu">
+                <summary title="地图图层"><span aria-hidden="true">☰</span><b>图层</b><output id="layerCountBadge" class="layer-count-badge">4</output></summary>
+                <div class="map-layer-toggles" aria-label="地图图层">
+                  <label><input id="showUnitsToggle" type="checkbox" checked> 棋子</label>
+                  <label><input id="showMarkersToggle" type="checkbox" checked> 标记</label>
+                  <label><input id="expandStacksToggle" type="checkbox" checked> 堆叠</label>
+                  <label><input id="showMinesToggle" type="checkbox" checked> 雷区</label>
+                  <label><input id="showReachableToggle" type="checkbox"> 可达</label>
+                  <label><input id="showZocToggle" type="checkbox"> ZOC</label>
+                  <label><input id="showTerrainToggle" type="checkbox"> 地形</label>
+                  <label><input id="showHexToggle" type="checkbox"> 坐标</label>
+                </div>
+              </details>
+            </div>
           </div>
+          <div id="mapLegend" class="map-legend hidden" aria-label="地图图例"></div>
           <div id="mapViewport" class="map-viewport">
             <div id="mapStage" class="map-stage">
-              <img id="mapImage" src="./El-Alamein-Map.jpg" alt="El Alamein map">
+              <img id="mapImage" src="./El-Alamein-Map.jpg" alt="El Alamein map" loading="lazy" decoding="async" fetchpriority="low">
               <svg id="mapOverlay" class="map-overlay" viewBox="0 0 4100 3275" preserveAspectRatio="none"></svg>
             </div>
           </div>
+          <div id="mapSelectionHud" class="map-selection-hud hidden" aria-live="polite"></div>
+          <div id="mapActionHint" class="map-action-hint hidden" aria-live="polite"></div>
+          <div id="phaseActionDock" class="phase-action-dock" aria-live="polite"></div>
         </section>
 
         <aside class="side-panel">
+          <section id="sideCommandBar" class="side-command-bar" aria-live="polite"></section>
           <nav class="tabs" aria-label="功能页">
-            <button class="tab active" data-tab="state">局面</button>
-            <button class="tab" data-tab="roster">编成</button>
-            <button class="tab" data-tab="judge">裁判</button>
-            <button class="tab" data-tab="move">移动</button>
-            <button class="tab" data-tab="combat">战斗</button>
-            <button class="tab" data-tab="log">日志</button>
-            <button class="tab" data-tab="rulebook">规则书</button>
-            <button class="tab" data-tab="calibration">校准</button>
-            <button class="tab" data-tab="ai">AI</button>
-            <button class="tab" data-tab="settings">设置</button>
+            <div class="tab-group play-tabs" aria-label="行动">
+              <span>行动</span>
+              <button class="tab active" data-tab="state">局面</button>
+              <button class="tab" data-tab="move">移动</button>
+              <button class="tab" data-tab="combat">战斗</button>
+              <button class="tab" data-tab="judge">裁判</button>
+            </div>
+            <div class="tab-group reference-tabs" aria-label="资料">
+              <span>资料</span>
+              <button class="tab" data-tab="roster">编成</button>
+              <button class="tab" data-tab="rulebook">规则</button>
+              <button class="tab" data-tab="ai">AI</button>
+              <button class="tab" data-tab="log">日志</button>
+            </div>
           </nav>
 
           <section id="tab-state" class="tab-panel active">
-            <div class="panel-grid two">
-              <label>回合 <input id="turnInput" type="number" min="1" value="7"></label>
-              <label>主动方
-                <select id="activeSideSelect">
-                  <option value="axis">axis</option>
-                  <option value="allies">allies</option>
-                </select>
-              </label>
-              <label>Axis 玩家
-                <select id="axisPlayerSelect">
-                  <option value="human">人类</option>
-                  <option value="rules_ai">规则 AI</option>
-                  <option value="heuristic_ai">本地启发式 AI</option>
-                  <option value="external_ai">外部 API AI</option>
-                </select>
-              </label>
-              <label>Allies 玩家
-                <select id="alliesPlayerSelect">
-                  <option value="human">人类</option>
-                  <option value="rules_ai">规则 AI</option>
-                  <option value="heuristic_ai">本地启发式 AI</option>
-                  <option value="external_ai">外部 API AI</option>
-                </select>
-              </label>
+            <section id="stateBrief" class="state-brief"></section>
+            <details class="state-stats-drawer">
+              <summary>局面数字</summary>
+              <div class="stats" id="stateStats"></div>
+            </details>
+            <section id="stateActionableUnits" class="actionable-units"></section>
+            <section id="selectionSummaryPanel" class="selection-summary"></section>
+            <div class="selection-detail-stack">
+              <section id="selectedUnitPanel" class="selected-unit empty"></section>
+              <section id="selectedHexPanel" class="selected-unit empty"></section>
             </div>
-            <label>阶段（调试）
-              <select id="phaseSelect"></select>
-            </label>
-            <div class="stats" id="stateStats"></div>
-            <section id="selectedUnitPanel" class="selected-unit empty"></section>
-            <section id="selectedHexPanel" class="selected-unit empty"></section>
             <div id="operationHint" class="operation-hint"></div>
           </section>
 
           <section id="tab-roster" class="tab-panel">
             <h2>单位</h2>
             <div class="unit-tools">
-              <input id="unitSearch" placeholder="搜索 id / hex / 阵营">
-              <button id="addUnitBtn">新增单位</button>
+              <input id="unitSearch" placeholder="搜索 id / 坐标 / 阵营">
+              <button id="addUnitBtn" class="quiet-action">新增单位</button>
             </div>
             <div id="unitList" class="unit-list"></div>
           </section>
 
           <section id="tab-judge" class="tab-panel">
-            <h2>自动裁判</h2>
+            <h2>裁判面板</h2>
             <div id="judgeSummary" class="judge-summary"></div>
-            <pre id="judgeOutput" class="output"></pre>
           </section>
 
           <section id="tab-move" class="tab-panel">
-            <label>单位
-              <select id="moveUnitSelect"></select>
-            </label>
-            <div class="panel-grid two">
-              <label>移动方式
-                <select id="moveModeSelect">
-                  <option value="normal">普通</option>
-                  <option value="road">道路模式</option>
-                </select>
-              </label>
-              <label id="moveCombatPreviewControl">骰子
-                <select id="combatDieSelect">
-                  <option value="">战斗预览</option>
-                  <option value="1">1</option>
-                  <option value="2">2</option>
-                  <option value="3">3</option>
-                  <option value="4">4</option>
-                  <option value="5">5</option>
-                  <option value="6">6</option>
-                </select>
-              </label>
+            <div class="workflow">
+              <section id="moveActionableUnits" class="actionable-units"></section>
+              <section id="moveWorkflowCue" class="workflow-cue"></section>
+              <section class="workflow-step move-command-strip">
+                <div class="workflow-step-title"><span>1</span><b>行动</b></div>
+                <div class="move-command-grid">
+                  <label>单位
+                    <select id="moveUnitSelect"></select>
+                  </label>
+                  <label>移动方式
+                    <select id="moveModeSelect">
+                      <option value="normal">普通</option>
+                      <option value="road">道路模式</option>
+                    </select>
+                  </label>
+                  <label class="route-target-field">目标格
+                    <span class="route-target-entry">
+                      <input id="moveTargetInput" placeholder="例如 3013">
+                      <button id="autoRouteBtn" class="action-hidden secondary-action" type="button">自动路线</button>
+                    </span>
+                  </label>
+                </div>
+              </section>
+              <section class="workflow-step move-route-area">
+                <div class="workflow-step-title"><span>2</span><b>路线裁判</b></div>
+                <details class="workflow-manual">
+                  <summary>坐标寻路</summary>
+                  <label>路径/目标坐标，空格或逗号分隔
+                    <input id="movePathInput" placeholder="例如 2307 2407 2508">
+                  </label>
+                </details>
+                <div id="routeStatus" class="route-status"></div>
+                <div id="routeOverview" class="route-overview empty"></div>
+                <section id="moveFeedbackShell" class="workflow-feedback empty" aria-live="polite">
+                  <div id="moveOutput" class="feedback-output"></div>
+                </section>
+                <div id="routeStepList" class="route-step-list"></div>
+                <div class="button-row workflow-step-actions">
+                  <button id="applyMoveBtn" class="action-hidden primary-action">执行移动</button>
+                  <button id="undoRouteBtn" class="action-hidden quiet-action">撤销一步</button>
+                  <button id="clearRouteBtn" class="action-hidden quiet-action">清空路线</button>
+                </div>
+              </section>
+              <details id="moveSpareActions" class="workflow-manual workflow-actions workflow-spare">
+                <summary>备用操作</summary>
+                <div class="button-row">
+                  <button id="enterRoadModeBtn" class="action-hidden">进入道路模式</button>
+                  <button id="leaveRoadModeBtn" class="action-hidden">离开道路模式</button>
+                  <button id="exitWestBtn" class="action-hidden">撤出西边</button>
+                </div>
+              </details>
             </div>
-            <label>路径，空格或逗号分隔
-              <input id="movePathInput" placeholder="例如 2307 2407 2508">
-            </label>
-            <label>目标 hex 自动寻路
-              <input id="moveTargetInput" placeholder="例如 3013">
-            </label>
-            <div id="routeStatus" class="route-status"></div>
-            <div class="button-row">
-              <button id="autoRouteBtn" class="action-hidden">自动路线</button>
-              <button id="enterRoadModeBtn" class="action-hidden">进入道路模式</button>
-              <button id="leaveRoadModeBtn" class="action-hidden">离开道路模式</button>
-              <button id="applyMoveBtn" class="action-hidden">执行移动</button>
-              <button id="exitWestBtn" class="action-hidden">撤出西边</button>
-              <button id="undoRouteBtn" class="action-hidden">撤销一步</button>
-              <button id="clearRouteBtn" class="action-hidden">清空路线</button>
-            </div>
-            <pre id="moveOutput" class="output"></pre>
           </section>
 
           <section id="tab-combat" class="tab-panel">
-            <label>攻击单位，空格或逗号分隔
-              <input id="combatAttackersInput" placeholder="选择单位后可自动填入">
-            </label>
-            <label>防御 hex，空格或逗号分隔
-              <input id="combatDefendersInput" placeholder="例如 0304">
-            </label>
-            <div class="panel-grid two">
-              <label>骰子
-                <select id="combatResolveDieSelect">
-                  <option value="">预览</option>
-                  <option value="1">1</option>
-                  <option value="2">2</option>
-                  <option value="3">3</option>
-                  <option value="4">4</option>
-                  <option value="5">5</option>
-                  <option value="6">6</option>
-                </select>
-              </label>
-              <label><span>不准撤退</span>
-                <input id="noRetreatOrderToggle" type="checkbox">
-              </label>
+            <div class="workflow">
+              <section id="combatActionableUnits" class="actionable-units"></section>
+              <section id="combatWorkflowCue" class="workflow-cue"></section>
+              <section class="workflow-step combat-command-strip">
+                <div class="workflow-step-title"><span>1</span><b>目标</b></div>
+                <div id="combatSelectionSummary" class="combat-selection-summary empty"></div>
+                <div id="combatOverview" class="combat-overview empty"></div>
+                <section id="combatFeedbackShell" class="workflow-feedback empty" aria-live="polite">
+                  <div id="combatOutput" class="feedback-output"></div>
+                </section>
+                <div id="combatTargetList" class="combat-target-list"></div>
+                <div class="button-row workflow-step-actions">
+                  <button id="useSelectedCombatBtn" class="action-hidden secondary-action">使用选中单位/目标</button>
+                  <button id="previewCombatBtn" class="action-hidden secondary-action">预览战斗</button>
+                </div>
+                <details class="workflow-manual">
+                  <summary>手动战斗</summary>
+                  <label>攻击单位，空格或逗号分隔
+                    <input id="combatAttackersInput" placeholder="选择单位后可自动填入">
+                  </label>
+                  <label>防御格，空格或逗号分隔
+                    <input id="combatDefendersInput" placeholder="例如 0304">
+                  </label>
+                </details>
+              </section>
+              <section id="combatResolveSection" class="workflow-step combat-resolve-strip action-hidden">
+                <div class="workflow-step-title"><span>2</span><b>骰子与命令</b></div>
+                <div class="combat-resolve-grid">
+                  <label>骰子
+                    <select id="combatResolveDieSelect">
+                      <option value="">预览</option>
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3">3</option>
+                      <option value="4">4</option>
+                      <option value="5">5</option>
+                      <option value="6">6</option>
+                    </select>
+                  </label>
+                  <label><span>不准撤退</span>
+                    <input id="noRetreatOrderToggle" type="checkbox">
+                  </label>
+                </div>
+                <div class="button-row workflow-step-actions">
+                  <button id="randomCombatBtn" class="action-hidden primary-action">随机掷骰结算</button>
+                  <button id="resolveCombatBtn" class="action-hidden secondary-action">按所选骰点结算</button>
+                  <button id="undoActionBtn" class="action-hidden quiet-action">撤销最近动作</button>
+                </div>
+              </section>
+              <section id="clearMineSection" class="workflow-step mine-command-strip action-hidden">
+                <div class="workflow-step-title"><span>+</span><b>工兵清雷</b></div>
+                <div class="panel-grid two">
+                  <label>清雷单位
+                    <select id="engineerSelect"></select>
+                  </label>
+                  <label>雷区坐标
+                    <input id="mineHexInput" placeholder="例如 3208">
+                  </label>
+                </div>
+                <div class="button-row">
+                  <button id="clearMineBtn" class="action-hidden primary-action">清除雷区</button>
+                </div>
+              </section>
             </div>
-            <div class="button-row">
-              <button id="useSelectedCombatBtn" class="action-hidden">使用选中单位/目标</button>
-              <button id="previewCombatBtn" class="action-hidden">预览战斗</button>
-              <button id="resolveCombatBtn" class="action-hidden">结算战斗</button>
-              <button id="undoActionBtn" class="action-hidden">撤销最近动作</button>
-            </div>
-            <div id="clearMineSection" class="action-hidden">
-              <h2>清除雷区</h2>
-              <div class="panel-grid two">
-                <label>清雷单位
-                  <select id="engineerSelect"></select>
-                </label>
-                <label>雷区 hex
-                  <input id="mineHexInput" placeholder="例如 3208">
-                </label>
-              </div>
-              <div class="button-row">
-                <button id="clearMineBtn" class="action-hidden">清除雷区</button>
-              </div>
-            </div>
-            <pre id="combatOutput" class="output"></pre>
           </section>
 
           <section id="tab-log" class="tab-panel">
             <h2>对局日志</h2>
-            <div class="button-row">
-              <button id="exportLogJsonBtn">导出 JSON</button>
-              <button id="exportLogTextBtn">导出文本</button>
-              <button id="clearLogBtn">清空日志</button>
-            </div>
+            <section id="logOverview" class="log-overview"></section>
+            <details class="workflow-manual log-tools">
+              <summary>日志工具</summary>
+              <div class="log-action-groups">
+                <section class="log-action-group">
+                  <span>导出</span>
+                  <div class="button-row">
+                    <button id="exportLogJsonBtn" class="secondary-action">JSON</button>
+                    <button id="exportLogTextBtn" class="secondary-action">文本</button>
+                  </div>
+                </section>
+                <section class="log-action-group">
+                  <span>维护</span>
+                  <div class="button-row">
+                    <button id="clearLogBtn" class="quiet-action">清空日志</button>
+                  </div>
+                </section>
+              </div>
+            </details>
             <div id="gameLogList" class="game-log-list"></div>
-            <pre id="logOutput" class="output"></pre>
+            <div id="logOutput" class="output feedback-output"></div>
           </section>
 
           <section id="tab-rulebook" class="tab-panel">
             <div class="rulebook-header">
               <h2>El Alamein 规则书</h2>
               <p>这里按实际操作顺序整理规则，方便边看地图边查。</p>
+              <div class="rulebook-tools">
+                <input id="ruleSearch" placeholder="搜索规则，例如 ZOC / 补给 / 雷区">
+                <span id="ruleSearchStatus">全部规则</span>
+                <div class="rulebook-tool-actions">
+                  <button id="expandRulesBtn" type="button" class="quiet-action">展开</button>
+                  <button id="collapseRulesBtn" type="button" class="quiet-action">收起</button>
+                </div>
+              </div>
             </div>
 
             <details class="rule-section" open>
@@ -339,7 +429,7 @@
               <div class="rule-content">
                 <p><b>游戏背景：</b>本作模拟 1942 年北非 El Alamein 一带的三组战役场景：July、September / Alam Halfa、October。</p>
                 <p><b>双方：</b>Axis 试图突破并削弱 Allied；Allies 试图守住关键区域、切断 Axis 补给并通过消耗获得胜利。</p>
-                <p><b>地图：</b>每个 hex 约 5 公里。hex 编号从左到右、从上到下读取，例如 3711 表示第 37 列第 11 行。</p>
+                <p><b>地图：</b>每格约 5 公里。坐标从左到右、从上到下读取，例如 3711 表示第 37 列第 11 行。</p>
                 <p><b>棋子数值：</b>作战单位通常使用 Combat Strength 和 Movement Allowance。前端里 `attack` 表示战斗力，`defense` 默认等于战斗力，`movement` 表示移动力。</p>
               </div>
             </details>
@@ -349,11 +439,11 @@
               <div class="rule-content">
                 <ol>
                   <li><b>Initial Movement Phase：</b>主动方可以移动任意数量单位。单位逐个移动，不能把一整摞一起移动。</li>
-                  <li><b>Combat Phase：</b>主动方可以选择攻击相邻敌方作战单位。攻击是自愿的，但一旦某单位参与攻击，相关相邻敌军可能触发“必须一起攻击”的限制。</li>
+                  <li><b>战斗阶段：</b>主动方可以选择攻击相邻敌方作战单位。攻击是自愿的，但一旦某单位参与攻击，相关相邻敌军可能触发“必须一起攻击”的限制。</li>
                   <li><b>Mechanized Movement Phase：</b>只有移动力 6 或以上且本回合未参战的机械化单位可再次移动。</li>
                   <li><b>Supply Movement Phase：</b>主动方移动补给单位。</li>
                   <li><b>Second Player-Turn：</b>另一方按同样四个阶段行动。</li>
-                  <li><b>End of Game-Turn：</b>推进回合标记，检查胜利、孤立持续等自动事项。</li>
+                  <li><b>回合结束：</b>推进回合标记，检查胜利、孤立持续等自动事项。</li>
                 </ol>
               </div>
             </details>
@@ -364,8 +454,8 @@
                 <p>移动永远是自愿的。主动方可移动全部、部分或不移动单位。每个单位在一个移动阶段只能移动一次，路径一旦执行不能回头重走。</p>
                 <ul>
                   <li>单位逐个移动；可以从堆叠中移出，也可以进入友军堆叠，但要满足堆叠限制和额外费用。</li>
-                  <li>不能进入含有敌方作战单位的 hex。</li>
-                  <li>进入敌方 ZOC 后必须停止，通常不能自愿离开敌方 ZOC，除非同 hex 有友军抵消相关 ZOC。</li>
+                  <li>不能进入含有敌方作战单位的格。</li>
+                  <li>进入敌方 ZOC 后必须停止，通常不能自愿离开敌方 ZOC，除非同格有友军抵消相关 ZOC。</li>
                   <li>未用完的移动点不会保留到后续阶段，也不能转给别的单位。</li>
                 </ul>
                 <div class="rule-table">
@@ -386,10 +476,10 @@
                 <ul>
                   <li><b>进入费用：</b>机械化 +3 MP，非机械化 +1 MP。</li>
                   <li><b>移动力：</b>进入道路模式后，单位道路移动上限变为当前移动力的 5 倍。</li>
-                  <li><b>路线：</b>道路模式必须沿道路移动。勘误要求单位不能在 Ridge hex 中进入道路模式。</li>
+                  <li><b>路线：</b>道路模式必须沿道路移动。勘误要求单位不能在山脊格中进入道路模式。</li>
                   <li><b>战斗：</b>道路模式单位攻防战力减半，向下取整。</li>
                   <li><b>堆叠：</b>道路模式单位不能与其他道路模式单位堆叠，也不能和普通单位堆在一起。</li>
-                  <li><b>朝向：</b>道路模式单位有 facing。其 ZOC 只在箭头前后两个 hex，而不是六个方向。</li>
+                  <li><b>朝向：</b>道路模式单位有朝向。其 ZOC 只在箭头前后两个格，而不是六个方向。</li>
                 </ul>
               </div>
             </details>
@@ -397,13 +487,13 @@
             <details class="rule-section">
               <summary>ZOC 控制区</summary>
               <div class="rule-content">
-                <p>作战单位周围六个 hex 通常构成 Zone of Control。ZOC 主要限制敌方移动、撤退与补给，不会阻止敌方战斗。</p>
+                <p>作战单位周围六个格通常构成 Zone of Control。ZOC 主要限制敌方移动、撤退与补给，不会阻止敌方战斗。</p>
                 <ul>
                   <li>进入敌方 ZOC 后，单位必须停止移动。</li>
                   <li>单位通常不能自愿离开敌方 ZOC。</li>
-                  <li>友军单位、工程兵或补给单位在同一 hex 时，可在部分规则中抵消敌方 ZOC 对该 hex 的影响。</li>
+                  <li>友军单位、工程兵或补给单位在同一格时，可在部分规则中抵消敌方 ZOC 对该格的影响。</li>
                   <li>补给线不能穿过敌方 ZOC，除非规则允许被友军抵消。</li>
-                  <li>道路模式单位只有前后两个 hex 形成 ZOC。</li>
+                  <li>道路模式单位只有前后两个格形成 ZOC。</li>
                 </ul>
               </div>
             </details>
@@ -425,14 +515,14 @@
             <details class="rule-section">
               <summary>补给与孤立</summary>
               <div class="rule-content">
-                <p>补给影响单位的移动、攻击、防御和是否会因孤立而被消灭。前端按四种状态显示：supplied、partially_supplied、unsupplied、isolated。</p>
+                <p>补给影响单位的移动、攻击、防御和是否会因孤立而被消灭。前端按四种状态显示：有补给、部分补给、无补给、孤立。</p>
                 <ul>
                   <li><b>Supplied：</b>能连到有效补给源，行动正常。</li>
                   <li><b>Partially Supplied：</b>距离超过正常补给范围但仍在两倍范围内，攻击能力受限。</li>
-                  <li><b>Unsupplied：</b>超出补给范围但尚未完全孤立，移动和攻击通常减半。</li>
-                  <li><b>Isolated：</b>无法追溯任何不被阻断的补给线；不能攻击，移动和防御减半。持续到下一同阶段仍孤立会被消灭。</li>
+                  <li><b>无补给：</b>超出补给范围但尚未完全孤立，移动和攻击通常减半。</li>
+                  <li><b>孤立：</b>无法追溯任何不被阻断的补给线；不能攻击，移动和防御减半。持续到下一同阶段仍孤立会被消灭。</li>
                 </ul>
-                <p>补给线不能穿过敌方作战单位、敌方 ZOC、敌方雷区、Sea hex、Depression hex。补给单位只有自己能连回有效补给源时，才可作为新的补给源继续链式补给。</p>
+                <p>补给线不能穿过敌方作战单位、敌方 ZOC、敌方雷区、全海格、洼地格。补给单位只有自己能连回有效补给源时，才可作为新的补给源继续链式补给。</p>
               </div>
             </details>
 
@@ -440,9 +530,9 @@
               <summary>堆叠限制</summary>
               <div class="rule-content">
                 <ul>
-                  <li>Allied 每个 hex 最多 3 个作战/补给单位。</li>
-                  <li>Axis 每个 hex 最多 4 个作战/补给单位。</li>
-                  <li>敌我作战单位不能同 hex。</li>
+                  <li>Allied 每格最多 3 个作战/补给单位。</li>
+                  <li>Axis 每格最多 4 个作战/补给单位。</li>
+                  <li>敌我作战单位不能同格。</li>
                   <li>堆叠中的单位必须逐个移动；不能整摞一起移动。</li>
                   <li>堆叠防御时合并防御，攻击时可按规则选择单独或合并攻击。</li>
                 </ul>
@@ -452,16 +542,16 @@
             <details class="rule-section">
               <summary>战斗</summary>
               <div class="rule-content">
-                <p>战斗发生在 Combat Phase，由主动方自愿发起。攻击单位必须与防御 hex 相邻。</p>
+                <p>战斗发生在战斗阶段，由主动方自愿发起。攻击单位必须与防御格相邻。</p>
                 <ol>
-                  <li>选择攻击单位和防御 hex。</li>
+                  <li>选择攻击单位和防御格。</li>
                   <li>合计攻击方 Combat Strength；合计防御方 Combat Strength。</li>
                   <li>应用补给、道路模式、雷区、地形等修正。</li>
                   <li>计算 odds：攻击力对防御力，向防御方有利方向取整，查 CRT 列。</li>
                   <li>掷 1d6，得到 A1/A2/A3/D1/D2/D3/Ae/De/Ex。</li>
                   <li>执行撤退、消灭、交换损失、战后前进。</li>
                 </ol>
-                <p>结果含义：A 表示攻击方撤退，D 表示防御方撤退，数字为撤退 hex 数；Ae/De 表示攻击方/防御方消灭；Ex 表示交换损失。</p>
+                <p>结果含义：A 表示攻击方撤退，D 表示防御方撤退，数字为撤退格数；Ae/De 表示攻击方/防御方消灭；Ex 表示交换损失。</p>
               </div>
             </details>
 
@@ -472,7 +562,7 @@
                   <li><b>July：</b>有 Boxed Areas。Allied 起始在盒形区域内的单位通常不能主动离开，除非战斗、交换、消灭或撤退导致。Axis 进入后可使对应 boxed 区域失效。</li>
                   <li><b>September / Alam Halfa：</b>第一回合 Allied 跳过 Initial Movement，Axis 第一回合攻击力有特殊加成。</li>
                   <li><b>October：</b>Allied 先手。前 10 回合 Axis 不能随意向西越过 Retreat Line；越线向东后，直到第 10 回合结束不能再向西退回。</li>
-                  <li><b>Victory：</b>以 Axis VP 计分。Axis 通过消灭 Allied 作战单位、使 Allied 孤立消灭、场景特殊目标等获得 VP。不同场景有不同初始 VP 和特殊得分。</li>
+                  <li><b>胜利：</b>以 Axis VP 计分。Axis 通过消灭 Allied 作战单位、使 Allied 孤立消灭、场景特殊目标等获得 VP。不同场景有不同初始 VP 和特殊得分。</li>
                 </ul>
               </div>
             </details>
@@ -489,7 +579,7 @@
                 </select>
               </label>
               <label>搜索
-                <input id="calibrationSearch" placeholder="名称 / id / hex">
+                <input id="calibrationSearch" placeholder="名称 / id / 坐标">
               </label>
             </div>
             <div id="calibrationStats" class="stats"></div>
@@ -497,80 +587,184 @@
           </section>
 
           <section id="tab-ai" class="tab-panel">
-            <div class="panel-grid two">
-              <label>AI 类型
-                <select id="aiModeSelect">
-                  <option value="rules">规则 AI</option>
-                  <option value="heuristic">本地启发式</option>
-                  <option value="external">外部 API</option>
-                </select>
-              </label>
-              <label>目标 hex <input id="aiTargetInput" value="3711"></label>
-              <label>最多动作 <input id="aiMaxActionsInput" type="number" min="1" value="20"></label>
-              <label>靠近目标 <input id="aiGoalWeight" type="number" value="5"></label>
-              <label>避开敌 ZOC <input id="aiZocPenalty" type="number" value="3"></label>
+            <div class="ai-control-board" aria-label="AI 控制">
+              <section class="ai-control-status">
+                <span>当前方</span>
+                <strong id="aiControlStatusText">等待局面</strong>
+                <small id="aiControlDetailText">AI 控制信息会在这里显示。</small>
+              </section>
+              <section class="ai-control-group">
+                <span>自动推进</span>
+                <div class="button-row">
+                  <button id="aiAutoRunBtn" class="action-hidden primary-action">恢复 AI</button>
+                  <button id="aiAutoStopBtn" class="action-hidden secondary-action">暂停 AI</button>
+                </div>
+              </section>
+              <section class="ai-control-group">
+                <span>手动一步</span>
+                <div class="button-row">
+                  <button id="aiPlayCurrentBtn" class="action-hidden secondary-action">AI 执行当前方</button>
+                  <button id="aiSuggestBtn" class="action-hidden quiet-action">建议一步</button>
+                  <button id="aiApplyBtn" class="action-hidden primary-action">执行建议</button>
+                </div>
+              </section>
             </div>
-            <div id="aiExternalConfig" class="panel-grid two ai-external-config">
-              <label>API 配置
-                <select id="aiProfileSelect"></select>
-              </label>
-              <label>配置名 <input id="aiProfileNameInput" placeholder="例如 OpenAI proxy"></label>
-              <label>API URL <input id="aiApiUrlInput" placeholder="https://example.com/alamein-ai"></label>
-              <label>模型名 <input id="aiModelInput" placeholder="alamein-agent-v1"></label>
-              <label>API Key <input id="aiApiKeyInput" type="password" autocomplete="off" placeholder="仅当前页面使用"></label>
-              <label>超时秒数 <input id="aiTimeoutInput" type="number" min="1" value="20"></label>
-              <label>最大工具轮数 <input id="aiMaxToolRoundsInput" type="number" min="0" value="4"></label>
-              <div class="button-row">
-                <button id="saveAiProfileBtn">保存 API 配置</button>
-                <button id="deleteAiProfileBtn">删除配置</button>
+            <details class="workflow-manual ai-mode-settings">
+              <summary>AI 策略</summary>
+              <div class="panel-grid two">
+                <label>AI 类型
+                  <select id="aiModeSelect">
+                    <option value="heuristic">简单规则</option>
+                    <option value="rules">复杂规则</option>
+                    <option value="external">模型指挥官</option>
+                  </select>
+                </label>
+                <label>目标格 <input id="aiTargetInput" value="3711"></label>
               </div>
-            </div>
-            <div class="button-row">
-              <button id="aiSuggestBtn" class="action-hidden">建议一步</button>
-              <button id="aiApplyBtn" class="action-hidden">执行建议</button>
-              <button id="aiPlayCurrentBtn" class="action-hidden">AI 执行当前方</button>
-              <button id="aiAutoRunBtn" class="action-hidden">恢复 AI</button>
-              <button id="aiAutoStopBtn" class="action-hidden">暂停 AI</button>
-            </div>
-            <pre id="aiOutput" class="output"></pre>
+            </details>
+            <details class="workflow-manual ai-tuning">
+              <summary>AI 参数</summary>
+              <div class="panel-grid two">
+                <label>最多动作 <input id="aiMaxActionsInput" type="number" min="1" value="20"></label>
+                <label>靠近目标 <input id="aiGoalWeight" type="number" value="5"></label>
+                <label>避开敌 ZOC <input id="aiZocPenalty" type="number" value="3"></label>
+              </div>
+            </details>
+            <details id="aiExternalConfig" class="workflow-manual ai-external-config">
+              <summary>外部 API 配置</summary>
+              <div class="panel-grid two">
+                <label>API 配置
+                  <select id="aiProfileSelect"></select>
+                </label>
+                <label>配置名 <input id="aiProfileNameInput" placeholder="例如 OpenAI proxy"></label>
+                <label>API URL <input id="aiApiUrlInput" placeholder="https://example.com/alamein-ai"></label>
+                <label>模型名 <input id="aiModelInput" placeholder="alamein-agent-v1"></label>
+                <label>API Key <input id="aiApiKeyInput" type="password" autocomplete="off" placeholder="仅当前页面使用"></label>
+                <label>超时秒数 <input id="aiTimeoutInput" type="number" min="1" value="20"></label>
+                <label>最大工具轮数 <input id="aiMaxToolRoundsInput" type="number" min="0" value="4"></label>
+                <div class="button-row">
+                  <button id="saveAiProfileBtn">保存 API 配置</button>
+                  <button id="deleteAiProfileBtn">删除配置</button>
+                </div>
+              </div>
+            </details>
+            <div id="aiOutput" class="output feedback-output"></div>
           </section>
 
           <section id="tab-settings" class="tab-panel">
-            <h2>存档 / 读档</h2>
-            <div class="panel-grid two">
-              <label>存档槽
-                <select id="saveSlotSelect"></select>
-              </label>
-              <label>存档名
-                <input id="saveSlotNameInput" placeholder="例如 Turn 3 Axis Combat">
-              </label>
+            <h2>游戏设置</h2>
+            <div class="settings-command-center">
+              <div class="settings-scenario-control">
+                <label>预设场景
+                  <select id="scenarioSelect" aria-label="预设场景">
+                    <option value="july">July 18.1</option>
+                    <option value="september">September 18.2</option>
+                    <option value="october">October 18.3</option>
+                  </select>
+                </label>
+              </div>
+              <section id="settingsCurrentGame" class="settings-current-game"></section>
+              <div class="settings-action-groups">
+                <section class="settings-action-group">
+                  <span>当前局面</span>
+                  <div class="button-row">
+                    <button id="loadScenarioBtn" class="primary-action">加载场景</button>
+                    <button id="openSetupBtn" class="secondary-action">开局配置</button>
+                    <button id="aiAutoToggleBtn" class="secondary-action">恢复 AI</button>
+                  </div>
+                </section>
+                <section class="settings-action-group">
+                  <span>文件</span>
+                  <div class="button-row">
+                    <button id="loadExampleBtn" class="quiet-action">示例</button>
+                    <button id="importBtn" class="quiet-action">导入局面 JSON</button>
+                    <button id="exportBtn" class="quiet-action">导出局面</button>
+                    <input id="fileInput" type="file" accept="application/json,.json" hidden>
+                  </div>
+                </section>
+              </div>
             </div>
-            <div class="button-row">
-              <button id="saveSlotBtn">保存到槽位</button>
-              <button id="loadSlotBtn" class="action-hidden">读取槽位</button>
-              <button id="deleteSlotBtn" class="action-hidden">删除槽位</button>
-              <button id="refreshSlotsBtn">刷新列表</button>
-            </div>
-            <pre id="saveOutput" class="output"></pre>
 
-            <h2>地图校准</h2>
-            <div class="panel-grid two">
-              <label>origin X <input id="originXInput" type="number" value="30"></label>
-              <label>origin Y <input id="originYInput" type="number" value="36"></label>
-              <label>列间距 <input id="colStepInput" type="number" value="80.9" step="0.1"></label>
-              <label>行间距 <input id="rowStepInput" type="number" value="93.7" step="0.1"></label>
-              <label>奇偶偏移 <input id="rowOffsetInput" type="number" value="46.85" step="0.05"></label>
-              <label>单位大小 <input id="unitSizeInput" type="number" value="54"></label>
-              <label>堆叠间距 <input id="stackSpreadInput" type="number" value="38"></label>
+            <h2>存档 / 读档</h2>
+            <div class="save-console">
+              <section id="settingsLatestSave" class="latest-save-card"></section>
+              <div class="save-action-groups">
+                <section class="save-action-group">
+                  <span>保存当前局面</span>
+                  <label>存档名
+                    <input id="saveSlotNameInput" placeholder="例如 Turn 3 Axis Combat">
+                  </label>
+                  <button id="saveSlotBtn" class="primary-action">保存到槽位</button>
+                </section>
+                <section class="save-action-group">
+                  <span>读取已有存档</span>
+                  <label>存档槽
+                    <select id="saveSlotSelect"></select>
+                  </label>
+                  <div class="button-row">
+                    <button id="loadSlotBtn" class="action-hidden secondary-action">读取槽位</button>
+                    <button id="deleteSlotBtn" class="action-hidden quiet-action">删除槽位</button>
+                    <button id="refreshSlotsBtn" class="quiet-action">刷新列表</button>
+                  </div>
+                </section>
+              </div>
             </div>
-            <h2>数据状态</h2>
-            <pre id="dataOutput" class="output"></pre>
+            <div id="saveOutput" class="output feedback-output"></div>
+
+            <details class="workflow-manual settings-advanced">
+              <summary>高级调试控制</summary>
+              <div class="panel-grid two">
+                <label>回合 <input id="turnInput" type="number" min="1" value="7"></label>
+                <label>主动方
+                  <select id="activeSideSelect">
+                    <option value="axis">Axis</option>
+                    <option value="allies">Allies</option>
+                  </select>
+                </label>
+                <label>Axis 玩家
+                  <select id="axisPlayerSelect">
+                    <option value="human">玩家</option>
+                    <option value="heuristic_ai">简单规则 AI</option>
+                    <option value="rules_ai">复杂规则 AI</option>
+                    <option value="external_ai">模型指挥官 AI</option>
+                  </select>
+                </label>
+                <label>Allies 玩家
+                  <select id="alliesPlayerSelect">
+                    <option value="human">玩家</option>
+                    <option value="heuristic_ai">简单规则 AI</option>
+                    <option value="rules_ai">复杂规则 AI</option>
+                    <option value="external_ai">模型指挥官 AI</option>
+                  </select>
+                </label>
+              </div>
+              <label>阶段（调试）
+                <select id="phaseSelect"></select>
+              </label>
+            </details>
+            <details class="workflow-manual settings-advanced">
+              <summary>高级地图校准</summary>
+              <div class="panel-grid two">
+                <label>origin X <input id="originXInput" type="number" value="30"></label>
+                <label>origin Y <input id="originYInput" type="number" value="36"></label>
+                <label>列间距 <input id="colStepInput" type="number" value="80.9" step="0.1"></label>
+                <label>行间距 <input id="rowStepInput" type="number" value="93.7" step="0.1"></label>
+                <label>奇偶偏移 <input id="rowOffsetInput" type="number" value="46.85" step="0.05"></label>
+                <label>单位大小 <input id="unitSizeInput" type="number" value="54"></label>
+                <label>堆叠间距 <input id="stackSpreadInput" type="number" value="38"></label>
+              </div>
+            </details>
+            <details class="workflow-manual settings-advanced">
+              <summary>数据状态</summary>
+              <div id="dataOutput" class="data-status-grid"></div>
+            </details>
           </section>
         </aside>
       </main>
     </div>
 
-    <script src="./rule_engine.js?v=20260706-43"></script>
-    <script src="./app.js?v=20260706-43"></script>
+    <script src="./ai_config.js?v=20260712-13"></script>
+    <script src="./rule_engine.js?v=20260712-13"></script>
+    <script src="./app.js?v=20260712-13"></script>
   </body>
 </html>

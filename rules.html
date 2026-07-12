@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Cache-Control" content="no-store">
+    <meta http-equiv="Pragma" content="no-cache">
+    <title>El Alamein 规则书玩家版</title>
+    <link rel="stylesheet" href="./styles.css?v=20260712-13">
+  </head>
+  <body class="rules-page">
+    <main class="rules-shell rules-shell-wide">
+      <header class="rules-hero rules-hero-game">
+        <div class="rules-hero-main">
+          <span>El Alamein Rulebook · v2026.07.12.13</span>
+          <h1>规则书玩家版</h1>
+          <p>本页按《El Alamein》规则书中文翻译稿整理，保留原规则编号和玩家需要查阅的关键流程：游戏顺序、移动、道路模式、控制区、堆叠、战斗、雷区、工兵、补给、孤立、道路、地图边缘、胜利条件和场景。</p>
+          <nav class="rules-actions" aria-label="规则页操作">
+            <a href="./index.html?v=20260712-13">返回游戏</a>
+            <a href="./counters.html?v=20260712-13">棋子图册</a>
+            <a href="#sequence">回合顺序</a>
+            <a href="#combat">战斗规则</a>
+            <a href="#victory">胜利条件</a>
+          </nav>
+        </div>
+        <aside class="rules-command-panel" aria-label="游戏速览">
+          <div>
+            <b>游戏比例</b>
+            <strong>1 hex = 约 5 km</strong>
+          </div>
+          <div>
+            <b>游戏时间</b>
+            <strong>1 Game-Turn = 1 天</strong>
+          </div>
+          <div>
+            <b>胜利核心</b>
+            <strong>轴心国总 VP</strong>
+          </div>
+          <div>
+            <b>结算工具</b>
+            <strong>1d6 + CRT</strong>
+          </div>
+        </aside>
+      </header>
+
+      <section id="quickstart" class="rules-play-strip" aria-label="玩家速览">
+        <div>
+          <span>1.0-3.0</span>
+          <b>认识战场</b>
+          <small>三个场景模拟 1942 年 7 月、9 月、10 月的阿拉曼战役。单位有战斗强度和移动力。</small>
+        </div>
+        <div>
+          <span>4.0-8.0</span>
+          <b>移动与位置</b>
+          <small>按阶段逐单位移动，处理道路模式、控制区、堆叠和地形移动费用。</small>
+        </div>
+        <div>
+          <span>9.0-12.0</span>
+          <b>战斗与雷区</b>
+          <small>相邻单位自愿攻击；雷区、工兵、补给和地形会改变战斗力与撤退。</small>
+        </div>
+        <div>
+          <span>13.0-18.0</span>
+          <b>补给与胜利</b>
+          <small>补给决定战力和孤立；最终按轴心国总 VP 对照胜利等级表。</small>
+        </div>
+      </section>
+
+      <div class="rules-layout rules-layout-game">
+        <nav class="rules-toc rules-toc-game" aria-label="规则目录">
+          <a href="#overview">1.0-3.0 游戏与组件</a>
+          <a href="#glossary">术语速查</a>
+          <a href="#sequence">4.0 游戏顺序</a>
+          <a href="#movement">5.0 移动</a>
+          <a href="#roadmode">6.0 道路模式</a>
+          <a href="#zoc">7.0 控制区</a>
+          <a href="#stacking">8.0 堆叠</a>
+          <a href="#combat">9.0 战斗</a>
+          <a href="#crt">10.0 CRT</a>
+          <a href="#mines">11.0 雷区</a>
+          <a href="#engineers">12.0 工兵</a>
+          <a href="#supply">13.0 补给</a>
+          <a href="#isolation">14.0 孤立</a>
+          <a href="#roads">15.0 道路</a>
+          <a href="#mapedge">16.0 地图边缘</a>
+          <a href="#victory">17.0 胜利条件</a>
+          <a href="#scenarios">18.0 场景</a>
+        </nav>
+
+        <article class="rules-content">
+          <section id="overview" class="rules-section rules-section-feature">
+            <div class="rules-section-head">
+              <span>1.0-3.0</span>
+              <h2>游戏、地图与单位</h2>
+            </div>
+            <p>《El Alamein》模拟 1942 年北非阿拉曼战役，包含 7 月第一次阿拉曼、9 月阿拉姆哈勒法、10 月第二次阿拉曼三个场景。每个完整 Game-Turn 代表 24 小时，每个六角格代表约 5 公里。</p>
+            <div class="rules-card-grid three">
+              <div class="rules-info-card axis">
+                <b>轴心国玩家</b>
+                <p>通过消灭盟军战斗单位、造成孤立、推进到关键地域，或在 10 月场景撤出单位来累计胜利点。</p>
+              </div>
+              <div class="rules-info-card allies">
+                <b>盟军玩家</b>
+                <p>通过阻止轴心国获得足够胜利点来获胜。雷区、控制区、补给线和防御地形是主要工具。</p>
+              </div>
+              <div class="rules-info-card">
+                <b>组件</b>
+                <p>游戏使用地图、单位棋子、雷区/道路模式/补给状态标记、回合记录表、CRT、地形效果表、设置表和一枚六面骰。</p>
+              </div>
+            </div>
+            <div class="rules-counter-strip">
+              <figure>
+                <img src="./mod_images/7-panzer.png" alt="装甲单位">
+                <figcaption>机械化战斗单位</figcaption>
+              </figure>
+              <figure>
+                <img src="./mod_images/5-Ind-inf.png" alt="步兵单位">
+                <figcaption>非机械化战斗单位</figcaption>
+              </figure>
+              <figure>
+                <img src="./mod_images/axis-engineers.png" alt="工兵单位">
+                <figcaption>工兵</figcaption>
+              </figure>
+              <figure>
+                <img src="./mod_images/Axis-Supply-1.png" alt="补给单位">
+                <figcaption>补给单位</figcaption>
+              </figure>
+              <figure>
+                <img src="./mod_images/mines-allies.png" alt="雷区标记">
+                <figcaption>雷区标记</figcaption>
+              </figure>
+              <figure>
+                <img src="./mod_images/Axis-Road-Mode.png" alt="道路模式标记">
+                <figcaption>道路模式标记</figcaption>
+              </figure>
+            </div>
+            <div class="rules-two">
+              <div>
+                <h3>单位类型</h3>
+                <ul>
+                  <li>机械化单位包括装甲、侦察、装甲步兵。</li>
+                  <li>非机械化单位包括步兵、滑翔机步兵、空降步兵、伞兵、工兵、防空单位。</li>
+                  <li>非战斗单位主要是补给单位。</li>
+                </ul>
+              </div>
+              <div>
+                <h3>单位数值</h3>
+                <ul>
+                  <li>战斗强度用于攻击和防御。</li>
+                  <li>移动力表示一个移动阶段中最多可花费的移动点。</li>
+                  <li>单位规模、类型、国籍和番号用于识别部队与适用规则。</li>
+                </ul>
+              </div>
+            </div>
+            <a class="rules-section-action" href="./counters.html?v=20260712-13">查看棋子图册</a>
+          </section>
+
+          <section id="glossary" class="rules-section">
+            <div class="rules-section-head">
+              <span>Glossary</span>
+              <h2>专业术语速查</h2>
+            </div>
+            <p>规则书里会反复使用一些兵棋术语，下面是对这些术语的解释：</p>
+            <div class="rules-glossary-list">
+              <div>
+                <b><span>Hex</span><em>六角格</em></b>
+                <p>地图上的一个格子。单位的位置、移动距离、相邻关系、控制区、补给线都按六角格计算。</p>
+              </div>
+              <div>
+                <b><span>Game-Turn</span><em>游戏回合</em></b>
+                <p>完整的一天战斗流程。一个游戏回合通常包含双方各自的玩家回合，回合结束后回合标记前进。</p>
+              </div>
+              <div>
+                <b><span>Player-Turn</span><em>玩家回合</em></b>
+                <p>某一方连续执行自己的阶段。当前正在执行玩家回合的一方就是当前玩家。</p>
+              </div>
+              <div>
+                <b><span>Phase</span><em>阶段</em></b>
+                <p>玩家回合里的具体步骤，例如初始移动、战斗、机械化移动、补给移动。很多动作只能在对应阶段执行。</p>
+              </div>
+              <div>
+                <b><span>Phasing Player</span><em>当前玩家</em></b>
+                <p>正在执行自己玩家回合的一方。规则中“友军”通常指当前玩家一方，“敌军”指另一方。</p>
+              </div>
+              <div>
+                <b><span>MP</span><em>移动点</em></b>
+                <p>单位在一个移动阶段中可花费的行动额度。进入地形、进入或离开堆叠、进入或退出道路模式都会消耗移动点。</p>
+              </div>
+              <div>
+                <b><span>Combat Strength</span><em>战斗强度</em></b>
+                <p>单位用于攻击和防御的基本数值。补给、道路模式、地形、雷区和场景特殊规则可能会修改它。</p>
+              </div>
+              <div>
+                <b><span>ZOC</span><em>控制区</em></b>
+                <p>通常是战斗单位周围相邻六角格，会限制敌方移动、撤退和补给线。</p>
+              </div>
+              <div>
+                <b><span>Stacking</span><em>堆叠</em></b>
+                <p>多个友军单位在同一个六角格内。堆叠有数量限制，进入或离开含友军单位的格子要额外支付移动点。</p>
+              </div>
+              <div>
+                <b><span>CRT</span><em>战斗结果表</em></b>
+                <p>战斗结算用表。战斗时先算攻击力与防御力比值，再掷 1d6，在表上查出结果。</p>
+              </div>
+              <div>
+                <b><span>Odds</span><em>战斗比值</em></b>
+                <p>攻击方总战斗强度对防御方总战斗强度的比例，例如 2:1、1:2。比值总是向有利于防御方的方向取整。</p>
+              </div>
+              <div>
+                <b><span>DRM</span><em>骰子修正</em></b>
+                <p>骰子结果的加减修正。如果规则或表格要求，会在掷骰结果上加减数值。本游戏主要用 CRT 栏位和结果处理战斗。</p>
+              </div>
+              <div>
+                <b><span>VP</span><em>胜利点</em></b>
+                <p>用来判定胜负的分数。轴心国通过消灭、孤立、推进或撤出单位等方式获得 VP，最终用 VP 等级判定胜负。</p>
+              </div>
+              <div>
+                <b><span>Supply</span><em>补给</em></b>
+                <p>单位能否从补给源追踪到有效补给线。补给状态会影响攻击、防御、移动，道路模式也要求单位有补给。</p>
+              </div>
+              <div>
+                <b><span>Isolation</span><em>孤立</em></b>
+                <p>比无补给更严重的状态。孤立单位战斗和移动能力受限，持续孤立可能导致单位被消灭。</p>
+              </div>
+              <div>
+                <b><span>Road Mode</span><em>道路模式</em></b>
+                <p>单位以道路行军队形移动。进入后剩余移动力可按道路模式放大，但战斗强度减半，且前后道路空间必须保持空置。</p>
+              </div>
+              <div>
+                <b><span>Retreat</span><em>撤退</em></b>
+                <p>战斗结果要求单位后退指定格数。撤退不是普通移动，不消耗 MP；无法合法撤退时单位被消灭。</p>
+              </div>
+              <div>
+                <b><span>Advance After Combat</span><em>战后推进</em></b>
+                <p>战斗清空敌方格子，或攻击方撤退、被消灭后，符合条件的一方可以选择让一个单位推进到空出的格子。</p>
+              </div>
+            </div>
+          </section>
+
+          <section id="sequence" class="rules-section">
+            <div class="rules-section-head">
+              <span>4.0</span>
+              <h2>游戏顺序</h2>
+            </div>
+            <p>每个游戏回合由两个玩家回合组成。场景规则指定哪一方先行动。每个玩家回合由四个阶段组成，正在执行阶段的一方称为当前玩家。</p>
+            <div class="rules-phase-track">
+              <div><span>1</span><b>Initial Movement</b><small>当前玩家可移动任意数量己方可移动单位。</small></div>
+              <div><span>2</span><b>Combat</b><small>当前玩家可以攻击相邻敌方单位；战斗前判定补给。</small></div>
+              <div><span>3</span><b>Mechanized Movement</b><small>只移动本玩家回合战斗阶段未攻击的机械化单位。</small></div>
+              <div><span>4</span><b>Supply Movement</b><small>当前玩家移动自己的补给单位。</small></div>
+              <div><span>5</span><b>Second Player-Turn</b><small>另一方按同样四个阶段行动。</small></div>
+              <div><span>6</span><b>End Game-Turn</b><small>回合标记前进，按场景长度继续或结算。</small></div>
+            </div>
+            <div class="rules-callout">9 月场景第 1 回合盟军没有初始移动阶段，直接进入战斗阶段。轴心国第 1 游戏回合的攻击强度加倍，是阿拉姆哈勒法场景的首日突击规则：只有轴心国单位在第 1 回合发起攻击时适用，计算攻击方总战斗强度时把参战轴心国单位的攻击强度按 2 倍计入；它不提高防御强度，也不延续到第 2 回合。</div>
+          </section>
+
+          <section id="movement" class="rules-section">
+            <div class="rules-section-head">
+              <span>5.0</span>
+              <h2>移动</h2>
+            </div>
+            <p>当前玩家在移动阶段中可以移动任意数量己方单位，也可以不移动。单位必须逐格、逐单位移动；堆叠不能整体移动。单位一旦完成移动，不能重新走回或修改已宣布路线。</p>
+            <div class="rules-table">
+              <div class="head">地形类型</div><div class="head">机械化单位</div><div class="head">非机械化单位</div>
+              <div>清晰地形 / 清晰道路</div><div>1 MP</div><div>1 MP</div>
+              <div>山脊</div><div>+4 MP，合计 5 MP</div><div>+1 MP，合计 2 MP</div>
+              <div>洼地</div><div>+3 MP，合计 4 MP</div><div>+1 MP，合计 2 MP</div>
+              <div>敌方雷区</div><div>额外 +8 MP，通常合计 9 MP</div><div>额外 +2 MP，通常合计 3 MP</div>
+              <div>全海六角格 / 海边六角边 / 非友军地图边缘</div><div>禁止进入</div><div>禁止进入</div>
+            </div>
+            <div class="rules-two">
+              <div>
+                <h3>禁止与限制</h3>
+                <ul>
+                  <li>单位永远不能进入包含敌方单位的六角格。</li>
+                  <li>单位可以进入敌方控制区，但进入后必须停止。</li>
+                  <li>单个单位不能自愿离开敌方控制区，除非该格还有另一个友军单位留守。</li>
+                  <li>非机械化单位不能在机械化移动阶段移动。</li>
+                  <li>只有未参加本玩家回合战斗阶段攻击的机械化单位，才能在机械化移动阶段移动。</li>
+                </ul>
+              </div>
+              <div>
+                <h3>堆叠移动费用</h3>
+                <ul>
+                  <li>机械化单位进入已有友军单位的六角格，或从含友军单位的六角格离开，额外支付 3 MP。</li>
+                  <li>非机械化单位进入或离开堆叠，额外支付 1 MP。</li>
+                  <li>这些费用在正常地形移动费用之外额外支付。</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+
+          <section id="roadmode" class="rules-section">
+            <div class="rules-section-head">
+              <span>6.0</span>
+              <h2>道路模式移动</h2>
+            </div>
+            <p>道路模式表示单位以道路行军队形移动。它提高机动性，但降低战斗能力和部署能力。任何战斗单位都可以进入道路模式；道路模式由标记表示。</p>
+            <div class="rules-stat-grid">
+              <div><b>进入费用</b><strong>机械化 3 MP</strong><small>非机械化 1 MP</small></div>
+              <div><b>移动换算</b><strong>剩余移动力 x5</strong><small>支付进入费用后再换算</small></div>
+              <div><b>战斗</b><strong>战斗强度减半</strong><small>攻击或防御后自动退出</small></div>
+              <div><b>控制区</b><strong>前后 2 格</strong><small>由道路模式箭头决定</small></div>
+            </div>
+            <ul>
+              <li>非机械化单位只能在初始移动阶段进入道路模式；机械化单位可在任一移动阶段进入道路模式，但机械化移动阶段进入时必须未参加本玩家回合战斗。</li>
+              <li>进入道路模式必须有补给。</li>
+              <li>位于堆叠、敌方雷区、敌方控制区、洼地或山脊中的单位不能进入道路模式。</li>
+              <li>机械化单位只能在道路上进入道路模式；非机械化单位可从清晰地形进入。</li>
+              <li>道路模式单位不能与其他单位堆叠，不能进入敌方雷区。</li>
+              <li>离开道路模式费用与进入相同：机械化 3 MP，非机械化 1 MP。</li>
+              <li>道路模式单位变为孤立或无补给时自动离开道路模式；机械化单位离开道路时也自动退出道路模式并支付费用。</li>
+            </ul>
+          </section>
+
+          <section id="zoc" class="rules-section">
+            <div class="rules-section-head">
+              <span>7.0</span>
+              <h2>控制区</h2>
+            </div>
+            <p>战斗单位或战斗单位堆叠周围六个相邻六角格构成控制区。道路模式单位的控制区只包括道路模式标记箭头所指的头部六角格和尾部六角格。控制区限制移动、撤退和补给，但不直接改变战斗结果。</p>
+            <div class="rules-check-grid">
+              <div><b>移动</b><p>进入敌方控制区后必须停止；单个单位不能自愿离开敌方控制区。</p></div>
+              <div><b>抵消</b><p>如果相邻敌军旁有多个友军单位，只需留下一个友军单位，其余单位可按移动规则离开。</p></div>
+              <div><b>补给</b><p>补给线不能穿过敌方控制区；有友军单位时，该位置可抵消控制区对补给追踪的阻断。</p></div>
+              <div><b>撤退</b><p>单位可以因战斗结果撤出敌方控制区，但不能撤退进入敌方控制区。</p></div>
+            </div>
+          </section>
+
+          <section id="stacking" class="rules-section">
+            <div class="rules-section-head">
+              <span>8.0</span>
+              <h2>堆叠</h2>
+            </div>
+            <p>堆叠指同一六角格中存在一个以上友军单位。除战斗结算和工兵规则另有说明外，堆叠限制在任何时候都适用。</p>
+            <div class="rules-stat-grid">
+              <div><b>盟军</b><strong>最多 3 个</strong><small>战斗单位和/或补给单位</small></div>
+              <div><b>轴心国</b><strong>最多 4 个</strong><small>战斗单位和/或补给单位</small></div>
+              <div><b>移动</b><strong>逐个单位</strong><small>堆叠不能整体移动</small></div>
+              <div><b>工兵</b><strong>不计入数量</strong><small>但会影响堆叠移动费用</small></div>
+            </div>
+            <ul>
+              <li>单位在堆叠中的上下位置没有意义。</li>
+              <li>如果要移动堆叠底部单位，不需要先移动上方单位。</li>
+              <li>拆堆或进入堆叠时仍需支付对应移动点费用。</li>
+            </ul>
+          </section>
+
+          <section id="combat" class="rules-section">
+            <div class="rules-section-head">
+              <span>9.0</span>
+              <h2>战斗</h2>
+            </div>
+            <p>战斗发生在相邻敌对单位之间。在当前玩家的战斗阶段中，攻击由当前玩家自愿选择。当前玩家是攻击方，另一方是防御方。</p>
+            <div class="rules-two">
+              <div>
+                <h3>战斗程序</h3>
+                <ol>
+                  <li>合计参与本次攻击的所有攻击单位战斗强度。</li>
+                  <li>合计被攻击六角格中所有防御单位战斗强度。</li>
+                  <li>应用补给、地形、雷区和道路模式影响；补给影响先于地形或雷区计算。</li>
+                  <li>将攻击强度与防御强度比较，向有利于防御方方向取整。</li>
+                  <li>掷 1d6，在 CRT 对应列中读取结果，并立即执行。</li>
+                </ol>
+              </div>
+              <div>
+                <h3>攻击义务</h3>
+                <ul>
+                  <li>只有与防御单位相邻的友军单位才能攻击。</li>
+                  <li>攻击不是强制的；但若某单位攻击，则必须确保所有与该攻击单位相邻的敌方单位在本阶段被某次合法攻击覆盖，除非雷区规则限制。</li>
+                  <li>同一被攻击六角格内的所有防御单位必须共同防御。</li>
+                  <li>任何单位在一个战斗阶段最多攻击一次，最多被攻击一次。</li>
+                </ul>
+              </div>
+            </div>
+            <ul>
+              <li>同一堆叠中的单位可以分别攻击，也可以共同攻击。</li>
+              <li>一次攻击可以攻击多个敌方单位，但雷区规则可能限制多目标攻击。</li>
+              <li>战斗强度减半时，小数部分舍弃。</li>
+              <li>如果战斗清空某六角格，且该格没有崎岖地形或敌方雷区，攻击方可选择让一个参战单位战后推进进入该格。</li>
+              <li>如果战斗结果导致攻击方撤退或攻击方被消灭，防御方可选择让一个防御单位推进进入攻击方撤出的六角格。</li>
+            </ul>
+          </section>
+
+          <section id="crt" class="rules-section">
+            <div class="rules-section-head">
+              <span>10.0</span>
+              <h2>战斗结果表</h2>
+            </div>
+            <div class="rules-two">
+              <figure class="rules-figure">
+                <img src="./mod_images/CRT.png" alt="战斗结果表">
+                <figcaption>按攻击强度 : 防御强度查列，掷 1d6 读取结果。低于 1:4 按 1:4，高于 7:1 按 7:1。</figcaption>
+              </figure>
+              <div>
+                <div class="rules-table">
+                  <div class="head">结果</div><div class="head">含义</div><div class="head">执行</div>
+                  <div>A1 / A2 / A3</div><div>攻击方撤退 1/2/3 格</div><div>攻击单位按结果撤退。</div>
+                  <div>D1 / D2 / D3</div><div>防御方撤退 1/2/3 格</div><div>防御单位按结果撤退。</div>
+                  <div>Ex</div><div>交换结果</div><div>防御单位消灭；攻击方消灭若干单位，其正面战斗强度总和至少等于被消灭防御单位正面战斗强度总和。</div>
+                  <div>Ae / De</div><div>攻击方 / 防御方消灭</div><div>对应一方所有参战单位移出地图。</div>
+                </div>
+              </div>
+            </div>
+            <div class="rules-callout">撤退不是普通移动，不消耗移动点，也不支付堆叠或地形费用。无法安全撤退的单位被消灭。撤退导致临时超堆叠时，下一次友军移动阶段开始必须先恢复合法堆叠。</div>
+          </section>
+
+          <section id="mines" class="rules-section">
+            <div class="rules-section-head">
+              <span>11.0</span>
+              <h2>雷区</h2>
+            </div>
+            <p>雷区标记表示某六角格存在布雷区域。雷区作为地形处理，会阻碍敌方移动、增加友军防御强度，并影响补给线追踪。</p>
+            <div class="rules-two">
+              <div>
+                <h3>雷区效果</h3>
+                <ul>
+                  <li>进入敌方雷区额外支付：机械化 +8 MP，非机械化 +2 MP。</li>
+                  <li>工兵进入敌方雷区不支付上述额外雷区费用。</li>
+                  <li>进入敌方雷区的友军战斗单位不能自愿离开，直到雷区被清除。</li>
+                  <li>补给单位不能进入敌方雷区。</li>
+                  <li>位于友军雷区中的战斗单位攻击正常，防御时战斗强度加倍。</li>
+                  <li>雷区本身不产生控制区。</li>
+                </ul>
+              </div>
+              <div>
+                <h3>清除雷区</h3>
+                <ul>
+                  <li>工兵在友军初始移动阶段进入敌方雷区即可清除该雷区。</li>
+                  <li>战斗单位必须先进入敌方雷区并停留，在友军战斗阶段开始时掷骰清除。</li>
+                  <li>盟军掷 1 清除失败；轴心国掷 1 或 2 清除失败；其他结果清除。</li>
+                  <li>每个单位每个游戏回合最多清除一个敌方雷区。</li>
+                  <li>刚清除雷区的单位在该玩家回合剩余时间内不能从该六角格发动攻击。</li>
+                  <li>雷区一旦清除，本局剩余时间内永久消失。</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+
+          <section id="engineers" class="rules-section">
+            <div class="rules-section-head">
+              <span>12.0</span>
+              <h2>工兵单位</h2>
+            </div>
+            <p>工兵单位具有两项特殊能力：清除敌方雷区，以及协助友军战斗单位攻击位于敌方雷区中的敌军单位。工兵只能在初始移动阶段移动。</p>
+            <div class="rules-check-grid">
+              <div><b>清雷</b><p>工兵进入敌方雷区，不支付敌雷区额外费用，并在进入后清除该雷区。</p></div>
+              <div><b>限制</b><p>每个工兵每个游戏回合要么清除一个敌方雷区，要么在一个玩家回合协助一次攻击，不能两者都做。</p></div>
+              <div><b>堆叠</b><p>工兵不计入堆叠数量限制，但其他单位进入或离开含工兵的六角格时仍应支付堆叠费用。</p></div>
+              <div><b>协助攻击</b><p>未清雷的工兵若在战斗阶段开始时邻接目标，可协助攻击敌方雷区中的敌军，使其不因雷区获得防御加倍。</p></div>
+            </div>
+          </section>
+
+          <section id="supply" class="rules-section">
+            <div class="rules-section-head">
+              <span>13.0</span>
+              <h2>补给</h2>
+            </div>
+            <p>补给影响移动、攻击和防御。补给状态在移动目的上于移动阶段开始时判定，在战斗目的上于战斗发生瞬间判定。补给单位只有满足补给链要求时，才是补给源。</p>
+            <div class="rules-table">
+              <div class="head">补给状态</div><div class="head">移动力</div><div class="head">攻击 / 防御</div>
+              <div>有补给 Supplied</div><div>正常</div><div>攻击正常，防御正常</div>
+              <div>部分补给 Partially Supplied</div><div>正常</div><div>攻击减半，防御正常</div>
+              <div>无补给 Unsupplied</div><div>减半</div><div>攻击减半，防御正常</div>
+              <div>孤立 Isolated</div><div>减半</div><div>不能攻击，防御减半</div>
+            </div>
+            <ul>
+              <li>补给线不能穿过敌方占据六角格、敌方控制六角格、敌方雷区六角格。</li>
+              <li>单位位于补给源攻击补给范围内且能追踪补给线，则有补给。</li>
+              <li>单位位于友军地图边缘 4 格以内，或位于友军活动道路段 6 格以内，可视为有补给。</li>
+              <li>超出上述范围但仍在两倍范围内时，为部分补给。</li>
+              <li>补给单位不能以部分补给状态作为补给源。</li>
+              <li>因补给减半时，战斗强度或移动力向下取整。</li>
+            </ul>
+          </section>
+
+          <section id="isolation" class="rules-section">
+            <div class="rules-section-head">
+              <span>14.0</span>
+              <h2>孤立</h2>
+            </div>
+            <p>孤立是指单位无法追踪任何未阻断路径回到补给源。战斗单位、补给单位和工兵单位都可能孤立。敌方单位、敌方控制区、敌方雷区、洼地、非友军地图边缘和海洋都可能造成孤立。</p>
+            <div class="rules-check-grid">
+              <div><b>攻击</b><p>孤立单位不能攻击。</p></div>
+              <div><b>移动</b><p>孤立单位移动力减半。</p></div>
+              <div><b>防御</b><p>孤立单位防御强度减半，但最低防御强度为 1。</p></div>
+              <div><b>消灭</b><p>如果孤立单位在下一个游戏回合同一阶段结束时仍孤立，则自动消灭。</p></div>
+            </div>
+          </section>
+
+          <section id="roads" class="rules-section">
+            <div class="rules-section-head">
+              <span>15.0</span>
+              <h2>道路与补给前锋</h2>
+            </div>
+            <p>地图上有一条从西侧海岸区域延伸到东侧地图边缘的道路。道路被双方补给前锋标记分割为轴心国道路段和盟军道路段。活动道路段可作为固定补给源，非活动道路段不是补给源。</p>
+            <ul>
+              <li>道路段从友军地图边缘道路六角格开始，沿道路数到并包括友军补给前锋标记所在六角格。</li>
+              <li>如果补给前锋标记与友军地图边缘之间的道路段未被敌方控制区阻断，则该道路段是活动道路段。</li>
+              <li>每方同一时间只能拥有一个补给前锋点。</li>
+              <li>友军战斗单位位于道路上并沿道路移动，可以推进补给前锋标记。</li>
+              <li>敌方战斗单位沿道路推进到对方补给前锋标记后方一个六角格，可以把对方补给前锋标记推回。</li>
+            </ul>
+          </section>
+
+          <section id="mapedge" class="rules-section">
+            <div class="rules-section-head">
+              <span>16.0</span>
+              <h2>地图边缘</h2>
+            </div>
+            <p>对盟军而言，东侧地图边缘是友军地图边缘；对轴心国而言，西侧地图边缘是友军地图边缘。敌方地图边缘、南侧地图边缘、海岸或海洋边缘是非友军地图边缘。</p>
+            <ul>
+              <li>友军地图边缘是补给源，对补给单位和战斗单位的攻击补给范围均为 4 格。</li>
+              <li>友军地图边缘不计入补给链。</li>
+              <li>战斗单位若因战斗结果从友军地图边缘撤出地图，必须通过同一六角格重新进入。</li>
+              <li>战斗单位若从敌方地图边缘撤出地图，则被消灭。</li>
+              <li>除 10 月场景撤出得分规则外，单位不能自愿离开地图。</li>
+            </ul>
+          </section>
+
+          <section id="victory" class="rules-section">
+            <div class="rules-section-head">
+              <span>17.0</span>
+              <h2>胜利条件</h2>
+            </div>
+            <p>轴心国胜利由轴心国玩家在场景中累计的胜利点决定。盟军胜利通过阻止轴心国获得足够胜利点实现。每个场景有一个轴心国初始胜利点，场景中获得的胜利点加到该初始点数上。</p>
+            <div class="rules-table">
+              <div class="head">轴心国总胜利点</div><div class="head">胜利类型</div><div class="head">说明</div>
+              <div>60 或更多</div><div>轴心国决定性胜利</div><div>Axis Decisive</div>
+              <div>50 到 59</div><div>轴心国实质性胜利</div><div>Axis Substantive</div>
+              <div>40 到 49</div><div>轴心国边际胜利</div><div>Axis Marginal</div>
+              <div>30 到 39</div><div>平局</div><div>Draw</div>
+              <div>20 到 29</div><div>盟军边际胜利</div><div>Allied Marginal</div>
+              <div>10 到 19</div><div>盟军实质性胜利</div><div>Allied Substantive</div>
+              <div>9 或更少</div><div>盟军决定性胜利</div><div>Allied Decisive</div>
+            </div>
+            <h3>通用额外胜利点</h3>
+            <ul>
+              <li>每有一个盟军战斗单位因 Ae 或 De 战斗结果被消灭，轴心国 +1 VP。</li>
+              <li>每有一个盟军战斗单位因撤退被阻断而被消灭，轴心国 +1 VP。</li>
+              <li>因 Ex 交换结果被消灭的盟军单位不计入此项。</li>
+              <li>每个游戏回合结束时，每有一个盟军战斗单位因孤立而被消灭，轴心国 +1 VP。</li>
+            </ul>
+            <div class="rules-table">
+              <div class="head">场景</div><div class="head">初始 VP</div><div class="head">特殊胜利点</div>
+              <div>7 月</div><div>25</div><div>统计 3400 列以东至最东端轴心国战斗单位之间的列数，每列 +3 VP；只有有补给或部分补给的轴心国单位计算。</div>
+              <div>9 月</div><div>35</div><div>每有一个盟军雷区六角格被轴心国单位清除，轴心国 +3 VP。</div>
+              <div>10 月</div><div>-20</div><div>第 10 游戏回合结束后，轴心国可从西侧撤出单位：每个补给单位 +10 VP；每个战斗单位按正面战斗强度加 VP。</div>
+            </div>
+          </section>
+
+          <section id="scenarios" class="rules-section">
+            <div class="rules-section-head">
+              <span>18.0</span>
+              <h2>场景</h2>
+            </div>
+            <div class="rules-card-grid">
+              <div class="rules-info-card">
+                <b>18.1 7 月场景</b>
+                <p>持续 7 个游戏回合，轴心国先行动。方框区域限制场景开始时位于其中的盟军单位，或后来进入方框区域的盟军单位：它们不能离开该区域，除非因战斗结果、撤退或被消灭而离开。轴心国单位进入某方框区域后，该区域限制取消。方框区域只影响盟军单位；勘误补充，方框区域中的盟军单位始终视为有补给。</p>
+              </div>
+              <div class="rules-info-card">
+                <b>18.2 9 月场景</b>
+                <p>持续 7 个游戏回合，轴心国先行动。第 1 游戏回合盟军没有初始移动阶段，直接进入战斗阶段。第 1 游戏回合轴心国单位只在攻击时战斗强度加倍：也就是轴心国作为攻击方结算战斗时，参战轴心国单位的攻击强度按 2 倍加入攻击总值；防御、撤退、补给、移动和后续回合不享受这个加成。</p>
+              </div>
+              <div class="rules-info-card">
+                <b>18.3 10 月场景</b>
+                <p>持续 15 个游戏回合，盟军先行动。直到并包括第 10 游戏回合，轴心国受到撤退线相关移动限制：撤退线和起始线以西单位不能向西移动；撤退线以东单位不能向西越过撤退线。第 10 回合结束后，轴心国可以通过西侧地图边缘撤出单位获得胜利点。</p>
+              </div>
+            </div>
+          </section>
+        </article>
+      </div>
+    </main>
+  </body>
+</html>

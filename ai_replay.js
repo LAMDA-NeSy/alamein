@@ -6,6 +6,7 @@ const path = require("node:path");
 const Rules = require("./rule_engine.js");
 
 const ROOT = __dirname;
+const OUT = path.join(ROOT, "last_ai_replay_report.json");
 const SCENARIO_FILES = {
   july: "scenarios/july.json",
   september: "scenarios/september.json",
@@ -57,6 +58,7 @@ function makeReplay(scenarioName, options = {}) {
   const minesAt = (hex) => Rules.minesAt(ctx(), hex);
   const enemyZocSources = (side, hex) => Rules.enemyZocSources(ctx(), side, hex);
   const checkMove = (unitId, rawPath, moveOptions = {}) => Rules.checkMove(ctx(), unitId, rawPath, moveOptions);
+  const findLegalPath = (unitId, targetHex, moveOptions = {}) => Rules.findLegalPath(ctx(), unitId, targetHex, moveOptions);
   const checkCombat = (action) => Rules.checkCombat(ctx(), action);
   const movementAllowance = (unit, moveOptions = {}) => Rules.movementAllowance(ctx(), unit, moveOptions);
   const checkSupply = (side) => Rules.checkSupply(ctx(), side);
@@ -196,6 +198,78 @@ function makeReplay(scenarioName, options = {}) {
     return values.reduce((sum, outcome) => sum + (weights[outcome] || 0), 0) / values.length;
   }
 
+  function combatOutcomeStats(crtColumnMap = {}) {
+    const outcomes = Object.values(crtColumnMap || {}).filter(Boolean);
+    const count = (predicate) => outcomes.filter(predicate).length;
+    return {
+      faces: outcomes.length,
+      defender_eliminated: count((outcome) => outcome === "De" || outcome === "Ex"),
+      defender_retreat: count((outcome) => /^D[123]$/.test(String(outcome))),
+      attacker_eliminated: count((outcome) => outcome === "Ae"),
+      attacker_retreat: count((outcome) => /^A[123]$/.test(String(outcome))),
+      exchange: count((outcome) => outcome === "Ex"),
+      defender_harm: count((outcome) => /^D[123]$/.test(String(outcome)) || outcome === "De" || outcome === "Ex"),
+      attacker_harm: count((outcome) => /^A[123]$/.test(String(outcome)) || outcome === "Ae" || outcome === "Ex")
+    };
+  }
+
+  function terrainDefenseBonusFromTags(tags = []) {
+    if (tags.includes("alamein_box")) return 3;
+    if (tags.includes("hill_or_ridge") || tags.includes("depression")) return 1;
+    return 0;
+  }
+
+  function combatTargetIntel(action) {
+    const attackerSide = state.active_side;
+    const defenderSide = attackerSide === "axis" ? "allies" : "axis";
+    const alamein = rules.game?.alamein_hex || "3711";
+    return (action.defender_hexes || []).map((rawHex) => {
+      const hex = normalizeHex(rawHex);
+      const tags = hexTags(hex);
+      const defenders = (unitsByHex()[hex] || [])
+        .filter((unit) => unit.side === defenderSide && isCombatUnit(unit))
+        .map((unit) => ({
+          id: unit.id,
+          name: unit.name || unit.id,
+          atk: Number(unit.attack || 0),
+          def: Number(unit.defense ?? unit.attack ?? 0),
+          effective_defense: Rules.effectiveDefense(ctx(), unit, hex),
+          supply: supplyState(unit.id)
+        }));
+      return {
+        hex,
+        terrain: tags,
+        control: state.control?.[hex] || "",
+        defenders,
+        defender_supply_states: [...new Set(defenders.map((unit) => unit.supply).filter(Boolean))],
+        friendly_mines: Rules.friendlyMinesAt(ctx(), defenderSide, hex).map((mine) => mine.id),
+        enemy_mines: enemyMinesAt(attackerSide, hex).map((mine) => mine.id),
+        terrain_defense_bonus: terrainDefenseBonusFromTags(tags),
+        is_primary_objective: hex === alamein,
+        retreat_options_estimate: defenders.reduce((sum, defender) => {
+          const unit = state.units[defender.id];
+          if (!unit) return sum;
+          return sum + neighbors(hex).filter((nb) => Rules.legalRetreatHex(ctx(), { ...unit, id: defender.id }, nb, attackerSide)).length;
+        }, 0)
+      };
+    });
+  }
+
+  function combatStrategicValue(action) {
+    if (!action || action.type !== "combat") return 0;
+    const details = action.verdict?.details || {};
+    const stats = combatOutcomeStats(details.crt_column || {});
+    const targetIntel = combatTargetIntel(action);
+    const objectiveBonus = targetIntel.some((target) => target.is_primary_objective) ? 28 : 0;
+    const terrainBonus = targetIntel.some((target) => target.terrain.includes("alamein_box")) ? 12 : 0;
+    const blockedRetreatBonus = targetIntel.some((target) => target.retreat_options_estimate <= target.defenders.length) ? 16 : 0;
+    const defenderStrength = Number(details.defense || 0);
+    const attackerStrength = Number(details.attack || 0);
+    return stats.defender_harm * 9 + stats.defender_eliminated * 8 - stats.attacker_harm * 7
+      + objectiveBonus + terrainBonus + blockedRetreatBonus
+      + Math.max(0, attackerStrength - defenderStrength) * 1.5;
+  }
+
   function crtColumn(column) {
     const columns = rules.combat?.odds_columns || Rules.DEFAULT_RULES.combat?.odds_columns || ["1-4", "1-3", "1-2", "1-1", "2-1", "3-1", "4-1", "5-1", "6-1", "7-1"];
     const index = columns.indexOf(column);
@@ -231,22 +305,34 @@ function makeReplay(scenarioName, options = {}) {
       const columns = rules.combat?.odds_columns || Rules.DEFAULT_RULES.combat?.odds_columns || ["1-4", "1-3", "1-2", "1-1", "2-1", "3-1", "4-1", "5-1", "6-1", "7-1"];
       const oddsIndex = columns.indexOf(details.odds_column);
       const crtScore = combatRiskScore(details.crt_column);
-      const exchangeRisk = Object.values(details.crt_column || {}).filter((outcome) => outcome === "Ex" || outcome?.startsWith("A")).length;
-      return 120 + oddsIndex * 15 + crtScore * 12 - exchangeRisk * 6 + Number(details.attack || 0) - Number(details.defense || 0);
+      const stats = combatOutcomeStats(details.crt_column);
+      const strategic = combatStrategicValue(action);
+      const badOddsPenalty = oddsIndex >= 0 && oddsIndex < 3 ? (3 - oddsIndex) * 20 : 0;
+      const exchangeRisk = stats.exchange + stats.attacker_harm;
+      return 110 + oddsIndex * 14 + crtScore * 10 + strategic - exchangeRisk * 5 - badOddsPenalty + Number(details.attack || 0) - Number(details.defense || 0);
     }
     if (action.type === "move") {
       const unit = state.units[action.unit];
       if (!unit) return -10000;
+      const full = { id: action.unit, ...unit };
       const start = normalizeHex(unit.hex);
       const destination = normalizeHex(action.path[action.path.length - 1]);
       const target = rulesAiMoveTarget(unit);
       const progress = distance(start, target) - distance(destination, target);
       const direction = rulesAiDirectionScore(unit, start, destination);
-      const zocPenalty = enemyZocSources(unit.side, destination).size ? 8 : 0;
-      const minePenalty = enemyMinesAt(unit.side, destination).length ? 4 : 0;
+      const zocSources = enemyZocSources(unit.side, destination);
+      const mineCount = enemyMinesAt(unit.side, destination).length;
+      const adjacentEnemyStrength = enemyUnits(unit.side)
+        .filter((enemy) => enemy.hex && distance(destination, enemy.hex) <= 1)
+        .reduce((sum, enemy) => sum + Number(enemy.attack || enemy.defense || 0), 0);
+      const defense = Math.max(1, Number(unit.defense ?? unit.attack ?? 1));
+      const zocPenalty = zocSources.size ? 10 + zocSources.size * 6 : 0;
+      const minePenalty = mineCount ? (isEngineer(full) ? 6 : 26 + mineCount * 4) : 0;
+      const overmatchPenalty = zocSources.size ? Math.max(0, adjacentEnemyStrength - defense) * 3 : 0;
+      const fragileContactPenalty = zocSources.size && defense <= 1 ? 12 : 0;
       const supply = aiScoreSupplyState(action.unit);
       const supplyPenalty = supply === "isolated" ? 20 : supply === "unsupplied" ? 8 : supply === "partially_supplied" ? 3 : 0;
-      const roadBonus = action.mode === "road" && !enemyZocSources(unit.side, destination).size ? (isSupplyUnit(unit) ? 8 : 2) : 0;
+      const roadBonus = action.mode === "road" && !zocSources.size ? (isSupplyUnit(unit) ? 8 : 2) : 0;
       const terrainBonus = hexTags(destination).includes("hill_or_ridge") ? 2 : hexTags(destination).includes("alamein_box") ? 3 : 0;
       const spentPenalty = Number(action.verdict?.details?.spent || 0) * 0.25;
       const strength = Number(unit.attack || 0) + Number(unit.movement || 0) * 0.2;
@@ -254,8 +340,8 @@ function makeReplay(scenarioName, options = {}) {
       const farFromTargetPenalty = unit.side === "axis" || isSupplyUnit(unit)
         ? distance(destination, target)
         : Math.max(0, distance(destination, target) - 2);
-      const formationPenalty = isSupplyUnit(unit) && enemyZocSources(unit.side, destination).size ? 30 : 0;
-      return progress * progressWeight + direction - farFromTargetPenalty - zocPenalty - minePenalty - supplyPenalty - formationPenalty - spentPenalty + roadBonus + terrainBonus + strength;
+      const formationPenalty = isSupplyUnit(unit) && zocSources.size ? 40 : 0;
+      return progress * progressWeight + direction - farFromTargetPenalty - zocPenalty - minePenalty - overmatchPenalty - fragileContactPenalty - supplyPenalty - formationPenalty - spentPenalty + roadBonus + terrainBonus + strength;
     }
     return -10000;
   }
@@ -640,7 +726,16 @@ function makeReplay(scenarioName, options = {}) {
       const best = candidates.find((action) => action.type !== "pass" && action.score >= minimumScore);
       return {
         action: best || { type: "pass", reason: "rules ai pass" },
-        candidates: candidates.slice(0, 5).map((action) => ({ score: action.score, type: action.type, unit: action.unit, destination: action.path?.at(-1), odds: action.verdict?.details?.odds_column }))
+        candidates: candidates.slice(0, 5).map((action) => ({
+          score: Number(action.score.toFixed(2)),
+          type: action.type,
+          unit: action.unit,
+          destination: action.path?.at(-1),
+          odds: action.verdict?.details?.odds_column,
+          crt: action.verdict?.details?.crt_column ? combatOutcomeStats(action.verdict.details.crt_column) : null,
+          zoc: action.type === "move" && action.path?.length ? enemyZocSources(state.units[action.unit]?.side, action.path.at(-1)).size : 0,
+          mines: action.type === "move" && action.path?.length ? enemyMinesAt(state.units[action.unit]?.side, action.path.at(-1)).length : 0
+        }))
       };
     }
     finally {
@@ -652,9 +747,54 @@ function makeReplay(scenarioName, options = {}) {
     const action = raw?.action || raw;
     if (!action || typeof action !== "object") return { type: "pass", reason: "empty action" };
     if (action.type === "exit_west") return { type: "exit_west", unit: action.unit };
+    if (action.type === "move_intent") return { type: "move_intent", unit: action.unit, destination: action.destination || action.target || action.hex, mode: action.mode || "auto" };
     if (action.type === "move") return { type: "move", unit: action.unit, path: (action.path || []).map(normalizeHex), mode: action.mode || "normal" };
     if (action.type === "combat") return { type: "combat", attackers: action.attackers || [], defender_hexes: (action.defender_hexes || []).map(normalizeHex), no_retreat_order: !!action.no_retreat_order };
     return { type: "pass", reason: action.reason || raw?.reason || "pass" };
+  }
+
+  function resolveMoveIntent(rawAction = {}) {
+    const intent = rawAction?.action || rawAction;
+    const unitId = intent?.unit;
+    const destination = intent?.destination || intent?.target || intent?.hex;
+    if (!unitId || !destination) return { legal: false, reason: "move_intent requires unit and destination", action: intent };
+    let target;
+    try {
+      target = normalizeHex(destination);
+    }
+    catch (error) {
+      return { legal: false, reason: error.message, action: intent };
+    }
+    const modes = intent.mode && intent.mode !== "auto" ? [intent.mode] : ["normal", "road"];
+    const plans = [];
+    for (const mode of modes) {
+      const path = findLegalPath(unitId, target, { mode });
+      if (!path || path.length <= 1) continue;
+      const verdict = checkMove(unitId, path, { mode });
+      if (!verdict.legal) continue;
+      const action = {
+        type: "move",
+        unit: unitId,
+        path,
+        mode,
+        destination: target,
+        spent: verdict.details?.spent,
+        verdict
+      };
+      plans.push({ action, verdict, score: rulesAiScore(action) });
+    }
+    plans.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+    const best = plans[0];
+    if (!best) return { legal: false, reason: `no legal path found for ${unitId} to ${target}`, action: intent };
+    return {
+      legal: true,
+      reason: `planned ${best.action.mode} path for move_intent`,
+      details: best.verdict.details,
+      action: best.action,
+      verdict: best.verdict,
+      planned_from_intent: { unit: unitId, destination: target, requested_mode: intent.mode || "auto" },
+      plan_score: best.score
+    };
   }
 
   function validateAiAction(rawAction) {
@@ -667,6 +807,7 @@ function makeReplay(scenarioName, options = {}) {
     }
     if (action.type === "pass") return { legal: true, reason: "pass", action };
     if (action.type === "exit_west") return canExitWest(action.unit);
+    if (action.type === "move_intent") return resolveMoveIntent(action);
     if (action.type === "move") return { ...checkMove(action.unit, action.path, { mode: action.mode || "normal" }), action };
     if (action.type === "combat") return { ...publicCombatVerdict(action), action };
     return { legal: false, reason: `unknown action ${action.type}`, action };
@@ -887,7 +1028,8 @@ function makeReplay(scenarioName, options = {}) {
         continue;
       }
       const suggestion = suggestRulesAction();
-      const action = normalizeAiAction(suggestion.action);
+      const validation = validateAiAction(suggestion.action);
+      const action = validation.action || normalizeAiAction(suggestion.action);
       if (action.type === "pass") {
         const from = state.phase;
         advancePhase();
@@ -896,7 +1038,88 @@ function makeReplay(scenarioName, options = {}) {
       }
       const result = applyAiAction(action);
       if (result.legal) incrementAiPhaseActionCount();
-      log.push({ step: step + 1, side, phase: state.phase, turn: state.turn, action: compactAction(action), result: { legal: result.legal, reason: result.reason } });
+      log.push({ step: step + 1, side, phase: state.phase, turn: state.turn, action: compactAction(action), candidates: suggestion.candidates, result: { legal: result.legal, reason: result.reason } });
+      if (!result.legal) {
+        state.ai_autoplay = false;
+        return { status: "illegal_action", log, steps: step + 1, result };
+      }
+    }
+    return { status: state.ai_autoplay ? "step_limit" : "stopped", log, steps: log.length };
+  }
+
+  async function autoPlayWithProvider(providerOptions = {}) {
+    const log = [];
+    const maxSteps = Number(providerOptions.maxSteps || 1000);
+    const externalSide = providerOptions.externalSide || "axis";
+    const externalAction = providerOptions.externalAction;
+    if (typeof externalAction !== "function") throw new Error("externalAction provider is required");
+    for (let step = 0; step < maxSteps && state.ai_autoplay; step += 1) {
+      const victory = finalVictory();
+      if (victory) {
+        state.ai_autoplay = false;
+        return { status: "final_victory", victory, log, steps: step };
+      }
+      if (state.phase === "end_game_turn") {
+        const from = state.phase;
+        advancePhase();
+        log.push({ step: step + 1, action: "advance_phase", from, to: state.phase, turn: state.turn });
+        continue;
+      }
+      const side = phaseSide(state.phase);
+      if (!isPlayableSide(side)) break;
+      state.active_side = side;
+      if (shouldAdvanceAiPhaseByBudget(side)) {
+        const from = state.phase;
+        const count = aiPhaseActionCount();
+        const limit = aiPhaseActionLimit(side);
+        advancePhase();
+        log.push({ step: step + 1, side, action: "budget_then_advance", count, limit, from, to: state.phase, turn: state.turn });
+        continue;
+      }
+
+      const source = side === externalSide ? "external_model" : "rules_ai";
+      let suggestion;
+      try {
+        suggestion = source === "external_model"
+          ? await externalAction({ state: clone(state), side, phase: state.phase, turn: Number(state.turn || 1), step: step + 1 })
+          : suggestRulesAction();
+      }
+      catch (error) {
+        state.ai_autoplay = false;
+        log.push({ step: step + 1, side, phase: state.phase, turn: state.turn, source, error: error.message });
+        return { status: "provider_error", log, steps: step + 1, error: error.message };
+      }
+
+      const validation = validateAiAction(suggestion.action);
+      const action = validation.action || normalizeAiAction(suggestion.action);
+      if (action.type === "pass") {
+        const from = state.phase;
+        advancePhase();
+        log.push({
+          step: step + 1,
+          side,
+          source,
+          action: "pass_then_advance",
+          from,
+          to: state.phase,
+          turn: state.turn,
+          model: suggestion.model || null
+        });
+        continue;
+      }
+      const result = applyAiAction(action);
+      if (result.legal) incrementAiPhaseActionCount();
+      log.push({
+        step: step + 1,
+        side,
+        source,
+        phase: state.phase,
+        turn: state.turn,
+        action: compactAction(action),
+        candidates: suggestion.candidates,
+        model: suggestion.model || null,
+        result: { legal: result.legal, reason: result.reason, die: result.die || result.roll || null }
+      });
       if (!result.legal) {
         state.ai_autoplay = false;
         return { status: "illegal_action", log, steps: step + 1, result };
@@ -919,6 +1142,7 @@ function makeReplay(scenarioName, options = {}) {
       }
     },
     play: autoPlay,
+    playWithProvider: autoPlayWithProvider,
     summary(result) {
       const victory = result.victory || Rules.checkVictory(ctx());
       const byType = {};
@@ -965,7 +1189,9 @@ if (require.main === module) {
     summary.elapsed_ms = Date.now() - started;
     results.push(summary);
   }
-  process.stdout.write(JSON.stringify(results.length === 1 ? results[0] : results, null, 2));
+  const payload = results.length === 1 ? results[0] : results;
+  fs.writeFileSync(OUT, JSON.stringify(payload, null, 2));
+  process.stdout.write(JSON.stringify(payload, null, 2));
   process.stdout.write("\n");
 }
 

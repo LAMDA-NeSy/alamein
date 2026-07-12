@@ -78,10 +78,11 @@ const SCENARIO_URLS = {
   october: "./scenarios/october.json"
 };
 
-const APP_VERSION = "v2026.07.06.43";
-const ASSET_VERSION = "20260706-43";
+const APP_VERSION = "v2026.07.12.13";
+const ASSET_VERSION = "20260712-13";
 const SAVE_SLOTS_STORAGE_KEY = "alamein_judge_studio.save_slots.v1";
 const AI_PROFILES_STORAGE_KEY = "alamein_judge_studio.ai_profiles.v1";
+const SIDE_PANEL_COLLAPSED_KEY = "alamein_judge_studio.side_panel_collapsed.v1";
 const MAX_SAVE_SLOTS = 12;
 
 const DEFAULT_COUNTER_IMAGES = {
@@ -122,12 +123,55 @@ let highlightedSupplyPath = [];
 let selectedCombatDefenderHex = null;
 let aiAutoRunning = false;
 let suppressAiActionRender = false;
+let pendingPhaseEndKey = null;
 let setupMode = "home";
+let gameUiReady = false;
+let saveSlotsCache = null;
+let gameMapPreloadScheduled = false;
 let aiScoreSupplyCache = null;
+let aiVictoryImpactCache = null;
 let aiSupplyScorePhaseCache = null;
+let aiContextSupplyCache = null;
+let activeSaveSlotId = null;
 
 const el = (id) => document.getElementById(id);
 const RulesEngine = globalThis.AlameinRules;
+const AiDefaults = globalThis.ALAMEIN_AI_CONFIG || {};
+
+function aiApiDefaults() {
+  return AiDefaults.api || {};
+}
+
+function aiContextDefaults() {
+  return AiDefaults.context || {};
+}
+
+function aiStrategyDefaults() {
+  return AiDefaults.strategy || {};
+}
+
+function aiDefaultNumber(section, key, fallback) {
+  const value = Number((AiDefaults[section] || {})[key]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function setInputDefault(id, value, { force = false, secret = false } = {}) {
+  const node = el(id);
+  if (!node || value == null || value === "") return;
+  if (!force && node.value) return;
+  node.value = String(value);
+  if (!secret) node.placeholder = String(value);
+}
+
+function syncExternalAiDefaults({ force = false } = {}) {
+  const api = aiApiDefaults();
+  setInputDefault("aiApiUrlInput", api.url, { force });
+  setInputDefault("aiModelInput", api.model, { force });
+  setInputDefault("aiTimeoutInput", api.timeoutSeconds, { force });
+  setInputDefault("aiMaxToolRoundsInput", api.maxToolRounds, { force });
+  setInputDefault("aiMaxActionsInput", aiContextDefaults().maxLegalActions, { force });
+  setInputDefault("aiApiKeyInput", api.apiKey, { force, secret: true });
+}
 
 function versionedLocalUrl(url) {
   if (/^(?:https?:|data:|blob:)/i.test(String(url))) return url;
@@ -215,6 +259,10 @@ function isPlayableSide(side) {
   return side === "axis" || side === "allies";
 }
 
+function enemySide(side) {
+  return side === "axis" ? "allies" : "axis";
+}
+
 function isTrackMarker(unit) {
   const text = `${unit.id || ""} ${unit.name || ""} ${unit.image || ""}`.toLowerCase();
   return text.includes("game-turn") || text.includes("turn marker") || text.includes("turn-record");
@@ -273,6 +321,28 @@ function unitTypeGroup(unit) {
   if (text.includes("anti-air") || text.includes("aa")) return { key: "anti_air", label: "防空", order: 60 };
   if (isCombatUnit(unit)) return { key: "combat_unknown", label: isMechanized(unit) ? "机械化作战单位" : "非机械化作战单位", order: isMechanized(unit) ? 35 : 45 };
   return { key: "marker", label: "标记", order: 99 };
+}
+
+function unitSizeLabel(size = "") {
+  const labels = {
+    division: "师",
+    regiment: "团",
+    battalion: "营",
+    brigade: "旅"
+  };
+  return labels[size] || String(size || "");
+}
+
+function pieceTypeLabel(value = "") {
+  const text = String(value || "");
+  if (!text || /^\d+$/.test(text)) return "";
+  const labels = {
+    Mech: "机械化",
+    "Non-Mech": "非机械化",
+    Supply: "补给",
+    "Ramcke Recon Btln/Mech": "Ramcke 侦察营 / 机械化"
+  };
+  return labels[text] || text;
 }
 
 function combatUnitsArray() {
@@ -345,6 +415,33 @@ function edgeTags(edge) {
 
 function hexTags(hex) {
   return terrain.hexes?.[normalizeHex(hex)] || [];
+}
+
+function mapAreaForAi(hex) {
+  const hx = normalizeHex(hex);
+  const [col, row] = splitHex(hx);
+  const tags = hexTags(hx);
+  const areas = [];
+  if (tags.includes("alamein_box")) areas.push("Alamein box");
+  if (tags.includes("hill_or_ridge")) areas.push("ridge line");
+  if (tags.includes("depression")) areas.push("depression");
+  if (tags.includes("minefield") || minesAt(hx).length) areas.push("minefield belt");
+  if (neighbors(hx).some((nb) => edgeTags(normalizeEdge(hx, nb)).includes("road"))) areas.push("road corridor");
+  if (row <= 12) areas.push("northern coastal sector");
+  else if (row <= 22) areas.push("central desert sector");
+  else areas.push("southern desert sector");
+  if (col <= 20) areas.push("western approach");
+  else if (col >= 36) areas.push("eastern objective area");
+  else areas.push("middle battlefield");
+  return [...new Set(areas)];
+}
+
+function operationalAreaCodeForAi(hex) {
+  const hx = normalizeHex(hex);
+  const [col, row] = splitHex(hx);
+  const sector = row <= 12 ? "N" : row <= 22 ? "C" : "S";
+  const depth = col <= 20 ? "W" : col >= 36 ? "E" : "M";
+  return `${sector}/${depth}`;
 }
 
 function minesAt(hex) {
@@ -453,6 +550,16 @@ function supplyState(unitId, network = null) {
   return RulesEngine.supplyState(rulesContext(), unitId, network);
 }
 
+function supplyStateLabel(value = "") {
+  const labels = {
+    supplied: "有补给",
+    partially_supplied: "部分补给",
+    unsupplied: "无补给",
+    isolated: "孤立"
+  };
+  return labels[value] || String(value || "");
+}
+
 function aiScoreSupplyState(unitId) {
   return aiScoreSupplyCache?.[unitId] || supplyState(unitId);
 }
@@ -463,6 +570,27 @@ function aiSupplyScoreMap(side = state.active_side) {
   const map = checkSupply(side);
   aiSupplyScorePhaseCache = { key, map };
   return map;
+}
+
+function aiSupplyStateForAi(unitId) {
+  const unit = state.units?.[unitId];
+  if (!unit || !isPlayableSide(unit.side)) return "";
+  if (aiContextSupplyCache) {
+    aiContextSupplyCache[unit.side] ||= aiSupplyScoreMap(unit.side);
+    return aiContextSupplyCache[unit.side]?.[unitId] || supplyState(unitId);
+  }
+  return aiScoreSupplyCache?.[unitId] || supplyState(unitId);
+}
+
+function withAiContextSupplyCache(callback) {
+  const previous = aiContextSupplyCache;
+  aiContextSupplyCache ||= {};
+  try {
+    return callback();
+  }
+  finally {
+    aiContextSupplyCache = previous;
+  }
 }
 
 function buildSupplyNetwork(side) {
@@ -517,7 +645,7 @@ function previewSelectedCombat() {
   const attack = Number(unit.attack || 0);
   const defense = defenders.reduce((sum, item) => sum + Number(item.defense || item.attack || 0), 0);
   const column = combatOddsColumn(attack, defense);
-  const die = el("combatDieSelect")?.value;
+  const die = el("combatResolveDieSelect")?.value;
   const outcome = column && die ? rules.combat?.crt?.[die]?.[(rules.combat?.odds_columns || []).indexOf(column)] : null;
   return { allowed: !!column, attacker: selectedUnitId, defender_hex: target.defender_hex, defenders: target.defenders, attack, defense, odds_column: column, die: die || null, outcome, reason: column ? "战斗预览" : "低于 1-4，不能攻击" };
 }
@@ -629,6 +757,34 @@ function scenarioStartingVp(scenario = state.scenario) {
   return RulesEngine.scenarioStartingVp(scenario, Number(state.victory_points || 0));
 }
 
+function scenarioShortName(scenario = state.scenario) {
+  const labels = {
+    july: "July",
+    september: "September",
+    october: "October"
+  };
+  return labels[scenario] || String(scenario || "Custom");
+}
+
+function scenarioDisplayName(scenario = state.scenario) {
+  const labels = {
+    july: "July 18.1 - First Battle",
+    september: "September 18.2 - Alam Halfa",
+    october: "October 18.3 - Second Battle"
+  };
+  return labels[scenario] || String(scenario || "Custom");
+}
+
+function victoryStatusSummary() {
+  const victory = checkVictory();
+  return {
+    vp: Number(victory.victory_points || 0),
+    level: victory.level || "",
+    finalTurn: victory.final_turn || scenarioFinalTurn(state.scenario),
+    final: !!victory.final
+  };
+}
+
 function isVictoryCombatUnit(unit) {
   return isMapCounter(unit) && unit.side === "allies" && (unit.kind || "ground") === "ground";
 }
@@ -714,12 +870,36 @@ function mineSummary(side = state.active_side) {
   return summary;
 }
 
-function switchTab(name) {
+function setSidePanelCollapsed(collapsed, options = {}) {
+  const app = document.querySelector(".app");
+  app?.classList.toggle("side-panel-collapsed", !!collapsed);
+  const button = el("sidePanelToggleBtn");
+  if (button) {
+    button.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    button.setAttribute("aria-label", collapsed ? "展开右侧面板" : "收起右侧面板");
+    button.title = collapsed ? "展开右侧面板" : "收起右侧面板";
+    const icon = button.querySelector("span");
+    if (icon) icon.textContent = collapsed ? "◧" : "◨";
+  }
+  if (options.persist !== false) localStorage.setItem(SIDE_PANEL_COLLAPSED_KEY, collapsed ? "1" : "0");
+}
+
+function sidePanelCollapsed() {
+  return document.querySelector(".app")?.classList.contains("side-panel-collapsed");
+}
+
+function toggleSidePanel() {
+  setSidePanelCollapsed(!sidePanelCollapsed());
+}
+
+function switchTab(name, options = {}) {
+  if (options.expandPanel) setSidePanelCollapsed(false);
   document.querySelectorAll(".tab, .tab-panel").forEach((node) => node.classList.remove("active"));
   document.querySelector(`.tab[data-tab="${name}"]`)?.classList.add("active");
   el(`tab-${name}`)?.classList.add("active");
   const modeByTab = { move: "move", combat: "combat", judge: "all", state: "command" };
-  if (modeByTab[name] && el("mapViewModeSelect")) el("mapViewModeSelect").value = modeByTab[name];
+  if (modeByTab[name] && el("mapViewModeSelect")) setMapViewMode(modeByTab[name]);
+  syncPhaseRecommendedTab();
   renderOperationHint();
   renderActionControls();
   renderMap();
@@ -753,6 +933,21 @@ function syncMoveDraftToUnit(unitId) {
 function setMapViewMode(mode) {
   const select = el("mapViewModeSelect");
   if (select) select.value = mode;
+  syncMapModeButtons();
+}
+
+function syncMapModeButtons() {
+  const mode = el("mapViewModeSelect")?.value || "command";
+  document.querySelectorAll("[data-map-mode]").forEach((button) => {
+    const active = button.dataset.mapMode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  const labels = { command: "指挥", move: "移动", combat: "战斗", supply: "补给", terrain: "地形", zoc: "ZOC", all: "全部" };
+  if (el("viewModeBadge")) {
+    el("viewModeBadge").textContent = labels[mode] || mode;
+    el("viewModeBadge").title = `当前视图：${labels[mode] || mode}`;
+  }
 }
 
 function activateMoveForSelectedUnit() {
@@ -763,7 +958,7 @@ function activateMoveForSelectedUnit() {
   syncMovePathInput();
   const moveSelect = el("moveUnitSelect");
   if (moveSelect) moveSelect.value = selectedUnitId;
-  switchTab("move");
+  switchTab("move", { expandPanel: true });
   renderRouteStatus();
   focusMapOnHex(unit.hex);
 }
@@ -780,17 +975,32 @@ function activateCombatForSelectedUnit() {
     const defenderInput = el("combatDefendersInput");
     if (defenderInput) defenderInput.value = target.defender_hex;
   }
-  switchTab("combat");
+  switchTab("combat", { expandPanel: true });
   setOutput("combatOutput", checkCombat(parseCombatAction()));
   renderMap();
   focusMapOnHex(unit.hex);
+}
+
+function selectCombatTarget(defenderHex, attackerId = selectedUnitId) {
+  if (!attackerId || !state.units?.[attackerId]) return;
+  selectedUnitId = attackerId;
+  selectedCombatDefenderHex = normalizeHex(defenderHex);
+  const attackerInput = el("combatAttackersInput");
+  const defenderInput = el("combatDefendersInput");
+  if (attackerInput) attackerInput.value = attackerId;
+  if (defenderInput) defenderInput.value = selectedCombatDefenderHex;
+  setMapViewMode("combat");
+  switchTab("combat", { expandPanel: true });
+  setOutput("combatOutput", checkCombat(parseCombatAction()));
+  renderActionControls();
+  renderMap();
 }
 
 function activateSupplyForSelectedUnit() {
   const unit = selectedUnit();
   if (!selectedUnitId || !unit) return;
   highlightedSupplyPath = traceSupplyPath(selectedUnitId);
-  switchTab("state");
+  switchTab("state", { expandPanel: true });
   setMapViewMode("supply");
   renderSelectedUnit();
   renderMap();
@@ -804,6 +1014,7 @@ function isMovableUnit(unit) {
 function selectUnit(unitId, options = {}) {
   if (!state.units?.[unitId]) return;
   selectedUnitId = unitId;
+  selectedHexId = null;
   const unit = state.units[unitId];
   const viewMode = el("mapViewModeSelect")?.value || "";
   const switchedTab = !!options.showStateTab;
@@ -817,7 +1028,10 @@ function selectUnit(unitId, options = {}) {
     : [];
   if (switchedTab) switchTab("state");
   renderSelectedUnit();
+  renderSelectedHex();
+  renderMapSelectionHud();
   renderOperationHint();
+  renderActionableUnits();
   renderActionControls();
   const moveSelect = el("moveUnitSelect");
   if (moveSelect && [...moveSelect.options].some((option) => option.value === unitId)) moveSelect.value = unitId;
@@ -828,7 +1042,16 @@ function selectUnit(unitId, options = {}) {
 
 function selectHex(hex) {
   selectedHexId = normalizeHex(hex);
+  selectedUnitId = null;
+  selectedCombatDefenderHex = null;
+  highlightedSupplyPath = [];
+  movePathDraft = [];
+  syncMovePathInput();
   renderSelectedHex();
+  renderSelectedUnit();
+  renderMapSelectionHud();
+  renderActionableUnits();
+  renderActionControls();
   renderOperationHint();
   renderMap();
 }
@@ -946,7 +1169,46 @@ function renderAutoJudge() {
     const reviewNotes = report.rule_review.notes.length
       ? report.rule_review.notes.join("；")
       : "当前标准场景数据无需额外提示";
+    const warnings = ruleWarnings();
+    const severe = warnings.find((item) => item.tone === "bad") || warnings.find((item) => item.tone === "warn");
+    const judgeTone = report.victory.winner ? "final" : severe ? severe.tone : "ok";
+    const judgeTitle = report.victory.winner
+      ? "场景胜负已判定"
+      : severe
+      ? `${severe.label}需要处理`
+      : "当前裁判未发现阻断问题";
+    const judgeDetail = report.victory.winner
+      ? report.victory.reason
+      : severe
+      ? severe.text
+      : phaseGuide(state.phase).action;
+    const actionableCount = actionableUnitsForCurrentPhase().length;
+    const victory = victoryStatusSummary();
+    const vpBreakdown = report.victory.breakdown.map((item) => `${item.points >= 0 ? "+" : ""}${item.points} ${item.label}`).join("；");
     summary.innerHTML = `
+      <section class="judge-overview ${escapeHtml(judgeTone)}">
+        <div class="judge-overview-main">
+          <span>${escapeHtml(phaseDisplayName(state.phase))}</span>
+          <strong>${escapeHtml(judgeTitle)}</strong>
+          <small>${escapeHtml(judgeDetail)}</small>
+        </div>
+        <div class="judge-overview-facts">
+          <span><b>${escapeHtml(actionableCount)}</b> 可行动</span>
+          <span><b>VP ${escapeHtml(victory.vp)}</b> ${escapeHtml(victory.level)}</span>
+          <span><b>T${escapeHtml(state.turn || 1)}</b> / T${escapeHtml(victory.finalTurn)}</span>
+        </div>
+      </section>
+      ${warnings.length ? `
+        <section class="judge-alert-list" aria-label="裁判关注项">
+          ${warnings.map((item) => `
+            <div class="${escapeHtml(item.tone)}">
+              <span>${escapeHtml(item.label)}</span>
+              <b>${escapeHtml(item.text)}</b>
+            </div>
+          `).join("")}
+        </section>
+      ` : ""}
+      <section class="judge-card-grid">
       <div class="judge-card ${report.stacking.legal ? "ok-card" : "bad-card"}">
         <b>堆叠</b><span>${report.stacking.reason}</span>
       </div>
@@ -954,7 +1216,7 @@ function renderAutoJudge() {
         <b>雷区</b><span>敌方 ${report.mines.enemy} / 己方 ${report.mines.friendly}</span>
       </div>
       <div class="judge-card">
-        <b>补给</b><span>${state.active_side}: ${supplied} / ${partial} partial / ${unsupplied} unsup / ${isolated} iso</span>
+        <b>补给</b><span>${sideDisplayName(state.active_side)}: 有 ${supplied} / 部分 ${partial} / 无 ${unsupplied} / 孤立 ${isolated}</span>
       </div>
       <div class="judge-card">
         <b>ZOC</b><span>Axis ${report.zoc.axis} / Allies ${report.zoc.allies} / 争夺 ${report.zoc.contested}</span>
@@ -966,37 +1228,36 @@ function renderAutoJudge() {
         <b>胜负</b><span>${report.victory.reason}</span>
       </div>
       <div class="judge-card">
-        <b>VP 明细</b><span>${report.victory.breakdown.map((item) => `${item.points >= 0 ? "+" : ""}${item.points} ${item.label}`).join("；")}</span>
+        <b>VP 明细</b><span>${vpBreakdown || "暂无特殊 VP 变化"}</span>
       </div>
       <div class="judge-card ${report.rule_review.needs_review ? "bad-card" : "ok-card"}">
         <b>待核对</b><span>${reviewNotes}</span>
       </div>
+      </section>
     `;
   }
-  const judge = el("judgeOutput");
-  if (judge) judge.textContent = JSON.stringify(report, null, 2);
   const move = el("moveOutput");
   if (!move) return;
   const verdict = routeVerdict();
-  move.textContent = verdict
-    ? JSON.stringify(verdict, null, 2)
-    : "选择单位并点击地图绘制路线后，移动裁判会自动显示。";
+  setOutput("moveOutput", verdict || "");
   renderActionControls();
 }
 
 function renderRouteStatus() {
   const target = el("routeStatus");
   if (!target) return;
+  renderRouteStepList();
+  renderRouteOverview();
   const unit = currentMoveUnit();
   if (!unit || !isMovableUnit(unit)) {
-    target.className = "route-status muted";
-    target.textContent = "先点击一个可移动单位";
+    target.className = "route-status empty";
+    target.textContent = "";
     renderActionControls();
     return;
   }
   if (movePathDraft.length < 2) {
     target.className = "route-status muted";
-    target.textContent = `${unit.name || unit.id}: 点击地图相邻 hex 画路线`;
+    target.textContent = `${unit.name || unit.id}: 点击地图相邻格画路线`;
     renderActionControls();
     return;
   }
@@ -1008,28 +1269,233 @@ function renderRouteStatus() {
   renderAutoJudge();
 }
 
+function renderRouteOverview() {
+  const panel = el("routeOverview");
+  if (!panel) return;
+  const unit = currentMoveUnit();
+  if (!unit || !isMovableUnit(unit)) {
+    panel.className = "route-overview empty";
+    panel.innerHTML = "";
+    return;
+  }
+  const start = normalizeHex(unit.hex || movePathDraft[0] || "");
+  const end = movePathDraft.length > 1 ? movePathDraft.at(-1) : "";
+  const verdict = routeVerdict();
+  const legal = !!verdict?.legal;
+  const bad = verdict?.legal === false;
+  const spent = verdict?.details ? `${verdict.details.spent}/${verdict.details.allowance}` : "未规划";
+  const mode = verdict?.details?.mode === "road" ? "道路" : (el("moveModeSelect")?.value === "road" ? "道路" : "普通");
+  const result = legal ? "可执行" : bad ? "不可执行" : "待规划";
+  panel.className = `route-overview ${legal ? "ok" : bad ? "bad" : "muted"}`;
+  panel.innerHTML = `
+    <div><span>起点</span><b>${escapeHtml(start || "-")}</b></div>
+    <div><span>终点</span><b>${escapeHtml(end || "点击地图")}</b></div>
+    <div><span>MP</span><b>${escapeHtml(spent)}</b><small>${escapeHtml(mode)}</small></div>
+    <div><span>裁判</span><b>${escapeHtml(result)}</b></div>
+  `;
+}
+
+function renderRouteStepList() {
+  const panel = el("routeStepList");
+  if (!panel) return;
+  const unit = currentMoveUnit();
+  if (!unit || !movePathDraft.length) {
+    panel.className = "route-step-list empty";
+    panel.innerHTML = "";
+    return;
+  }
+  const verdict = routeVerdict();
+  const status = verdict?.details
+    ? `${verdict.details.spent}/${verdict.details.allowance} MP`
+    : movePathDraft.length > 1
+    ? (verdict?.reason || "等待裁判")
+    : "起点";
+  const label = movePathDraft.length > 1 ? `${movePathDraft.length} 个路线点` : "路线起点";
+  panel.className = `route-step-list ${verdict?.legal === false ? "bad" : verdict?.legal ? "ok" : ""}`;
+  panel.innerHTML = `
+    <div class="route-step-head">
+      <span>${escapeHtml(label)}</span>
+      <b>${escapeHtml(status)}</b>
+    </div>
+    <div class="route-step-track">
+      ${movePathDraft.map((hex, index) => `
+        <button class="route-step ${index === 0 ? "start" : ""} ${index === movePathDraft.length - 1 ? "end" : ""}" type="button" data-route-index="${escapeHtml(index)}">
+          <small>${escapeHtml(index === 0 ? "起" : index === movePathDraft.length - 1 ? "终" : String(index))}</small>
+          <b>${escapeHtml(hex)}</b>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function handleRouteStepListClick(event) {
+  const button = event.target.closest?.("[data-route-index]");
+  if (!button) return;
+  const index = Number(button.dataset.routeIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= movePathDraft.length) return;
+  movePathDraft = movePathDraft.slice(0, index + 1);
+  syncMovePathInput();
+  renderRouteStatus();
+  renderActionControls();
+  renderMap();
+}
+
 function unitDisplayRows(unit) {
-  const supply = unit.id && isPlayableSide(unit.side) ? supplyState(unit.id) : "";
+  const supply = unit.id && isPlayableSide(unit.side) ? supplyStateLabel(supplyState(unit.id)) : "";
   return [
-    ["id", unit.id],
+    ["编号", unit.id],
     ["名称", unit.name || ""],
-    ["阵营", unit.side || ""],
-    ["hex", unit.hex || ""],
-    ["类型", unit.kind || ""],
-    ["编制", unit.size || ""],
-    ["状态", unit.state || ""],
+    ["阵营", sideDisplayName(unit.side)],
+    ["坐标", unit.hex || ""],
+    ["类型", unitTypeGroup(unit).label],
+    ["编制", unitSizeLabel(unit.size)],
+    ["状态", unitStateLabel(unit.state || "fresh")],
     ["战力", unit.attack ?? ""],
     ["防御", unit.defense ?? ""],
     ["移动", unit.movement ?? ""],
     ["补给", supply],
     ["补给路径", highlightedSupplyPath.length ? highlightedSupplyPath.join(" -> ") : ""],
-    ["机械化", isMechanized(unit) ? "yes" : "no"],
-    ["道路模式", unit.road_mode ? "yes" : "no"],
-    ["棋子类型", unit.piece_type || ""],
-    ["图片", counterImageFor(unit) || ""],
-    ["原始像素", unit.x != null && unit.y != null ? `${unit.x}, ${unit.y}` : ""],
-    ["数值来源", unit.stats_status || ""]
+    ["机械化", isMechanized(unit) ? "是" : "否"],
+    ["道路模式", unit.road_mode ? "是" : "否"],
+    ["棋子类型", pieceTypeLabel(unit.piece_type)]
   ].filter(([, value]) => value !== "" && value != null);
+}
+
+function unitStackSummary(unit) {
+  const type = unitTypeGroup(unit).label;
+  const values = [];
+  if (isCombatUnit(unit)) values.push(`A${unit.attack ?? 0}`, `D${unit.defense ?? unit.attack ?? 0}`);
+  if (isMovableUnit(unit)) values.push(`MP${unit.movement ?? 0}`);
+  if (isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))) values.push(supplyStateLabel(supplyState(unit.id)));
+  return `${sideDisplayName(unit.side)} · ${type}${values.length ? ` · ${values.join(" · ")}` : ""}`;
+}
+
+function createStackUnitButton(unit, compact = false) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `stack-unit-button ${unit.side || ""} ${compact ? "compact" : ""} ${unit.id === selectedUnitId ? "selected" : ""}`;
+  button.innerHTML = `
+    <span>
+      <b>${escapeHtml(unit.name || unit.id)}</b>
+      <small>${escapeHtml(unitStackSummary(unit))}</small>
+    </span>
+    <em>${escapeHtml(unit.hex || "")}</em>
+  `;
+  button.addEventListener("click", () => selectUnit(unit.id, { showStateTab: false }));
+  return button;
+}
+
+function unitActionHint(unit) {
+  if (!unit) return { label: "未选择", detail: "点击地图棋子查看可执行动作。", tone: "idle" };
+  if (unit.eliminated || unit.off_map) return { label: "已离场", detail: "该棋子不在地图上，不能执行地图动作。", tone: "idle" };
+  if (!isPlayableSide(unit.side)) return { label: "标记", detail: "这是地图标记或规则对象，用于裁判显示。", tone: "idle" };
+  if (state.phase === "end_game_turn") return { label: "等待结算", detail: "当前是回合结束阶段，系统处理补给、孤立和胜负。", tone: "idle" };
+  if (unit.side !== state.active_side) {
+    const sideName = state.active_side === "axis" ? "Axis" : "Allies";
+    return { label: "等待", detail: `现在是 ${sideName} 阶段，该单位暂不能行动。`, tone: "idle" };
+  }
+  if (currentPhaseIsAiControlled()) return { label: "AI 接管", detail: "当前方由 AI 控制，系统会自动选择并执行合法行动。", tone: "ai" };
+  const kind = phaseKind();
+  if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) {
+    if (canMoveUnitNow(unit)) {
+      const roadText = unit.road_mode ? "道路模式中，移动会受道路朝向限制。" : canEnterRoadModeNow(unit) ? "可进入道路模式。" : "普通移动。";
+      return { label: "可以移动", detail: `点击“移动”，再在地图上点相邻格绘制路线。${roadText}`, tone: "ready" };
+    }
+    return { label: "本阶段不能移动", detail: phaseGuide(state.phase).detail, tone: "idle" };
+  }
+  if (kind === "combat") {
+    if (canCombatUnitNow(unit)) {
+      const targets = adjacentCombats(unit.side).filter((pair) => pair.attacker === unit.id).length;
+      return { label: "可以战斗", detail: `点击“战斗”，选择相邻防御格。当前有 ${targets} 个可攻击目标。`, tone: "ready" };
+    }
+    return { label: "无可攻击目标", detail: "战斗阶段只能选择相邻敌方作战单位作为目标。", tone: "idle" };
+  }
+  return { label: "查看", detail: phaseGuide(state.phase).action, tone: "idle" };
+}
+
+function unitActionFacts(unit) {
+  if (!unit || !unit.id) return [];
+  const facts = [];
+  const kind = phaseKind();
+  if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind) && canMoveUnitNow(unit)) {
+    facts.push(["可达", `${reachableHexes(unit.id, moveOptions()).size} 格`]);
+    facts.push(["道路", unit.road_mode ? "道路模式" : canEnterRoadModeNow(unit) ? "可进入" : "普通"]);
+  }
+  if (kind === "combat" && isCombatUnit(unit)) {
+    const targets = adjacentCombats(unit.side).filter((pair) => pair.attacker === unit.id);
+    facts.push(["目标", `${targets.length} 个`]);
+    if (targets[0]) facts.push(["最近", targets[0].defender_hex]);
+  }
+  if (isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))) {
+    facts.push(["补给", supplyStateLabel(supplyState(unit.id))]);
+  }
+  if (unit.road_mode) facts.push(["朝向", unit.road_facing || "道路"]);
+  if (unit.state && unit.state !== "fresh") facts.push(["状态", unitStateLabel(unit.state)]);
+  return facts.slice(0, 4);
+}
+
+function renderUnitActionFacts(unit, className = "unit-action-facts") {
+  const facts = unitActionFacts(unit);
+  if (!facts.length) return "";
+  return `
+    <div class="${escapeHtml(className)}">
+      ${facts.map(([key, value]) => `<span><b>${escapeHtml(key)}</b>${escapeHtml(value)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function renderSelectionSummary() {
+  const panel = el("selectionSummaryPanel");
+  if (!panel) return;
+  const unit = selectedUnitId ? unitsArray().find((item) => item.id === selectedUnitId) : null;
+  const hex = selectedHexId ? normalizeHex(selectedHexId) : "";
+  if (unit) {
+    const hint = unitActionHint(unit);
+    panel.className = `selection-summary compact ${unit.side || ""}`;
+    panel.innerHTML = `
+      <div>
+        <span>单位</span>
+        <strong>${escapeHtml(unit.name || unit.id)}</strong>
+        <small>${escapeHtml(sideDisplayName(unit.side))} · ${escapeHtml(unit.hex || "未部署")} · ${escapeHtml(hint.label)}</small>
+      </div>
+      <div class="selection-summary-actions">
+        ${canMoveUnitNow(unit) ? `<button type="button" class="primary-action" data-selection-command="move">移动</button>` : ""}
+        ${canCombatUnitNow(unit) ? `<button type="button" class="primary-action" data-selection-command="combat">战斗</button>` : ""}
+        ${(isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit)) && isPlayableSide(unit.side) ? `<button type="button" class="secondary-action" data-selection-command="supply">补给线</button>` : ""}
+        <button type="button" class="quiet-action" data-selection-command="clear">清除</button>
+      </div>
+    `;
+    return;
+  }
+  if (hex) {
+    const units = unitsByHex()[hex] || [];
+    panel.className = "selection-summary compact";
+    panel.innerHTML = `
+      <div>
+        <span>坐标</span>
+        <strong>坐标 ${escapeHtml(hex)}</strong>
+        <small>${escapeHtml(terrainSummaryLabel(hexTags(hex)))} · ${escapeHtml(units.length)} 个单位</small>
+      </div>
+      <div class="selection-summary-actions">
+        <button type="button" class="secondary-action" data-selection-command="center">居中</button>
+        <button type="button" class="quiet-action" data-selection-command="clear">清除</button>
+      </div>
+    `;
+    return;
+  }
+  const context = actionableUnitContext();
+  panel.className = "selection-summary empty";
+  panel.innerHTML = `
+    <div>
+      <span>选择</span>
+      <strong>点选棋子或地图格</strong>
+      <small>${escapeHtml(context.detail)}</small>
+    </div>
+    <div class="selection-summary-actions">
+      <button type="button" class="secondary-action" data-selection-command="focus-first">推荐单位</button>
+      <button type="button" class="quiet-action" data-selection-command="open-phase">当前面板</button>
+    </div>
+  `;
 }
 
 function renderSelectedUnit() {
@@ -1059,14 +1525,15 @@ function renderSelectedUnit() {
   const title = document.createElement("div");
   title.textContent = unit.name || unit.id;
   const meta = document.createElement("span");
-  meta.textContent = `${unit.side || "unknown"} ${unit.hex || ""}`;
+  meta.textContent = `${sideDisplayName(unit.side)} ${unit.hex || ""}`;
   header.append(title, meta);
+  const hint = unitActionHint(unit);
 
   const chips = document.createElement("div");
   chips.className = "unit-stat-chips";
   const supplyChip = isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit)
-    ? supplyState(unit.id)
-    : "marker";
+    ? supplyStateLabel(supplyState(unit.id))
+    : "标记";
   chips.innerHTML = `
     <span>战力 <b>${unit.attack ?? 0}</b></span>
     <span>防御 <b>${unit.defense ?? unit.attack ?? 0}</b></span>
@@ -1074,12 +1541,23 @@ function renderSelectedUnit() {
     <span>${supplyChip}</span>
   `;
 
+  const focus = document.createElement("div");
+  focus.className = `selected-unit-focus ${hint.tone}`;
+  focus.innerHTML = `
+    <span>下一步</span>
+    <strong>${escapeHtml(hint.label)}</strong>
+    <small>${escapeHtml(hint.detail)}</small>
+  `;
+  const factRail = document.createElement("div");
+  factRail.innerHTML = renderUnitActionFacts(unit);
+
   const actions = document.createElement("div");
   actions.className = "selected-unit-actions";
   if (canMoveUnitNow(unit)) {
     const moveButton = document.createElement("button");
     moveButton.type = "button";
     moveButton.textContent = "移动";
+    moveButton.className = "primary-action";
     moveButton.addEventListener("click", () => activateMoveForSelectedUnit());
     actions.append(moveButton);
   }
@@ -1087,13 +1565,15 @@ function renderSelectedUnit() {
     const combatButton = document.createElement("button");
     combatButton.type = "button";
     combatButton.textContent = "战斗";
+    combatButton.className = "primary-action";
     combatButton.addEventListener("click", () => activateCombatForSelectedUnit());
     actions.append(combatButton);
   }
   if ((isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit)) && isPlayableSide(unit.side)) {
     const supplyButton = document.createElement("button");
     supplyButton.type = "button";
-    supplyButton.textContent = "补给";
+    supplyButton.textContent = "补给线";
+    supplyButton.className = "secondary-action";
     supplyButton.addEventListener("click", () => activateSupplyForSelectedUnit());
     actions.append(supplyButton);
   }
@@ -1111,7 +1591,26 @@ function renderSelectedUnit() {
     dd.textContent = String(value);
     body.append(dt, dd);
   }
-  content.append(header, chips, actions, body);
+  const details = document.createElement("details");
+  details.className = "unit-detail-drawer";
+  const summary = document.createElement("summary");
+  summary.textContent = "详细属性";
+  details.append(summary, body);
+  content.append(header, chips, focus);
+  if (factRail.firstElementChild) content.append(factRail.firstElementChild);
+  content.append(actions);
+  const sameHexUnits = unit.hex ? (unitsByHex()[normalizeHex(unit.hex)] || []) : [];
+  if (sameHexUnits.length > 1) {
+    const stack = document.createElement("div");
+    stack.className = "hex-stack-picker unit-stack-peers";
+    const stackTitle = document.createElement("div");
+    stackTitle.className = "hex-stack-title";
+    stackTitle.innerHTML = `<span>同格堆叠</span><b>${escapeHtml(sameHexUnits.length)} 个单位</b>`;
+    stack.append(stackTitle);
+    sameHexUnits.forEach((stackUnit) => stack.append(createStackUnitButton(stackUnit, true)));
+    content.append(stack);
+  }
+  content.append(details);
   shell.append(content);
   panel.append(shell);
 }
@@ -1119,9 +1618,9 @@ function renderSelectedUnit() {
 function renderSelectedHex() {
   const panel = el("selectedHexPanel");
   if (!panel) return;
-  if (!selectedHexId) {
+  if (selectedUnitId || !selectedHexId) {
     panel.className = "selected-unit empty";
-    panel.textContent = "点击地图 hex 查看地形、雷区、ZOC 和单位";
+    panel.textContent = "点击地图格查看地形、雷区、ZOC 和单位";
     return;
   }
   const units = unitsByHex()[selectedHexId] || [];
@@ -1132,17 +1631,447 @@ function renderSelectedHex() {
   if (enemyZocSources("axis", selectedHexId).size) zocSides.push("allies");
   const blockedFor = ["axis", "allies"].filter((side) => supplyBlockedHexes(side).has(selectedHexId));
   panel.className = "selected-unit";
-  panel.innerHTML = `
-    <div class="selected-unit-header">
-      <div>Hex ${selectedHexId}</div>
-      <span>${tags.length ? tags.join(", ") : "clear"}</span>
+  panel.innerHTML = "";
+  const header = document.createElement("div");
+  header.className = "selected-unit-header";
+  header.innerHTML = `<div>坐标 ${escapeHtml(selectedHexId)}</div><span>${escapeHtml(terrainSummaryLabel(tags))}</span>`;
+  const facts = document.createElement("div");
+  facts.className = "selected-hex-facts";
+  facts.innerHTML = [
+    ["雷区", mines.length ? mines.map((mine) => `${sideDisplayName(mine.side)} ${mine.name || mine.id}`).join("; ") : "无"],
+    ["ZOC", zocSides.map(sideDisplayName).join(", ") || "无"],
+    ["补给阻断", blockedFor.map(sideDisplayName).join(", ") || "无"]
+  ].map(([label, value]) => `<span><b>${escapeHtml(label)}</b>${escapeHtml(value)}</span>`).join("");
+  panel.append(header, facts);
+  const stack = document.createElement("div");
+  stack.className = `hex-stack-picker ${units.length ? "" : "empty"}`;
+  const stackTitle = document.createElement("div");
+  stackTitle.className = "hex-stack-title";
+  stackTitle.innerHTML = `<span>堆叠</span><b>${escapeHtml(units.length)} 个单位</b>`;
+  stack.append(stackTitle);
+  if (units.length) units.forEach((unit) => stack.append(createStackUnitButton(unit, true)));
+  else {
+    const empty = document.createElement("p");
+    empty.textContent = "该格没有单位。";
+    stack.append(empty);
+  }
+  panel.append(stack);
+}
+
+function hudButton(label, onClick, className = "", title = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  if (className) button.className = className;
+  if (title) {
+    button.title = title;
+    button.setAttribute("aria-label", title);
+  }
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function handleSelectionSummaryClick(event) {
+  const button = event.target.closest?.("button[data-selection-command]");
+  if (!button) return;
+  const command = button.dataset.selectionCommand;
+  if (command === "move") activateMoveForSelectedUnit();
+  else if (command === "combat") activateCombatForSelectedUnit();
+  else if (command === "supply") activateSupplyForSelectedUnit();
+  else if (command === "center") {
+    const targetHex = selectedUnitId && state.units?.[selectedUnitId]?.hex ? state.units[selectedUnitId].hex : selectedHexId;
+    if (targetHex) focusMapOnHex(targetHex);
+  }
+  else if (command === "clear") {
+    selectedUnitId = null;
+    selectedHexId = null;
+    selectedCombatDefenderHex = null;
+    highlightedSupplyPath = [];
+    movePathDraft = [];
+    syncMovePathInput();
+    renderState();
+  }
+  else if (command === "focus-first") {
+    focusActionableUnit(sortedActionableUnits()[0]);
+  }
+  else if (command === "open-phase") {
+    focusCurrentPhaseTab({ expandPanel: true });
+  }
+}
+
+function renderMapSelectionHud() {
+  const hud = el("mapSelectionHud");
+  if (!hud) return;
+  hud.innerHTML = "";
+  const unit = selectedUnitId ? unitsArray().find((item) => item.id === selectedUnitId) : null;
+  if (unit) {
+    const hint = unitActionHint(unit);
+    hud.className = `map-selection-hud ${unit.side || ""}`;
+    const title = document.createElement("div");
+    title.className = "map-hud-title";
+    title.innerHTML = `<b>${escapeHtml(unit.name || unit.id)}</b><span>${escapeHtml(sideDisplayName(unit.side))} ${escapeHtml(unit.hex || "")}</span>`;
+    const next = document.createElement("div");
+    next.className = `map-hud-next ${hint.tone}`;
+    next.innerHTML = `<b>${escapeHtml(hint.label)}</b><span>${escapeHtml(hint.detail)}</span>`;
+    const chips = document.createElement("div");
+    chips.className = "map-hud-chips";
+    const supplyChip = isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit) ? supplyStateLabel(supplyState(unit.id)) : "标记";
+    chips.innerHTML = `
+      <span>A ${escapeHtml(unit.attack ?? 0)}</span>
+      <span>D ${escapeHtml(unit.defense ?? unit.attack ?? 0)}</span>
+      <span>MP ${escapeHtml(unit.movement ?? 0)}</span>
+      <span>${escapeHtml(supplyChip)}</span>
+    `;
+    const factRail = document.createElement("div");
+    factRail.innerHTML = renderUnitActionFacts(unit, "map-hud-facts");
+    const actions = document.createElement("div");
+    actions.className = "map-hud-actions";
+    if (canMoveUnitNow(unit)) actions.append(hudButton("移动", activateMoveForSelectedUnit, "primary-action"));
+    if (canCombatUnitNow(unit)) actions.append(hudButton("战斗", activateCombatForSelectedUnit, "primary-action"));
+    if ((isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit)) && isPlayableSide(unit.side)) {
+      actions.append(hudButton("补给线", activateSupplyForSelectedUnit, "secondary-action"));
+    }
+    actions.append(hudButton("居中", () => focusMapOnHex(unit.hex), "quiet-action"));
+    actions.append(hudButton("×", () => {
+      selectedUnitId = null;
+      renderState();
+    }, "quiet-action", "关闭"));
+    hud.append(title, next, chips);
+    if (factRail.firstElementChild) hud.append(factRail.firstElementChild);
+    hud.append(actions);
+    return;
+  }
+  if (selectedHexId) {
+    const units = unitsByHex()[selectedHexId] || [];
+    const tags = hexTags(selectedHexId);
+    hud.className = "map-selection-hud";
+    const title = document.createElement("div");
+    title.className = "map-hud-title";
+    title.innerHTML = `<b>坐标 ${escapeHtml(selectedHexId)}</b><span>${escapeHtml(terrainSummaryLabel(tags))}</span>`;
+    const summary = document.createElement("div");
+    summary.className = "map-hud-summary";
+    summary.textContent = units.length ? units.map((item) => `${sideDisplayName(item.side)} ${item.name || item.id}`).join("; ") : "无单位";
+    const stack = document.createElement("div");
+    stack.className = `map-hud-stack ${units.length ? "" : "empty"}`;
+    if (units.length) units.slice(0, 4).forEach((item) => stack.append(createStackUnitButton(item, true)));
+    if (units.length > 4) {
+      const more = document.createElement("span");
+      more.textContent = `还有 ${units.length - 4} 个`;
+      stack.append(more);
+    }
+    const actions = document.createElement("div");
+    actions.className = "map-hud-actions";
+    actions.append(hudButton("居中", () => focusMapOnHex(selectedHexId), "quiet-action"));
+    actions.append(hudButton("×", () => {
+      selectedHexId = null;
+      renderState();
+    }, "quiet-action", "关闭"));
+    hud.append(title, summary, stack, actions);
+    return;
+  }
+  hud.className = "map-selection-hud hidden";
+}
+
+function renderMapActionHint() {
+  const target = el("mapActionHint");
+  if (!target) return;
+  const viewMode = el("mapViewModeSelect")?.value || "command";
+  const unit = selectedUnitId && state.units?.[selectedUnitId] ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
+  const kind = phaseKind();
+  let tone = "idle";
+  let title = "";
+  let detail = "";
+  if (phaseEndConfirmationPending()) {
+    tone = "bad";
+    title = state.phase === "end_game_turn" ? "确认进入下一回合" : "确认结束阶段";
+    detail = "再点一次确认按钮才会推进；点击其他行动可继续操作。";
+  }
+  else if (viewMode === "move" && unit && canMoveUnitNow(unit)) {
+    const route = routeVerdict();
+    const reachable = reachableHexes(selectedUnitId, moveOptions()).size;
+    tone = route?.legal === false ? "bad" : "move";
+    title = route?.legal ? "路线可执行" : movePathDraft.length > 1 ? "检查路线" : "选择目的地";
+    detail = route?.legal
+      ? `${unit.name || unit.id}：${route.details?.spent ?? "?"}/${route.details?.allowance ?? "?"} MP，点击执行移动。`
+      : movePathDraft.length > 1
+      ? (route?.reason || "路线等待裁判。")
+      : `绿色格可点击，当前约 ${Math.max(0, reachable - 1)} 个可达格。`;
+  }
+  else if (viewMode === "combat" && unit && kind === "combat" && isCombatUnit(unit) && unit.side === state.active_side) {
+    const targets = adjacentCombats(unit.side).filter((pair) => pair.attacker === unit.id);
+    tone = targets.length ? "combat" : "idle";
+    title = targets.length ? "选择攻击目标" : "没有相邻目标";
+    detail = targets.length
+      ? `红色格可攻击。${selectedCombatDefenderHex ? `已选择 ${selectedCombatDefenderHex}，可预览或结算。` : `当前有 ${targets.length} 个目标格。`}`
+      : "战斗阶段需要相邻敌方作战单位。";
+  }
+  else if (viewMode === "supply" && unit && highlightedSupplyPath.length) {
+    tone = "supply";
+    title = "补给线";
+    detail = `绿色虚线显示 ${unit.name || unit.id} 的补给路径，共 ${highlightedSupplyPath.length} 格。`;
+  }
+  else if (currentPhaseIsAiControlled()) {
+    tone = "ai";
+    title = "AI 自动行动";
+    detail = "当前方由 AI 控制，地图会随着 AI 执行动作更新。";
+  }
+  if (!title) {
+    target.className = "map-action-hint hidden";
+    target.innerHTML = "";
+    return;
+  }
+  target.className = `map-action-hint ${tone}`;
+  target.innerHTML = `<b>${escapeHtml(title)}</b><span>${escapeHtml(detail)}</span>`;
+}
+
+function mapLegendItems(viewMode = el("mapViewModeSelect")?.value || "command") {
+  if (viewMode === "move") {
+    return [
+      ["unit", "可行动"],
+      ["reach", "可达"],
+      ["cost", "MP"],
+      ["route", "路线"]
+    ];
+  }
+  if (viewMode === "combat") {
+    return [
+      ["unit", "可攻击"],
+      ["target", "目标"],
+      ["odds", "赔率"],
+      ["blocked", "受阻"]
+    ];
+  }
+  if (viewMode === "supply") return [["supply", "补给线"], ["unit", "选中单位"]];
+  if (viewMode === "zoc") return [["axis", "Axis ZOC"], ["allies", "Allies ZOC"], ["contested", "争夺"]];
+  if (viewMode === "terrain") return [["terrain", "地形"], ["mine", "雷区"], ["hex", "坐标"]];
+  if (viewMode === "all") return [["unit", "可行动"], ["reach", "可达"], ["target", "目标"], ["supply", "补给"], ["mine", "雷区"]];
+  return [["axis", "Axis 棋子"], ["allies", "Allies 棋子"]];
+}
+
+function renderMapLegend() {
+  const target = el("mapLegend");
+  if (!target) return;
+  const items = mapLegendItems();
+  if (!items.length) {
+    target.className = "map-legend hidden";
+    target.innerHTML = "";
+    return;
+  }
+  target.className = "map-legend";
+  target.innerHTML = items.map(([key, label]) => `
+    <span class="${escapeHtml(key)}"><i></i>${escapeHtml(label)}</span>
+  `).join("");
+}
+
+function dockButton(label, command, options = {}) {
+  const classes = ["phase-dock-button"];
+  if (options.primary) classes.push("primary");
+  if (options.quiet) classes.push("quiet");
+  if (options.warning) classes.push("warning");
+  const disabled = options.disabled ? " disabled" : "";
+  return `<button class="${classes.join(" ")}" type="button" data-command="${escapeHtml(command)}"${disabled}>${escapeHtml(label)}</button>`;
+}
+
+function phaseEndKey() {
+  return `${state.turn || 1}:${state.phase || ""}:${state.active_side || ""}`;
+}
+
+function phaseEndConfirmationPending() {
+  return pendingPhaseEndKey === phaseEndKey();
+}
+
+function phaseEndButtonLabel(defaultLabel) {
+  return phaseEndConfirmationPending() ? (defaultLabel.includes("跳过") ? "确认跳过" : "确认结束") : defaultLabel;
+}
+
+function dockOpenPanelButton(label = "打开当前面板", options = {}) {
+  const tab = activeTabName();
+  const kind = phaseKind();
+  const desired = kind === "combat"
+    ? "combat"
+    : ["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)
+    ? "move"
+    : state.phase === "end_game_turn"
+    ? "judge"
+    : "";
+  if (desired && tab === desired) return "";
+  return dockButton(label, "open-phase-panel", options);
+}
+
+function renderDockActions(buttons) {
+  buttons = buttons.filter(Boolean);
+  if (!buttons.length) return "";
+  const endButtons = buttons.filter((button) => button.includes('data-command="end-phase"'));
+  const actionButtons = buttons.filter((button) => !button.includes('data-command="end-phase"'));
+  let primaryButtons = actionButtons.filter((button) => button.includes(" primary"));
+  let secondaryButtons = actionButtons.filter((button) => !button.includes(" primary"));
+  if (!primaryButtons.length && actionButtons.length) {
+    primaryButtons = [actionButtons[0]];
+    secondaryButtons = actionButtons.slice(1);
+  }
+  return `
+    ${primaryButtons.length ? `<div class="phase-dock-primary-actions">${primaryButtons.join("")}</div>` : ""}
+    ${endButtons.length ? `<div class="phase-dock-end-actions">${endButtons.join("")}</div>` : ""}
+    ${secondaryButtons.length ? `
+      <details class="phase-dock-more">
+        <summary>更多</summary>
+        <div>${secondaryButtons.join("")}</div>
+      </details>
+    ` : ""}
+  `;
+}
+
+function renderPhaseDockUnitFocus() {
+  const units = sortedActionableUnits();
+  if (!units.length) return "";
+  const context = actionableUnitContext();
+  const unit = units.find((item) => item.id === selectedUnitId) || units[0];
+  const type = unitTypeGroup(unit).label;
+  const chips = actionableUnitChips(unit, context).slice(0, 4);
+  return `
+    <div class="phase-dock-unit">
+      <button class="phase-dock-unit-main" type="button" data-command="focus-actionable" data-unit-id="${escapeHtml(unit.id)}">
+        <span>当前单位</span>
+        <b>${escapeHtml(unit.name || unit.id)}</b>
+        <small>${escapeHtml(unit.hex || "未部署")} · ${escapeHtml(type)} · ${escapeHtml(unit.id)}</small>
+      </button>
+      <div class="phase-dock-unit-chips">
+        ${chips.map((chip) => `<i>${escapeHtml(chip)}</i>`).join("")}
+      </div>
+      ${units.length > 1 ? `<button class="phase-dock-unit-next" type="button" data-command="next-actionable">下一个</button>` : ""}
     </div>
-    <dl>
-      <dt>雷区</dt><dd>${mines.length ? mines.map((mine) => `${mine.side} ${mine.name || mine.id}`).join("; ") : "无"}</dd>
-      <dt>ZOC</dt><dd>${zocSides.join(", ") || "无"}</dd>
-      <dt>补给阻断</dt><dd>${blockedFor.length ? blockedFor.join(", ") : "无"}</dd>
-      <dt>单位</dt><dd>${units.length ? units.map((unit) => `${unit.side} ${unit.name || unit.id}`).join("; ") : "无"}</dd>
-    </dl>
+  `;
+}
+
+function closeDockMenus(except = null) {
+  document.querySelectorAll(".phase-dock-more[open]").forEach((details) => {
+    if (details !== except) details.open = false;
+  });
+}
+
+function closeMapToolMenus(except = null) {
+  document.querySelectorAll(".map-view-menu[open], .map-layer-menu[open]").forEach((details) => {
+    if (details !== except) details.open = false;
+  });
+}
+
+function clearInteractionFocus() {
+  selectedUnitId = null;
+  selectedHexId = null;
+  selectedCombatDefenderHex = null;
+  highlightedSupplyPath = [];
+  movePathDraft = [];
+  syncMovePathInput();
+}
+
+function renderPhaseActionDock() {
+  const dock = el("phaseActionDock");
+  if (!dock) return;
+  const guide = phaseGuide(state.phase);
+  const side = state.active_side === "allies" ? "allies" : "axis";
+  const sideDisplay = state.phase === "end_game_turn" ? "End Turn" : (side === "axis" ? "Axis" : "Allies");
+  const kind = phaseKind();
+  const aiControlled = currentPhaseIsAiControlled();
+  const buttons = [];
+  const notes = [];
+  const progress = phaseProgressMeta();
+  const progressPercent = Math.round((progress.current / Math.max(1, progress.total)) * 100);
+  const confirmEnd = phaseEndConfirmationPending();
+  let focus = guide.action;
+  let dockMode = kind || "state";
+
+  if (state.phase === "end_game_turn") {
+    dockMode = "end";
+    focus = confirmEnd ? "再次确认进入下一回合" : "回合结束结算";
+    notes.push(confirmEnd ? "会处理补给、孤立、胜负并推进回合" : "检查补给、孤立和胜负");
+    buttons.push(dockOpenPanelButton("打开裁判"));
+    buttons.push(dockButton(confirmEnd ? "确认进入下一回合" : "进入下一回合", "end-phase", { primary: true, warning: confirmEnd }));
+  }
+  else if (aiControlled) {
+    dockMode = "ai";
+    focus = state.ai_autoplay ? "AI 正在接管当前阶段" : "AI 已暂停";
+    notes.push(playerControllerLabel(playerController(side)));
+    buttons.push(dockButton(state.ai_autoplay ? "暂停 AI" : "恢复 AI", state.ai_autoplay ? "pause-ai" : "resume-ai", { primary: true }));
+    buttons.push(dockButton("打开 AI 设置", "open-ai-panel"));
+    buttons.push(dockButton(phaseEndButtonLabel("结束阶段"), "end-phase", { quiet: !confirmEnd, warning: confirmEnd }));
+  }
+  else if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) {
+    dockMode = "move";
+    const unit = currentMoveUnit();
+    const actionableCount = actionableUnitsForCurrentPhase().length;
+    const route = routeVerdict();
+    const hasRoute = movePathDraft.length > 1;
+    const hasTarget = !!el("moveTargetInput")?.value.trim();
+    if (!unit || !canMoveUnitNow(unit)) {
+      focus = "选择当前方可移动单位";
+      notes.push(actionableCount ? `${actionableCount} 个单位可移动` : "没有可移动单位");
+      if (actionableCount) buttons.push(dockButton("选择推荐单位", "focus-first-actionable", { primary: true }));
+      buttons.push(dockOpenPanelButton("打开移动", { primary: !actionableCount }));
+    }
+    else if (!hasRoute) {
+      focus = `${unit.name || unit.id} 准备移动`;
+      notes.push("点击相邻格绘制路线");
+      if (hasTarget) buttons.push(dockButton("自动路线", "auto-route", { primary: true }));
+      buttons.push(dockOpenPanelButton("打开移动"));
+    }
+    else {
+      focus = route?.legal
+        ? `${unit.name || unit.id} 路线可执行`
+        : `${unit.name || unit.id} 路线不可执行`;
+      notes.push(route?.details ? `${route.details.spent}/${route.details.allowance} MP` : (route?.reason || "等待裁判"));
+      if (route?.legal) buttons.push(dockButton("执行移动", "apply-move", { primary: true }));
+      buttons.push(dockButton("撤销一步", "undo-route"));
+      buttons.push(dockButton("清空路线", "clear-route", { quiet: true }));
+    }
+    buttons.push(dockButton(phaseEndButtonLabel("结束阶段"), "end-phase", { quiet: !confirmEnd, warning: confirmEnd }));
+  }
+  else if (kind === "combat") {
+    dockMode = "combat";
+    const selected = selectedUnitId && state.units?.[selectedUnitId] ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
+    const verdict = safeCombatVerdict();
+    const actionableCount = actionableUnitsForCurrentPhase().length;
+    const action = (() => {
+      try { return parseCombatAction(); }
+      catch { return { attackers: [], defender_hexes: [] }; }
+    })();
+    const attackers = action.attackers || [];
+    const defenders = action.defender_hexes || [];
+    if (!attackers.length || !defenders.length) {
+      focus = "选择攻击单位和目标格";
+      notes.push(canCombatUnitNow(selected) ? "可使用当前选中单位" : actionableCount ? `${actionableCount} 个单位可攻击` : "没有可攻击单位");
+      if (canCombatUnitNow(selected)) buttons.push(dockButton("使用选中", "use-selected-combat", { primary: true }));
+      else if (actionableCount) buttons.push(dockButton("选择推荐单位", "focus-first-actionable", { primary: true }));
+      buttons.push(dockOpenPanelButton("打开战斗", { primary: !canCombatUnitNow(selected) && !actionableCount }));
+    }
+    else {
+      focus = verdict?.legal ? "战斗可结算" : "战斗不可执行";
+      notes.push(`${attackers.length} 个攻击单位 · ${defenders.join(", ")}`);
+      if (verdict) buttons.push(dockButton("预览", "preview-combat"));
+      if (verdict?.legal) buttons.push(dockButton("掷骰结算", "roll-combat", { primary: true }));
+      buttons.push(dockOpenPanelButton("打开战斗"));
+    }
+    buttons.push(dockButton(phaseEndButtonLabel("跳过战斗"), "end-phase", { quiet: !confirmEnd, warning: confirmEnd }));
+  }
+  else {
+    buttons.push(dockOpenPanelButton(`打开${guide.tabLabel}`, { primary: true }));
+    buttons.push(dockButton(phaseEndButtonLabel("结束阶段"), "end-phase", { quiet: !confirmEnd, warning: confirmEnd }));
+  }
+  if (actionLog.length) buttons.push(dockButton("撤销最近", "undo-action", { quiet: true }));
+
+  dock.className = `phase-action-dock ${side} ${dockMode}`;
+  dock.innerHTML = `
+    <div class="phase-dock-head">
+      <span>${escapeHtml(sideDisplay)}</span>
+      <b>${escapeHtml(phaseShortLabel(state.phase))}</b>
+      <em>T${escapeHtml(state.turn || 1)} · ${escapeHtml(progress.current)}/${escapeHtml(progress.total)}</em>
+      <div class="phase-mini-progress" style="--phase-progress:${escapeHtml(progressPercent)}%"></div>
+    </div>
+    <div class="phase-dock-main">
+      <strong>${escapeHtml(focus)}</strong>
+      <small>${escapeHtml(notes.filter(Boolean).join(" · ") || guide.detail)}</small>
+    </div>
+    ${renderPhaseDockUnitFocus()}
+    <div class="phase-dock-actions">${renderDockActions(buttons)}</div>
   `;
 }
 
@@ -1151,25 +2080,438 @@ function renderOperationHint() {
   if (!target) return;
   const viewMode = el("mapViewModeSelect")?.value || "command";
   const unit = selectedUnitId ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
-  let text = `${phaseLabel(state.phase)}：`;
+  let text = `${phaseShortLabel(state.phase)}：`;
   if (viewMode === "move") {
     text += unit && isMovableUnit(unit)
-      ? `已选择 ${unit.name || unit.id}，点击地图目标 hex 或输入目标自动寻路。`
-      : "选择一个当前方可移动单位，再点击地图目标 hex。";
+      ? `已选择 ${unit.name || unit.id}，点击地图目标格或输入坐标自动寻路。`
+      : "选择一个当前方可移动单位，再点击地图目标格。";
   }
   else if (viewMode === "combat") {
     text += unit && isCombatUnit(unit)
-      ? `已选择 ${unit.name || unit.id}，红色 hex 是可攻击目标。`
-      : "在 Combat Phase 选择己方作战单位查看可攻击目标。";
+      ? `已选择 ${unit.name || unit.id}，红色格是可攻击目标。`
+      : "在战斗阶段选择己方作战单位查看可攻击目标。";
   }
   else if (viewMode === "supply") {
     text += unit ? "绿色虚线是选中棋子的补给线。" : "点击一个棋子，在地图上显示它的补给线。";
   }
-  else if (viewMode === "terrain") text += "显示地形和 hex 标签，用于校对地图。";
+  else if (viewMode === "terrain") text += "显示地形和坐标标签，用于校对地图。";
   else if (viewMode === "zoc") text += "显示双方 ZOC 控制范围。";
   else if (viewMode === "all") text += "显示所有辅助层，适合调试。";
-  else text += "选择单位或 hex 查看属性；切换查看模式进入移动、战斗或补给视图。";
+  else text += "选择单位或地图格查看属性；切换查看模式进入移动、战斗或补给视图。";
   target.textContent = text;
+}
+
+function actionableUnitsForCurrentPhase() {
+  const kind = phaseKind();
+  if (state.phase === "end_game_turn") return [];
+  if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) {
+    return unitsArray().filter(canMoveUnitNow);
+  }
+  if (kind === "combat") {
+    return unitsArray().filter(canCombatUnitNow);
+  }
+  return [];
+}
+
+function sortedActionableUnits(limit = null) {
+  const units = actionableUnitsForCurrentPhase()
+    .sort((a, b) => Number(b.movement || 0) - Number(a.movement || 0) || String(a.hex || "").localeCompare(String(b.hex || "")) || a.id.localeCompare(b.id));
+  return limit ? units.slice(0, limit) : units;
+}
+
+function focusActionableUnit(unit) {
+  if (!unit) return;
+  selectedUnitId = unit.id;
+  selectedHexId = unit.hex || selectedHexId;
+  selectedCombatDefenderHex = null;
+  if (["initial_movement", "mechanized_movement", "supply_movement"].includes(phaseKind())) {
+    setMapViewMode("move");
+    syncMoveDraftToUnit(unit.id);
+    if (el("moveUnitSelect")) el("moveUnitSelect").value = unit.id;
+    switchTab("move", { expandPanel: true });
+  }
+  else if (phaseKind() === "combat") {
+    setMapViewMode("combat");
+    if (el("combatAttackersInput")) el("combatAttackersInput").value = unit.id;
+    if (el("combatDefendersInput")) el("combatDefendersInput").value = "";
+    switchTab("combat", { expandPanel: true });
+  }
+  renderSelectedUnit();
+  renderSelectedHex();
+  renderActionableUnits();
+  renderActionControls();
+  renderMap();
+  focusMapOnHex(unit.hex);
+}
+
+function cycleActionableUnit(direction = 1) {
+  const units = sortedActionableUnits();
+  if (!units.length) return;
+  const current = Math.max(0, units.findIndex((unit) => unit.id === selectedUnitId));
+  const nextIndex = selectedUnitId && units.some((unit) => unit.id === selectedUnitId)
+    ? (current + direction + units.length) % units.length
+    : 0;
+  focusActionableUnit(units[nextIndex]);
+}
+
+function phaseDirective() {
+  const kind = phaseKind();
+  const guide = phaseGuide(state.phase);
+  const confirmEnd = phaseEndConfirmationPending();
+  const endLabel = phaseEndButtonLabel(state.phase === "end_game_turn" ? "进入下一回合" : kind === "combat" ? "跳过战斗" : "结束阶段");
+  const base = {
+    tone: kind || "state",
+    label: phaseShortLabel(state.phase),
+    title: guide.action,
+    detail: guide.detail,
+    primaryCommand: "open-phase-panel",
+    primaryLabel: `打开${guide.tabLabel}`,
+    endLabel
+  };
+  if (state.phase === "end_game_turn") {
+    return {
+      ...base,
+      tone: "end",
+      title: confirmEnd ? "再次确认进入下一回合" : "处理回合结束结算",
+      detail: confirmEnd ? "将更新补给、孤立、胜负并推进回合。" : "检查补给、孤立和胜负后进入下一回合。",
+      primaryCommand: "open-phase-panel",
+      primaryLabel: "打开裁判",
+      endLabel: confirmEnd ? "确认进入下一回合" : "进入下一回合"
+    };
+  }
+  if (currentPhaseIsAiControlled()) {
+    return {
+      ...base,
+      tone: "ai",
+      title: state.ai_autoplay ? "AI 正在自动执行当前阶段" : "AI 已配置但暂停",
+      detail: playerControllerLabel(playerController(state.active_side)),
+      primaryCommand: state.ai_autoplay ? "pause-ai" : "resume-ai",
+      primaryLabel: state.ai_autoplay ? "暂停 AI" : "恢复 AI"
+    };
+  }
+  if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) {
+    const unit = currentMoveUnit();
+    const route = routeVerdict();
+    const hasRoute = movePathDraft.length > 1;
+    const actionableCount = actionableUnitsForCurrentPhase().length;
+    if (!unit || !canMoveUnitNow(unit)) {
+      return {
+        ...base,
+        tone: "move",
+        title: actionableCount ? "先选择一个可移动单位" : "本阶段没有可移动单位",
+        detail: actionableCount ? `${actionableCount} 个单位可行动，选中后在地图上画路线。` : "可以直接结束阶段。",
+        primaryCommand: actionableCount ? "focus-first-actionable" : "open-phase-panel",
+        primaryLabel: actionableCount ? "选择推荐单位" : "打开移动"
+      };
+    }
+    if (!hasRoute) {
+      return {
+        ...base,
+        tone: "move",
+        title: `给 ${unit.name || unit.id} 规划路线`,
+        detail: "点击地图相邻格绘制路线，或输入目标格自动寻路。",
+        primaryCommand: "open-phase-panel",
+        primaryLabel: "打开移动"
+      };
+    }
+    return {
+      ...base,
+      tone: route?.legal ? "move" : "bad",
+      title: route?.legal ? "路线合法，可以执行移动" : "路线不合法，需要调整",
+      detail: route?.details ? `${unit.name || unit.id} · ${route.details.spent}/${route.details.allowance} MP` : (route?.reason || "等待裁判结果"),
+      primaryCommand: route?.legal ? "apply-move" : "open-phase-panel",
+      primaryLabel: route?.legal ? "执行移动" : "查看移动"
+    };
+  }
+  if (kind === "combat") {
+    let action = { attackers: [], defender_hexes: [] };
+    try { action = parseCombatAction(); }
+    catch { action = { attackers: [], defender_hexes: [] }; }
+    const attackers = action.attackers || [];
+    const defenders = action.defender_hexes || [];
+    const verdict = safeCombatVerdict();
+    const actionableCount = actionableUnitsForCurrentPhase().length;
+    if (!attackers.length || !defenders.length) {
+      return {
+        ...base,
+        tone: "combat",
+        title: actionableCount ? "先选择攻击单位和目标格" : "没有可攻击单位",
+        detail: actionableCount ? `${actionableCount} 个单位可攻击，选择后预览战斗。` : "战斗是自愿的，可以跳过。",
+        primaryCommand: actionableCount ? "focus-first-actionable" : "open-phase-panel",
+        primaryLabel: actionableCount ? "选择推荐单位" : "打开战斗"
+      };
+    }
+    return {
+      ...base,
+      tone: verdict?.legal ? "combat" : "bad",
+      title: verdict?.legal ? "战斗合法，可以掷骰结算" : "战斗不合法，需要调整",
+      detail: verdict?.legal ? `${attackers.length} 个攻击单位 · ${defenders.join(", ")}` : (verdict?.reason || "等待裁判结果"),
+      primaryCommand: verdict?.legal ? "roll-combat" : "open-phase-panel",
+      primaryLabel: verdict?.legal ? "掷骰结算" : "查看战斗"
+    };
+  }
+  return base;
+}
+
+function renderPhaseDirective(item = phaseDirective(), meta = {}) {
+  return `
+    <div class="phase-directive ${escapeHtml(item.tone)}">
+      <div>
+        <span>${escapeHtml(meta.label || item.label)}</span>
+        <b>${escapeHtml(item.title)}</b>
+        <small>${escapeHtml(item.detail)}</small>
+      </div>
+      ${meta.next ? `
+        <div class="phase-directive-meta">
+          <span>${escapeHtml(meta.status || "")}</span>
+          <b>${escapeHtml(meta.next)}</b>
+        </div>
+      ` : ""}
+      <div class="phase-directive-actions">
+        <button type="button" class="primary-action" data-command="${escapeHtml(item.primaryCommand)}">${escapeHtml(item.primaryLabel)}</button>
+        <button type="button" class="secondary-action" data-command="end-phase">${escapeHtml(item.endLabel)}</button>
+      </div>
+    </div>
+  `;
+}
+
+function actionableUnitContext() {
+  const kind = phaseKind();
+  if (state.phase === "end_game_turn") {
+    return { title: "回合结束", detail: "确认后进入下一回合。", empty: "本阶段由系统结算，没有可手动操作的棋子。", command: "open-phase-panel", commandLabel: "裁判" };
+  }
+  if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) {
+    return { title: "本阶段可移动", detail: "点一个单位后，在地图上点击目的地或画路线。", empty: "当前阶段没有可移动单位。", command: "move", commandLabel: "移动" };
+  }
+  if (kind === "combat") {
+    return { title: "本阶段可攻击", detail: "点攻击单位，再点红色目标格预览并结算。", empty: "当前没有可攻击目标的单位，可以跳过战斗。", command: "combat", commandLabel: "战斗" };
+  }
+  return { title: "本阶段可行动", detail: "选择棋子或地图格查看裁判信息。", empty: "当前阶段没有可列出的单位。", command: "select", commandLabel: "选择" };
+}
+
+function renderActionableUnitsPanel(panelId, options = {}) {
+  const panel = el(panelId);
+  if (!panel) return;
+  const context = actionableUnitContext();
+  const units = sortedActionableUnits();
+  const shown = units.slice(0, options.limit || 8);
+  const more = Math.max(0, units.length - shown.length);
+  panel.className = `actionable-units ${state.active_side || ""} ${units.length ? "" : "empty"}`;
+  panel.innerHTML = `
+    <div class="actionable-head">
+      <div>
+        <span>${escapeHtml(phaseShortLabel(state.phase))}</span>
+        <b>${escapeHtml(context.title)}</b>
+        <small>${escapeHtml(context.detail)}</small>
+      </div>
+      <em>${escapeHtml(units.length)} 个</em>
+    </div>
+    ${shown.length ? `
+      <div class="actionable-list">
+        ${shown.map((unit) => actionableUnitCard(unit, context)).join("")}
+      </div>
+      ${more ? `<button class="actionable-more" type="button" data-actionable-command="open-roster">还有 ${escapeHtml(more)} 个，打开编成</button>` : ""}
+    ` : `<p>${escapeHtml(context.empty)}</p>`}
+  `;
+}
+
+function actionableUnitChips(unit, context) {
+  const chips = [];
+  const kind = phaseKind();
+  chips.push(unit.hex || "未部署");
+  if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) {
+    chips.push(`${unit.movement ?? 0} MP`);
+    if (unit.road_mode) chips.push("道路模式");
+    else if (canEnterRoadModeNow(unit)) chips.push("可入道路");
+    if (isMechanized(unit)) chips.push("机械化");
+  }
+  else if (kind === "combat") {
+    const targets = adjacentCombats(unit.side).filter((pair) => pair.attacker === unit.id);
+    chips.push(`${targets.length} 目标`);
+    chips.push(`A${unit.attack ?? 0}`);
+  }
+  if (isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))) chips.push(supplyStateLabel(supplyState(unit.id)));
+  if (unit.state && unit.state !== "fresh") chips.push(unitStateLabel(unit.state));
+  if (unit.attacked_this_phase || unit.attacked_this_turn) chips.push("已攻击");
+  if (unit.defended_this_phase) chips.push("已防御");
+  return chips.filter(Boolean).slice(0, context.command === "combat" ? 4 : 4);
+}
+
+function actionableUnitCard(unit, context) {
+  const selected = unit.id === selectedUnitId ? " selected" : "";
+  const type = unitTypeGroup(unit).label;
+  const chips = actionableUnitChips(unit, context);
+  const stats = [];
+  if (isCombatUnit(unit)) {
+    stats.push(`A${unit.attack ?? 0}`);
+    stats.push(`D${unit.defense ?? unit.attack ?? 0}`);
+  }
+  if (isMovableUnit(unit)) stats.push(`MP${unit.movement ?? 0}`);
+  return `
+    <button class="actionable-unit${selected}" type="button" data-unit-id="${escapeHtml(unit.id)}" data-actionable-command="${escapeHtml(context.command)}">
+      <span class="actionable-unit-command">${escapeHtml(context.commandLabel)}</span>
+      <span class="actionable-unit-main">
+        <b>${escapeHtml(unit.name || unit.id)}</b>
+        <small>${escapeHtml(unit.hex || "未部署")} · ${escapeHtml(type)}</small>
+        <span class="actionable-unit-chips">
+          ${chips.map((chip) => `<i>${escapeHtml(chip)}</i>`).join("")}
+        </span>
+      </span>
+      <span class="actionable-unit-stats">
+        ${stats.slice(0, 3).map((stat) => `<i>${escapeHtml(stat)}</i>`).join("")}
+      </span>
+    </button>
+  `;
+}
+
+function renderActionableUnits() {
+  renderActionableUnitsPanel("stateActionableUnits", { limit: 6 });
+  renderActionableUnitsPanel("moveActionableUnits", { limit: 4 });
+  renderActionableUnitsPanel("combatActionableUnits", { limit: 4 });
+}
+
+function workflowCueHtml({ tone = "idle", step = "", title = "", detail = "", facts = [] } = {}) {
+  const detailHtml = tone === "bad" && detail ? `<p>${escapeHtml(detail)}</p>` : "";
+  return `
+    <div class="workflow-cue-card ${escapeHtml(tone)}">
+      <span>${escapeHtml(step)}</span>
+      <strong>${escapeHtml(title)}</strong>
+      ${facts.length ? `<div>${facts.map((fact) => `<i>${escapeHtml(fact)}</i>`).join("")}</div>` : ""}
+      ${detailHtml}
+    </div>
+  `;
+}
+
+function renderMoveWorkflowCue() {
+  const target = el("moveWorkflowCue");
+  if (!target) return;
+  if (!["initial_movement", "mechanized_movement", "supply_movement"].includes(phaseKind())) {
+    target.className = "workflow-cue hidden";
+    target.innerHTML = "";
+    return;
+  }
+  const unit = currentMoveUnit();
+  const actionableCount = actionableUnitsForCurrentPhase().length;
+  const route = routeVerdict();
+  const hasRoute = movePathDraft.length > 1;
+  const hasTarget = !!el("moveTargetInput")?.value.trim();
+  target.className = "workflow-cue";
+  if (!unit || !canMoveUnitNow(unit)) {
+    target.innerHTML = workflowCueHtml({
+      tone: actionableCount ? "ready" : "idle",
+      step: "下一步",
+      title: actionableCount ? "选择一个可移动单位" : "本阶段没有可移动单位",
+      detail: actionableCount ? "从上方列表点单位，或直接在地图上点发光的棋子。" : "可以结束阶段，或检查是否有单位已经行动。",
+      facts: [`${actionableCount} 个可移动`]
+    });
+    return;
+  }
+  if (!hasRoute) {
+    target.innerHTML = workflowCueHtml({
+      tone: "move",
+      step: "待路线",
+      title: `${unit.name || unit.id}`,
+      detail: hasTarget ? "可以点“自动路线”，也可以直接在地图上点击目标格。" : "在地图上点击相邻格绘制路线；要输入坐标时展开“坐标寻路”。",
+      facts: [unit.hex || "未部署", `${unit.movement ?? 0} MP`, el("moveModeSelect")?.value === "road" ? "道路模式" : "普通移动"]
+    });
+    return;
+  }
+  if (route?.legal) {
+    target.innerHTML = workflowCueHtml({
+      tone: "ready",
+      step: "可执行",
+      title: `移动到 ${movePathDraft.at(-1) || ""}`,
+      detail: "点击底部行动卡的“执行移动”。执行后单位会变为已行动。",
+      facts: [`${route.details?.spent ?? "?"}/${route.details?.allowance ?? "?"} MP`, movePathDraft.at(-1) || ""]
+    });
+    return;
+  }
+  target.innerHTML = workflowCueHtml({
+    tone: "bad",
+    step: "路线受阻",
+    title: route?.reason || "路线当前不合法",
+    detail: route?.reason || "裁判没有接受这条路线，请撤销一步或清空路线重画。",
+    facts: [movePathDraft.join(" -> ")]
+  });
+}
+
+function renderCombatWorkflowCue() {
+  const target = el("combatWorkflowCue");
+  if (!target) return;
+  if (phaseKind() !== "combat") {
+    target.className = "workflow-cue hidden";
+    target.innerHTML = "";
+    return;
+  }
+  let action = { attackers: [], defender_hexes: [] };
+  try { action = parseCombatAction(); }
+  catch { action = { attackers: [], defender_hexes: [] }; }
+  const selected = selectedUnitId && state.units?.[selectedUnitId] ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
+  const attackers = action.attackers || [];
+  const defenders = action.defender_hexes || [];
+  const actionableCount = actionableUnitsForCurrentPhase().length;
+  const verdict = safeCombatVerdict();
+  target.className = "workflow-cue";
+  if (!attackers.length) {
+    target.innerHTML = workflowCueHtml({
+      tone: actionableCount ? "ready" : "idle",
+      step: "下一步",
+      title: actionableCount ? "选择攻击单位" : "当前没有可攻击单位",
+      detail: actionableCount ? "从上方列表选择，或在地图战斗视图中点可攻击单位。" : "可以跳过战斗阶段，或检查相邻敌方单位。",
+      facts: [`${actionableCount} 个可攻击`]
+    });
+    return;
+  }
+  if (!defenders.length) {
+    const targets = selected && canCombatUnitNow(selected) ? combatTargetOptionsForSelectedUnit().length : 0;
+    target.innerHTML = workflowCueHtml({
+      tone: "combat",
+      step: "待目标",
+      title: attackers.length === 1 ? (state.units?.[attackers[0]]?.name || attackers[0]) : `${attackers.length} 个攻击单位`,
+      detail: "点击下方目标卡，或在地图上点红色目标格。防御格内所有单位会共同防御。",
+      facts: [`攻击 ${attackers.length} 个单位`, `${targets} 个目标格`]
+    });
+    return;
+  }
+  if (verdict?.legal) {
+    target.innerHTML = workflowCueHtml({
+      tone: "ready",
+      step: "可结算",
+      title: `${verdict.details?.odds_column || "赔率待定"} · ${defenders.join(", ")}`,
+      detail: "底部行动卡可直接随机掷骰结算；需要指定骰点时使用右侧骰子选择。",
+      facts: [verdict.details?.odds_column || "赔率待定", defenders.join(", ")]
+    });
+    return;
+  }
+  target.innerHTML = workflowCueHtml({
+    tone: "bad",
+    step: "战斗受阻",
+    title: verdict?.reason || "战斗当前不合法",
+    detail: verdict?.reason || "请调整攻击单位或目标格。",
+    facts: [`攻击 ${attackers.length}`, defenders.join(", ")]
+  });
+}
+
+function handleActionableUnitsClick(event) {
+  const button = event.target.closest?.("[data-actionable-command]");
+  if (!button) return;
+  const command = button.dataset.actionableCommand;
+  if (command === "open-roster") {
+    switchTab("roster", { expandPanel: true });
+    return;
+  }
+  const unitId = button.dataset.unitId;
+  if (unitId) selectUnit(unitId, { showStateTab: false });
+  if (command === "move") activateMoveForSelectedUnit();
+  else if (command === "combat") activateCombatForSelectedUnit();
+  else if (command === "open-phase-panel") focusCurrentPhaseTab({ expandPanel: true });
+  else if (unitId && state.units?.[unitId]?.hex) focusMapOnHex(state.units[unitId].hex);
+}
+
+function handleCombatTargetListClick(event) {
+  const button = event.target.closest?.("[data-action='select-combat-target']");
+  if (!button) return;
+  selectCombatTarget(button.dataset.defender, button.dataset.attacker);
 }
 
 function setActionVisible(id, visible) {
@@ -1177,6 +2519,17 @@ function setActionVisible(id, visible) {
   if (!node) return;
   node.classList.toggle("action-hidden", !visible);
   if ("disabled" in node) node.disabled = !visible;
+}
+
+function syncActionGroupVisible(containerId, actionIds = []) {
+  const container = el(containerId);
+  if (!container) return;
+  const visible = actionIds.some((id) => {
+    const node = el(id);
+    return node && !node.classList.contains("action-hidden");
+  });
+  container.classList.toggle("action-hidden", !visible);
+  if (!visible && "open" in container) container.open = false;
 }
 
 function canMoveUnitNow(unit) {
@@ -1266,6 +2619,144 @@ function safeCombatVerdict() {
   }
 }
 
+function renderCombatSelectionSummary() {
+  const target = el("combatSelectionSummary");
+  if (!target) return;
+  let action;
+  try {
+    action = parseCombatAction();
+  }
+  catch {
+    action = { attackers: [], defender_hexes: [] };
+  }
+  const attackers = action.attackers || [];
+  const defenderHexes = action.defender_hexes || [];
+  if (!attackers.length && !defenderHexes.length) {
+    target.className = "combat-selection-summary empty hidden";
+    target.innerHTML = "";
+    return;
+  }
+  const attackerText = attackers.length
+    ? attackers.map((id) => state.units?.[id]?.name || id).join(", ")
+    : "未选择";
+  const defenderText = defenderHexes.length ? defenderHexes.join(", ") : "未选择";
+  let status = "等待选择";
+  let ready = false;
+  if (attackers.length && defenderHexes.length) {
+    const verdict = safeCombatVerdict();
+    ready = !!verdict?.legal;
+    status = verdict?.reason || (ready ? "可结算" : "不能执行");
+  }
+  target.className = `combat-selection-summary ${ready ? "ready" : "empty"}`;
+  target.innerHTML = `
+    <dl>
+      <div><dt>攻击</dt><dd>${escapeHtml(attackerText)}</dd></div>
+      <div><dt>目标</dt><dd>${escapeHtml(defenderText)}</dd></div>
+    </dl>
+    <span>${escapeHtml(status)}</span>
+  `;
+}
+
+function renderCombatOverview() {
+  const panel = el("combatOverview");
+  if (!panel) return;
+  let action;
+  try {
+    action = parseCombatAction();
+  }
+  catch {
+    action = { attackers: [], defender_hexes: [] };
+  }
+  const attackers = action.attackers || [];
+  const defenderHexes = action.defender_hexes || [];
+  if (!attackers.length && !defenderHexes.length) {
+    panel.className = "combat-overview empty";
+    panel.innerHTML = "";
+    return;
+  }
+  const verdict = attackers.length && defenderHexes.length ? safeCombatVerdict() : null;
+  const details = verdict?.details || {};
+  const attack = details.attack_strength ?? attackers.reduce((sum, id) => sum + Number(state.units?.[id]?.attack || 0), 0);
+  const defense = details.defense_strength ?? defenderHexes.reduce((sum, hex) => {
+    const defenders = unitsArray().filter((unit) => isMapCounter(unit) && unit.hex === hex && unit.side !== state.active_side && isCombatUnit(unit));
+    return sum + defenders.reduce((unitSum, unit) => unitSum + Number(unit.defense || unit.attack || 0), 0);
+  }, 0);
+  const odds = details.odds_column || (attack && defense ? combatOddsColumn(attack, defense) : "-");
+  const result = verdict?.legal ? "可结算" : verdict ? "需调整" : "待选择";
+  panel.className = `combat-overview ${verdict?.legal ? "ok" : verdict ? "bad" : "muted"}`;
+  panel.innerHTML = `
+    <div><span>攻击</span><b>${escapeHtml(attack || "-")}</b><small>${escapeHtml(attackers.length)} 单位</small></div>
+    <div><span>防御</span><b>${escapeHtml(defense || "-")}</b><small>${escapeHtml(defenderHexes.length)} 格</small></div>
+    <div><span>赔率</span><b>${escapeHtml(odds || "-")}</b></div>
+    <div><span>裁判</span><b>${escapeHtml(result)}</b></div>
+  `;
+}
+
+function combatTargetOptionsForSelectedUnit() {
+  if (!selectedUnitId || !state.units?.[selectedUnitId]) return [];
+  const unit = { id: selectedUnitId, ...state.units[selectedUnitId] };
+  if (!canCombatUnitNow(unit)) return [];
+  return adjacentCombats(unit.side).filter((pair) => pair.attacker === selectedUnitId);
+}
+
+function combatTargetPreview(pair) {
+  const defenders = (pair.defenders || []).map((id) => ({ id, ...(state.units?.[id] || {}) })).filter((unit) => state.units?.[unit.id]);
+  const verdict = checkCombat({ attackers: [pair.attacker], defender_hexes: [pair.defender_hex], die: null, no_retreat_order: false });
+  return {
+    legal: verdict.legal,
+    reason: verdict.reason,
+    attack: verdict.details?.attack,
+    defense: verdict.details?.defense,
+    column: verdict.details?.odds_column,
+    defenders
+  };
+}
+
+function renderCombatTargetList() {
+  const panel = el("combatTargetList");
+  if (!panel) return;
+  const selected = selectedUnitId && state.units?.[selectedUnitId] ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
+  if (phaseKind() !== "combat") {
+    panel.className = "combat-target-list empty hidden";
+    panel.innerHTML = "";
+    return;
+  }
+  if (!selected || !isCombatUnit(selected)) {
+    panel.className = "combat-target-list empty hidden";
+    panel.innerHTML = "";
+    return;
+  }
+  const targets = combatTargetOptionsForSelectedUnit();
+  if (!targets.length) {
+    panel.className = "combat-target-list empty";
+    panel.innerHTML = `<p>${escapeHtml(selected.name || selected.id)} 没有可攻击目标。</p>`;
+    return;
+  }
+  panel.className = "combat-target-list";
+  panel.innerHTML = `
+    <div class="combat-target-head">
+      <span>可攻击目标</span>
+      <b>${escapeHtml(selected.name || selected.id)}</b>
+    </div>
+    <div class="combat-target-cards">
+      ${targets.map((pair) => {
+        const preview = combatTargetPreview(pair);
+        const selectedTarget = selectedCombatDefenderHex === pair.defender_hex;
+        const defenderText = preview.defenders.map((unit) => unit.name || unit.id).join(", ");
+        return `
+          <button class="combat-target-card ${selectedTarget ? "selected" : ""} ${preview.legal ? "" : "blocked"}" type="button" data-action="select-combat-target" data-attacker="${escapeHtml(pair.attacker)}" data-defender="${escapeHtml(pair.defender_hex)}">
+            <span>
+              <b>${escapeHtml(pair.defender_hex)}</b>
+              <small>${escapeHtml(preview.legal ? (defenderText || "敌方堆叠") : preview.reason)}</small>
+            </span>
+            <em>${escapeHtml(preview.column || "?")}</em>
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
 function renderActionControls() {
   const moveUnit = currentMoveUnit();
   syncMoveModeAvailability(moveUnit);
@@ -1284,14 +2775,20 @@ function renderActionControls() {
   setActionVisible("exitWestBtn", !!(moveUnit?.id && canExitWest(moveUnit.id).legal));
   setActionVisible("undoRouteBtn", hasRoute);
   setActionVisible("clearRouteBtn", hasRoute);
-  setActionVisible("moveCombatPreviewControl", phaseKind() === "combat" && canCombatUnitNow(selected));
-
+  syncActionGroupVisible("moveSpareActions", ["enterRoadModeBtn", "leaveRoadModeBtn", "exitWestBtn"]);
   const combatPhase = phaseKind() === "combat";
   const combatVerdict = safeCombatVerdict();
   const hasCombatSelection = !!combatVerdict;
   const combatDie = !!el("combatResolveDieSelect")?.value;
+  renderCombatSelectionSummary();
+  renderCombatOverview();
+  renderCombatTargetList();
+  renderMoveWorkflowCue();
+  renderCombatWorkflowCue();
+  setActionVisible("combatResolveSection", combatPhase && hasCombatSelection);
   setActionVisible("useSelectedCombatBtn", canCombatUnitNow(selected));
   setActionVisible("previewCombatBtn", combatPhase && hasCombatSelection);
+  setActionVisible("randomCombatBtn", combatPhase && !!combatVerdict?.legal);
   setActionVisible("resolveCombatBtn", combatPhase && !!combatVerdict?.legal && combatDie);
   setActionVisible("undoActionBtn", actionLog.length > 0);
   const hasMineClearTarget = combatPhase && !!el("engineerSelect")?.value && !!el("mineHexInput")?.value.trim();
@@ -1299,7 +2796,9 @@ function renderActionControls() {
   setActionVisible("clearMineBtn", hasMineClearTarget);
 
   const aiControlled = currentPhaseIsAiControlled();
-  setActionVisible("aiSuggestBtn", aiControlled);
+  const canSuggestAi = isPlayableSide(state.active_side) && !!(el("aiModeSelect")?.value || aiModeForSide(state.active_side));
+  syncAiAutoControls();
+  setActionVisible("aiSuggestBtn", canSuggestAi);
   setActionVisible("aiApplyBtn", !!aiSuggestion?.action);
   setActionVisible("aiPlayCurrentBtn", aiControlled && !state.ai_autoplay);
   setActionVisible("aiAutoRunBtn", anySideAiControlled() && !state.ai_autoplay);
@@ -1308,19 +2807,144 @@ function renderActionControls() {
   const selectedSlot = hasSelectedSaveSlot();
   setActionVisible("loadSlotBtn", selectedSlot);
   setActionVisible("deleteSlotBtn", selectedSlot);
+  renderSideCommandBar();
+  renderPhaseActionDock();
+}
+
+function resolveCombatWithRandomDie() {
+  const verdict = safeCombatVerdict();
+  if (!verdict?.legal) {
+    setOutput("combatOutput", verdict || { legal: false, reason: "请先选择攻击单位和防御格" });
+    switchTab("combat", { expandPanel: true });
+    return;
+  }
+  const die = String(Math.floor(Math.random() * 6) + 1);
+  if (el("combatResolveDieSelect")) el("combatResolveDieSelect").value = die;
+  setOutput("combatOutput", resolveCombat(parseCombatAction()));
+  renderActionControls();
+}
+
+function runAutoRouteFromTarget() {
+  const unitId = el("moveUnitSelect")?.value;
+  const rawTarget = el("moveTargetInput")?.value || "";
+  let target;
+  try {
+    target = normalizeHex(rawTarget);
+  }
+  catch {
+    setOutput("moveOutput", { legal: false, reason: "请输入有效目标格", target: rawTarget });
+    renderActionControls();
+    return false;
+  }
+  if (el("moveTargetInput")) el("moveTargetInput").value = target;
+  const path = findLegalPath(unitId, target, moveOptions());
+  if (!path) {
+    setOutput("moveOutput", { legal: false, reason: "找不到合法自动路线", target });
+    renderActionControls();
+    return false;
+  }
+  movePathDraft = path;
+  syncMovePathInput();
+  renderRouteStatus();
+  renderActionControls();
+  renderMap();
+  return true;
+}
+
+function previewCombatFromInputs() {
+  setOutput("combatOutput", checkCombat(parseCombatAction()));
+  renderActionControls();
+}
+
+function handlePhaseActionDockClick(event) {
+  const button = event.target.closest?.("button[data-command]");
+  if (!button || button.disabled) return;
+  closeDockMenus();
+  const command = button.dataset.command;
+  if (command !== "end-phase") pendingPhaseEndKey = null;
+  if (command === "open-phase-panel") {
+    focusCurrentPhaseTab({ expandPanel: true });
+    return;
+  }
+  if (command === "open-ai-panel") {
+    switchTab("ai", { expandPanel: true });
+    return;
+  }
+  if (command === "resume-ai") {
+    setAiAutoplay(true);
+    return;
+  }
+  if (command === "pause-ai") {
+    setAiAutoplay(false);
+    return;
+  }
+  if (command === "end-phase") {
+    if (!phaseEndConfirmationPending()) {
+      pendingPhaseEndKey = phaseEndKey();
+      renderState();
+      return;
+    }
+    pendingPhaseEndKey = null;
+    advancePhase();
+    return;
+  }
+  if (command === "auto-route") {
+    el("autoRouteBtn")?.click();
+    return;
+  }
+  if (command === "apply-move") {
+    el("applyMoveBtn")?.click();
+    return;
+  }
+  if (command === "undo-route") {
+    el("undoRouteBtn")?.click();
+    return;
+  }
+  if (command === "clear-route") {
+    el("clearRouteBtn")?.click();
+    return;
+  }
+  if (command === "undo-action") {
+    undoLastAction();
+    return;
+  }
+  if (command === "next-actionable") {
+    cycleActionableUnit(1);
+    return;
+  }
+  if (command === "focus-first-actionable") {
+    focusActionableUnit(sortedActionableUnits()[0]);
+    return;
+  }
+  if (command === "focus-actionable") {
+    const unitId = button.dataset.unitId;
+    focusActionableUnit(sortedActionableUnits().find((unit) => unit.id === unitId));
+    return;
+  }
+  if (command === "use-selected-combat") {
+    el("useSelectedCombatBtn")?.click();
+    return;
+  }
+  if (command === "preview-combat") {
+    el("previewCombatBtn")?.click();
+    return;
+  }
+  if (command === "roll-combat") {
+    resolveCombatWithRandomDie();
+  }
 }
 
 function phaseLabel(phase) {
   const labels = {
-    axis_initial_movement: "Axis Initial Movement",
-    axis_combat: "Axis Combat",
-    axis_mechanized_movement: "Axis Mechanized Movement",
-    axis_supply_movement: "Axis Supply Movement",
-    allies_initial_movement: "Allies Initial Movement",
-    allies_combat: "Allies Combat",
-    allies_mechanized_movement: "Allies Mechanized Movement",
-    allies_supply_movement: "Allies Supply Movement",
-    end_game_turn: "End of Game-Turn"
+    axis_initial_movement: "Axis 初始移动",
+    axis_combat: "Axis 战斗",
+    axis_mechanized_movement: "Axis 机械化移动",
+    axis_supply_movement: "Axis 补给移动",
+    allies_initial_movement: "Allies 初始移动",
+    allies_combat: "Allies 战斗",
+    allies_mechanized_movement: "Allies 机械化移动",
+    allies_supply_movement: "Allies 补给移动",
+    end_game_turn: "回合结束结算"
   };
   return labels[phase] || String(phase || "").replaceAll("_", " ");
 }
@@ -1338,6 +2962,13 @@ function phaseShortLabel(phase) {
     end_game_turn: "回合结束"
   };
   return labels[phase] || phaseLabel(phase);
+}
+
+function phaseDisplayName(phase) {
+  if (phase === "end_game_turn") return "回合结束结算";
+  const side = phase?.startsWith?.("axis_") ? "Axis" : phase?.startsWith?.("allies_") ? "Allies" : "";
+  const label = phaseShortLabel(phase);
+  return side ? `${side} ${label}` : label;
 }
 
 function phaseGuide(phase = state.phase) {
@@ -1362,7 +2993,7 @@ function phaseGuide(phase = state.phase) {
     return {
       tab: "combat",
       tabLabel: "战斗",
-      action: "选择攻击单位和防御 hex，先预览再结算。",
+      action: "选择攻击单位和防御格，先预览再结算。",
       detail: "不想攻击时可以直接结束阶段。"
     };
   }
@@ -1390,9 +3021,100 @@ function phaseGuide(phase = state.phase) {
   };
 }
 
+function activeTabName() {
+  return document.querySelector(".tab.active")?.dataset.tab || "state";
+}
+
+function focusCurrentPhaseTab(options = {}) {
+  const guide = phaseGuide(state.phase);
+  const targetTab = guide.tab || "state";
+  const utilityTabs = new Set(["roster", "rulebook", "ai", "settings", "calibration"]);
+  if (options.respectUtility && utilityTabs.has(activeTabName())) return;
+  switchTab(targetTab, { expandPanel: !!options.expandPanel });
+}
+
+function tabBaseLabel(tabName = "") {
+  const labels = {
+    state: "局面",
+    move: "移动",
+    combat: "战斗",
+    judge: "裁判",
+    log: "日志",
+    roster: "编成",
+    rulebook: "规则书",
+    ai: "AI",
+    calibration: "校准",
+    settings: "设置"
+  };
+  return labels[tabName] || tabName;
+}
+
+function phaseTabBadge(tabName = "") {
+  const targetTab = phaseGuide(state.phase).tab || "state";
+  if (tabName !== targetTab) return "";
+  const count = actionableUnitsForCurrentPhase().length;
+  if (tabName === "move" || tabName === "combat") return String(count);
+  if (state.phase === "end_game_turn") return "结算";
+  return "";
+}
+
+function syncPhaseRecommendedTab() {
+  const targetTab = phaseGuide(state.phase).tab || "state";
+  document.querySelectorAll(".tab").forEach((tab) => {
+    const tabName = tab.dataset.tab || "";
+    const recommended = tab.closest(".play-tabs") && tabName === targetTab;
+    const badge = phaseTabBadge(tabName);
+    tab.classList.toggle("phase-recommended", recommended);
+    tab.classList.toggle("has-tab-badge", !!badge);
+    tab.innerHTML = `${escapeHtml(tabBaseLabel(tabName))}${badge ? ` <span>${escapeHtml(badge)}</span>` : ""}`;
+    if (recommended) {
+      tab.title = (tabName === "move" || tabName === "combat") && badge
+        ? `当前阶段推荐面板，${badge} 个可行动单位`
+        : "当前阶段推荐面板";
+    }
+    else tab.removeAttribute("title");
+  });
+}
+
 function syncActiveSideFromPhase() {
   const side = phaseSide(state.phase);
   if (isPlayableSide(side)) state.active_side = side;
+}
+
+function phaseStepShortLabel(phase) {
+  if (phase === "end_game_turn") return "结算";
+  const side = phase.startsWith("axis_") ? "轴" : phase.startsWith("allies_") ? "盟" : "";
+  const kind = phaseKind(phase);
+  const labels = {
+    initial_movement: "移",
+    combat: "战",
+    mechanized_movement: "机",
+    supply_movement: "补"
+  };
+  return `${side}${labels[kind] || "?"}`;
+}
+
+function phaseStepUiParts(phase) {
+  if (phase === "end_game_turn") return { side: "End", action: "结算" };
+  const side = phase.startsWith("axis_") ? "Axis" : phase.startsWith("allies_") ? "Allies" : "";
+  const labels = {
+    initial_movement: "初移",
+    combat: "战斗",
+    mechanized_movement: "机动",
+    supply_movement: "补给"
+  };
+  return { side, action: labels[phaseKind(phase)] || phaseShortLabel(phase) };
+}
+
+function phaseProgressMeta() {
+  const sequence = rules.turn_sequence?.length ? rules.turn_sequence : DEFAULT_RULES.turn_sequence;
+  const index = Math.max(0, sequence.indexOf(state.phase));
+  return {
+    sequence,
+    index,
+    current: index + 1,
+    total: sequence.length || 1
+  };
 }
 
 function recoverSpentForSide(side) {
@@ -1421,8 +3143,9 @@ function recoverMovementSpentForSide(side) {
   }
 }
 
-function advancePhase() {
+function advancePhase(options = {}) {
   pushHistory("advance_phase");
+  pendingPhaseEndKey = null;
   const fromPhase = state.phase;
   const fromTurn = Number(state.turn || 1);
   applyPhaseEndEffects();
@@ -1438,15 +3161,17 @@ function advancePhase() {
   selectedUnitId = null;
   movePathDraft = [];
   syncMovePathInput();
-  logEvent("phase", `阶段推进：${phaseLabel(fromPhase)} -> ${phaseLabel(state.phase)}`, { from_turn: fromTurn, to_turn: state.turn, from_phase: fromPhase, to_phase: state.phase });
+  logEvent("phase", `阶段推进：${phaseDisplayName(fromPhase)} -> ${phaseDisplayName(state.phase)}`, { from_turn: fromTurn, to_turn: state.turn, from_phase: fromPhase, to_phase: state.phase });
   renderState();
+  const shouldFocus = options.focusPhaseTab ?? !state.ai_autoplay;
+  if (shouldFocus) focusCurrentPhaseTab();
   scheduleAiAutoplay();
 }
 
 function advancePhaseForAi() {
   suppressAiActionRender = true;
   try {
-    advancePhase();
+    advancePhase({ focusPhaseTab: false });
   }
   finally {
     suppressAiActionRender = false;
@@ -1501,17 +3226,58 @@ function updateJulyBoxes() {
   if (axisInBox) state.boxed_areas_active = false;
 }
 
+function renderTurnPhaseFlow() {
+  const { sequence, index: currentIndex } = phaseProgressMeta();
+  const slots = [
+    { key: "prev", label: "上一", phase: sequence[currentIndex - 1] || null },
+    { key: "current", label: "当前", phase: sequence[currentIndex] || state.phase },
+    { key: "next", label: "下一", phase: sequence[currentIndex + 1] || null }
+  ];
+  return `
+    <div class="turn-flow" aria-label="本回合阶段轨道">
+      ${slots.map((slot) => {
+        const phase = slot.phase;
+        const parts = phase ? phaseStepUiParts(phase) : null;
+        const phaseSideName = phase === "end_game_turn"
+          ? "end"
+          : phase?.startsWith?.("axis_")
+          ? "axis"
+          : phase?.startsWith?.("allies_")
+          ? "allies"
+          : "";
+        const classes = [
+          "turn-flow-step",
+          slot.key,
+          phaseSideName,
+          slot.key === "current" ? "current" : "",
+          slot.key === "prev" && phase ? "done" : "",
+          phase ? "" : "missing"
+        ].filter(Boolean).join(" ");
+        const text = phase ? phaseDisplayName(phase) : (slot.key === "prev" ? "起始" : "下一回合");
+        return `
+          <span class="${classes}" title="${escapeHtml(text)}" aria-current="${slot.key === "current" ? "step" : "false"}">
+            <i>${escapeHtml(slot.label)}</i>
+            <b>${escapeHtml(phase ? `${parts.side} ${parts.action}` : text)}</b>
+          </span>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
 function renderTurnBanner() {
   const banner = el("turnBanner");
   if (!banner) return;
+  const guide = phaseGuide(state.phase);
   const side = state.active_side === "allies" ? "allies" : "axis";
   const isEndTurn = state.phase === "end_game_turn";
   const sideDisplay = isEndTurn ? "End Turn" : (side === "axis" ? "Axis" : "Allies");
   const controller = playerControllerLabel(playerController(side));
-  const guide = phaseGuide(state.phase);
+  const progress = phaseProgressMeta();
+  const victory = victoryStatusSummary();
   let nextPhaseText = "下一回合";
   try {
-    nextPhaseText = phaseShortLabel(RulesEngine.nextPhase(rulesContext()).phase);
+    nextPhaseText = phaseDisplayName(RulesEngine.nextPhase(rulesContext()).phase);
   }
   catch {
     nextPhaseText = "下一阶段";
@@ -1521,29 +3287,260 @@ function renderTurnBanner() {
     ? "系统结算阶段"
     : aiControlled
     ? (state.ai_autoplay ? "AI 会自动执行" : "AI 已暂停")
-    : "等待人类操作";
+    : "等待玩家操作";
   banner.className = `turn-banner ${side}`;
   banner.innerHTML = `
-    <div class="turn-side">
-      <span class="turn-kicker">${isEndTurn ? "当前结算" : "当前行动方"}</span>
-      <strong>${sideDisplay}</strong>
-      <span class="turn-controller">${isEndTurn ? "系统" : controller}</span>
+    <div class="turn-focus">
+      <span>${escapeHtml(sideDisplay)} · ${escapeHtml(isEndTurn ? "系统" : controller)}</span>
+      <strong>Turn ${escapeHtml(state.turn || 1)} · ${escapeHtml(phaseDisplayName(state.phase))}</strong>
+      <small>${escapeHtml(guide.action)}</small>
     </div>
-    <div class="turn-now">
-      <span class="turn-kicker">现在阶段</span>
-      <strong>${phaseShortLabel(state.phase)}</strong>
-      <span class="turn-phase-code">${phaseLabel(state.phase)}</span>
+    ${renderTurnPhaseFlow()}
+    <div class="turn-status">
+      <span>${escapeHtml(scenarioShortName(state.scenario))}</span>
+      <span>VP ${escapeHtml(victory.vp)}</span>
+      <span>${escapeHtml(progress.current)}/${escapeHtml(progress.total)}</span>
+      <span>${escapeHtml(nextPhaseText)}</span>
+      <span>${escapeHtml(aiState)}</span>
     </div>
-    <div class="turn-guide">
-      <span class="turn-kicker">现在做什么</span>
-      <strong>${guide.action}</strong>
-      <span>${guide.detail}</span>
+  `;
+}
+
+function renderPhaseTrail() {
+  const { sequence, index: currentIndex } = phaseProgressMeta();
+  const items = sequence.map((phase, index) => {
+    const phaseSideName = phase === "end_game_turn"
+      ? "end"
+      : phase.startsWith("axis_")
+      ? "axis"
+      : phase.startsWith("allies_")
+      ? "allies"
+      : "";
+    const classes = [
+      "phase-trail-step",
+      phaseSideName,
+      index === currentIndex ? "current" : "",
+      currentIndex >= 0 && index < currentIndex ? "done" : ""
+    ].filter(Boolean).join(" ");
+    return `
+      <span class="${classes}" title="${escapeHtml(phaseDisplayName(phase))}" aria-label="${escapeHtml(phaseDisplayName(phase))}">
+        <em>${escapeHtml(index + 1)}</em>
+        <b>${escapeHtml(phaseStepShortLabel(phase))}</b>
+      </span>
+    `;
+  }).join("");
+  return `<div class="phase-trail" aria-label="本回合阶段进度">${items}</div>`;
+}
+
+function renderSideCommandBar() {
+  const bar = el("sideCommandBar");
+  if (!bar) return;
+  const side = state.active_side === "allies" ? "allies" : "axis";
+  const isEndTurn = state.phase === "end_game_turn";
+  const sideDisplay = isEndTurn ? "End Turn" : (side === "axis" ? "Axis" : "Allies");
+  const controller = isEndTurn ? "系统" : playerControllerLabel(playerController(side));
+  const aiControlled = currentPhaseIsAiControlled();
+  const aiState = isEndTurn
+    ? "系统结算"
+    : aiControlled
+    ? (state.ai_autoplay ? "AI 自动" : "AI 暂停")
+    : "玩家操作";
+  const progress = phaseProgressMeta();
+  let nextPhaseText = "下一回合";
+  try {
+    nextPhaseText = phaseDisplayName(RulesEngine.nextPhase(rulesContext()).phase);
+  }
+  catch {
+    nextPhaseText = "下一阶段";
+  }
+  const directive = phaseDirective();
+  bar.className = `side-command-bar ${side}`;
+  bar.innerHTML = `
+    <div class="side-command-head">
+      <span>${escapeHtml(sideDisplay)} · ${escapeHtml(controller)}</span>
+      <b>Turn ${escapeHtml(state.turn || 1)} · ${escapeHtml(progress.current)}/${escapeHtml(progress.total)}</b>
     </div>
-    <div class="turn-actions">
-      <span class="turn-kicker">Turn ${state.turn || 1}</span>
-      <span class="turn-next">下一阶段：${nextPhaseText}</span>
-      <span class="turn-ai-state">${aiState}</span>
-      <button class="phase-tab-jump" type="button" data-tab="${guide.tab}">打开${guide.tabLabel}面板</button>
+    ${renderPhaseDirective(directive, {
+      label: `当前 · ${phaseDisplayName(state.phase)}`,
+      status: aiState,
+      next: `下一 · ${nextPhaseText}`
+    })}
+    ${renderRecentEvent()}
+    ${renderRuleWarnings()}
+  `;
+}
+
+function ruleWarnings() {
+  const warnings = [];
+  const stacking = checkStacking();
+  if (stacking.legal === false) warnings.push({ tone: "bad", label: "堆叠", text: stacking.reason || "存在超堆叠或非法堆叠。" });
+  const supply = checkSupply(state.active_side || "axis");
+  const unsupplied = Object.entries(supply).filter(([, value]) => value !== "supplied");
+  const isolated = unsupplied.filter(([, value]) => value === "isolated");
+  if (isolated.length) warnings.push({ tone: "bad", label: "孤立", text: `${isolated.length} 个当前方单位孤立。` });
+  else if (unsupplied.length) warnings.push({ tone: "warn", label: "补给", text: `${unsupplied.length} 个当前方单位缺补给。` });
+  const scenarioMeta = { ...(RulesEngine.SCENARIO_META[state.scenario] || {}), ...(state.scenario_meta || {}) };
+  if (scenarioMeta.needs_review) warnings.push({ tone: "warn", label: "待核对", text: (scenarioMeta.review_notes || ["该场景有待核对数据。"])[0] });
+  if (!warnings.length && state.phase !== "end_game_turn" && !actionableUnitsForCurrentPhase().length) {
+    warnings.push({ tone: "idle", label: "行动", text: "当前阶段没有可列出的单位，可以结束阶段。" });
+  }
+  return warnings.slice(0, 3);
+}
+
+function renderRuleWarnings() {
+  const warnings = ruleWarnings();
+  if (!warnings.length) return "";
+  return `
+    <div class="side-rule-warnings" aria-label="裁判提示">
+      ${warnings.map((item) => `
+        <div class="${escapeHtml(item.tone)}">
+          <span>${escapeHtml(item.label)}</span>
+          <b>${escapeHtml(item.text)}</b>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function eventTypeLabel(type = "") {
+  const labels = {
+    move: "移动",
+    combat: "战斗",
+    phase: "阶段",
+    clear_mine: "清雷",
+    ai_move: "AI 移动",
+    ai_combat_choice: "AI 战斗",
+    ai_exit_west: "AI 撤出",
+    exit_west: "撤出",
+    save: "保存",
+    load: "读取",
+    load_scenario: "场景",
+    setup: "开局",
+    victory: "胜负",
+    isolation_elimination: "孤立"
+  };
+  return labels[type] || String(type || "事件");
+}
+
+function sideDisplayName(side = "") {
+  const labels = {
+    axis: "Axis",
+    allies: "Allies",
+    neutral: "中立"
+  };
+  return labels[side] || (side ? String(side) : "系统");
+}
+
+function unitStateLabel(value = "") {
+  const labels = {
+    fresh: "待命",
+    spent: "已行动"
+  };
+  return labels[value] || String(value || "");
+}
+
+function statsStatusLabel(value = "") {
+  const labels = {
+    needs_manual_review: "待确认",
+    from_name: "来自名称",
+    verified: "已确认",
+    marker: "标记"
+  };
+  return labels[value] || String(value || "");
+}
+
+function terrainTagLabel(tag = "") {
+  const labels = {
+    clear: "平地",
+    hill_or_ridge: "山脊/高地",
+    depression: "洼地",
+    sea: "海面",
+    all_sea: "全海",
+    alamein_box: "方框区域",
+    road: "道路",
+    track: "小路",
+    impassable: "不可通行"
+  };
+  return labels[tag] || String(tag || "");
+}
+
+function terrainSummaryLabel(tags = []) {
+  const labels = (tags || []).map(terrainTagLabel).filter(Boolean);
+  return labels.length ? labels.join(", ") : terrainTagLabel("clear");
+}
+
+function renderRecentEvent() {
+  const latest = (state.game_log || []).at(-1);
+  if (!latest) {
+    return `
+      <div class="side-command-recent empty">
+        <span>最近行动</span>
+        <b>暂无</b>
+      </div>
+    `;
+  }
+  const time = latest.time ? new Date(latest.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  const focusTarget = logEntryFocusTarget(latest);
+  return `
+    <div class="side-command-recent ${escapeHtml(latest.type || "")}">
+      <div>
+        <span>${escapeHtml(eventTypeLabel(latest.type))}</span>
+        <b>${escapeHtml(latest.summary || latest.type || "事件")}</b>
+        <small>T${escapeHtml(latest.turn || state.turn || 1)} · ${escapeHtml(phaseDisplayName(latest.phase))}${time ? ` · ${escapeHtml(time)}` : ""}</small>
+      </div>
+      ${(actionLog.length || focusTarget) ? `
+        <div class="side-command-recent-actions">
+          ${focusTarget ? `<button type="button" data-log-focus-type="${escapeHtml(focusTarget.type)}" data-log-focus-value="${escapeHtml(focusTarget.id || focusTarget.hex)}">${escapeHtml(focusTarget.label)}</button>` : ""}
+          ${actionLog.length ? `<button type="button" data-command="undo-action">撤销</button>` : ""}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function renderStateBrief(summary = {}) {
+  const target = el("stateBrief");
+  if (!target) return;
+  const side = state.active_side === "allies" ? "Allies" : "Axis";
+  const guide = phaseGuide(state.phase);
+  const progress = phaseProgressMeta();
+  const victory = victoryStatusSummary();
+  const actionableCount = actionableUnitsForCurrentPhase().length;
+  const supplyText = Number(summary.unsupplied || 0) > 0 ? `${summary.unsupplied} 个缺补给` : "补给正常";
+  const stackingOk = summary.stacking?.legal !== false;
+  const primaryLabel = state.phase === "end_game_turn"
+    ? "打开裁判"
+    : currentPhaseIsAiControlled()
+    ? (state.ai_autoplay ? "查看 AI" : "恢复 AI")
+    : `进入${guide.tabLabel}`;
+  const primaryCommand = state.phase === "end_game_turn"
+    ? "open-phase-panel"
+    : currentPhaseIsAiControlled()
+    ? (state.ai_autoplay ? "open-ai-panel" : "resume-ai")
+    : "open-phase-panel";
+  const endLabel = state.phase === "end_game_turn" ? "下一回合" : phaseKind() === "combat" ? "跳过战斗" : "结束阶段";
+  const selectionText = selectedUnitId && state.units?.[selectedUnitId]
+    ? `${state.units[selectedUnitId].name || selectedUnitId} · ${state.units[selectedUnitId].hex || ""}`
+    : selectedHexId
+    ? `坐标 ${selectedHexId}`
+    : "未选择";
+  target.className = `state-brief ${state.active_side || ""} ${stackingOk ? "" : "warning"}`;
+  target.innerHTML = `
+    <div class="state-brief-main">
+      <span>${escapeHtml(side)} · Turn ${escapeHtml(state.turn || 1)} · ${escapeHtml(progress.current)}/${escapeHtml(progress.total)}</span>
+      <strong>${escapeHtml(phaseShortLabel(state.phase))}</strong>
+      <div class="state-brief-actions">
+        <button class="primary-action" type="button" data-command="${escapeHtml(primaryCommand)}">${escapeHtml(primaryLabel)}</button>
+        <button class="quiet-action" type="button" data-command="end-phase">${escapeHtml(phaseEndButtonLabel(endLabel))}</button>
+      </div>
+    </div>
+    <div class="state-brief-facts" aria-label="局面摘要">
+      <span><b>${escapeHtml(actionableCount)}</b> 可行动</span>
+      <span><b>VP ${escapeHtml(victory.vp)}</b> ${escapeHtml(victory.level)}</span>
+      <span><b>${escapeHtml(scenarioShortName(state.scenario))}</b> 终局 T${escapeHtml(victory.finalTurn)}</span>
+      <span><b>${escapeHtml(supplyText)}</b></span>
+      <span><b class="${stackingOk ? "ok" : "bad"}">${escapeHtml(stackingOk ? "堆叠 OK" : "堆叠问题")}</b></span>
+      <span><b>${escapeHtml(selectionText)}</b></span>
     </div>
   `;
 }
@@ -1561,10 +3558,17 @@ function anySideAiControlled() {
 }
 
 function playerControllerLabel(value) {
-  if (value === "rules_ai") return "规则 AI";
-  if (value === "heuristic_ai") return "本地 AI";
-  if (value === "external_ai") return "外部 AI";
-  return "人类";
+  if (value === "heuristic_ai") return "简单规则 AI";
+  if (value === "rules_ai") return "复杂规则 AI";
+  if (value === "external_ai") return "模型指挥官 AI";
+  return "玩家";
+}
+
+function aiModeLabel(value) {
+  if (value === "heuristic") return "简单规则";
+  if (value === "rules") return "复杂规则";
+  if (value === "external") return "模型指挥官";
+  return "简单规则";
 }
 
 function aiModeForSide(side = state.active_side) {
@@ -1584,6 +3588,31 @@ function syncPlayerControls() {
 
 function syncAiAutoControls() {
   if (el("aiAutoToggleBtn")) el("aiAutoToggleBtn").textContent = state.ai_autoplay ? "暂停 AI" : "恢复 AI";
+  const side = phaseSide(state.phase) || state.active_side;
+  const controller = playerController(side);
+  const controlled = isPlayableSide(side) && isAiController(controller);
+  const board = document.querySelector(".ai-control-board");
+  if (board) {
+    board.className = [
+      "ai-control-board",
+      state.phase === "end_game_turn" ? "end" : "",
+      controlled ? "controlled" : "human",
+      controlled && state.ai_autoplay ? "auto" : "paused"
+    ].filter(Boolean).join(" ");
+  }
+  const status = el("aiControlStatusText");
+  const detail = el("aiControlDetailText");
+  if (status) {
+    status.textContent = state.phase === "end_game_turn"
+      ? "回合结束结算"
+      : `${sideDisplayName(side)} · ${controlled ? playerControllerLabel(controller) : "玩家"}`;
+  }
+  if (detail) {
+    if (state.phase === "end_game_turn") detail.textContent = "系统会处理补给、孤立、胜负和下一回合。";
+    else if (!controlled) detail.textContent = "当前阶段由玩家操作，AI 按钮会收起。";
+    else if (state.ai_autoplay) detail.textContent = "AI 正在自动执行合法行动，会在需要玩家时停下。";
+    else detail.textContent = "AI 已暂停，可恢复自动推进，或只让它执行当前方一步。";
+  }
 }
 
 function setupScenarioTurnDefault(scenario) {
@@ -1596,6 +3625,48 @@ function setupScenarioPhaseDefault(scenario) {
   return "axis_initial_movement";
 }
 
+function setupScenarioBrief(scenario = "july") {
+  const data = {
+    july: {
+      role: "Axis 先手，战役中段开局",
+      vp: "初始胜利点 25",
+      note: "轴心国继续东进，盟军固守阿拉曼防线。"
+    },
+    september: {
+      role: "Axis 先手，盟军第 1 回合跳过初始移动",
+      vp: "初始胜利点 35",
+      note: "轴心国集中突破，盟军依托雷区防守。"
+    },
+    october: {
+      role: "Allies 先手，Axis 后期撤退计分",
+      vp: "初始胜利点 -20",
+      note: "盟军全面进攻，轴心国坚守并组织撤退。"
+    }
+  };
+  return data[scenario] || data.july;
+}
+
+function renderSetupScenarioCard() {
+  const target = el("setupScenarioCard");
+  if (!target) return;
+  const scenario = el("setupScenarioSelect")?.value || "july";
+  const turn = Number(el("setupTurnInput")?.value || setupScenarioTurnDefault(scenario));
+  const phase = el("setupPhaseSelect")?.value || setupScenarioPhaseDefault(scenario);
+  const brief = setupScenarioBrief(scenario);
+  target.innerHTML = `
+    <div class="setup-scenario-head">
+      <span>战役概览</span>
+      <strong>${escapeHtml(scenarioDisplayName(scenario))}</strong>
+      <small>${escapeHtml(brief.note)}</small>
+    </div>
+    <div class="setup-scenario-facts">
+      <span><b>开局</b>${escapeHtml(brief.role)}</span>
+      <span><b>胜利点</b>${escapeHtml(brief.vp)}</span>
+      <span><b>开始</b>T${escapeHtml(turn)} · ${escapeHtml(phaseDisplayName(phase))}</span>
+    </div>
+  `;
+}
+
 function showSetupScreen() {
   setupMode = "home";
   syncSetupControls();
@@ -1606,23 +3677,57 @@ function hideSetupScreen() {
   el("setupScreen")?.classList.add("hidden");
 }
 
+function renderSetupHero() {
+  const home = setupMode === "home";
+  if (el("setupHeroTitle")) el("setupHeroTitle").textContent = home ? "Alamein" : "开局配置";
+  if (el("setupHeroSubtitle")) {
+    el("setupHeroSubtitle").textContent = home
+      ? "North African Campaign"
+      : "战役、阶段、双方角色";
+  }
+}
+
+function openSetupScenario(scenario) {
+  const select = el("setupScenarioSelect");
+  if (!select || !SCENARIO_URLS[scenario]) return;
+  select.value = scenario;
+  if (el("setupTurnInput")) el("setupTurnInput").value = setupScenarioTurnDefault(scenario);
+  if (el("setupPhaseSelect")) el("setupPhaseSelect").value = setupScenarioPhaseDefault(scenario);
+  setSetupMode("new");
+  renderSetupSummary();
+}
+
+function scheduleGameMapPreload() {
+  if (gameMapPreloadScheduled) return;
+  gameMapPreloadScheduled = true;
+  const preload = () => {
+    const image = el("mapImage");
+    if (!image) return;
+    image.loading = "eager";
+    image.decode?.().catch(() => {});
+  };
+  if ("requestIdleCallback" in window) window.requestIdleCallback(preload, { timeout: 1200 });
+  else setTimeout(preload, 80);
+}
+
 function setSetupMode(mode) {
   setupMode = mode === "new" ? "new" : "home";
   el("setupHomePanel")?.classList.toggle("hidden", setupMode !== "home");
   el("setupNewGamePanel")?.classList.toggle("hidden", setupMode !== "new");
-  renderSaveSlots();
+  renderSetupHero();
+  if (setupMode === "new") scheduleGameMapPreload();
 }
 
 function syncSetupControls() {
-  renderSaveSlots();
   setSetupMode(setupMode);
+  renderSetupLatestSave();
   if (el("setupScenarioSelect")) el("setupScenarioSelect").value = state.scenario || el("scenarioSelect")?.value || "july";
   if (el("setupTurnInput")) el("setupTurnInput").value = state.turn || setupScenarioTurnDefault(el("setupScenarioSelect")?.value || "july");
   if (el("setupPhaseSelect")) el("setupPhaseSelect").value = state.phase || setupScenarioPhaseDefault(el("setupScenarioSelect")?.value || "july");
   if (el("setupAxisRoleSelect")) el("setupAxisRoleSelect").value = state.player_control?.axis || "human";
   if (el("setupAlliesRoleSelect")) el("setupAlliesRoleSelect").value = state.player_control?.allies || "human";
-  if (el("setupAiModeSelect")) el("setupAiModeSelect").value = el("aiModeSelect")?.value || "rules";
   if (el("setupAiTargetInput")) el("setupAiTargetInput").value = el("aiTargetInput")?.value || fixedAiTarget(state.active_side || "axis");
+  renderSetupScenarioCard();
   renderSetupSummary();
 }
 
@@ -1634,14 +3739,13 @@ function renderSetupSummary() {
   const phase = el("setupPhaseSelect")?.value || setupScenarioPhaseDefault(scenario);
   const axis = el("setupAxisRoleSelect")?.value || "human";
   const allies = el("setupAlliesRoleSelect")?.value || "human";
-  const aiMode = el("setupAiModeSelect")?.value || "rules";
   const auto = isAiController(axis) || isAiController(allies);
+  renderSetupScenarioCard();
   target.innerHTML = `
-    <div><span>战役</span><b>${scenario}</b></div>
-    <div><span>回合 / 阶段</span><b>T${turn} · ${phaseLabel(phase)}</b></div>
+    <div><span>战役</span><b>${escapeHtml(scenarioDisplayName(scenario))}</b></div>
+    <div><span>回合 / 阶段</span><b>T${turn} · ${phaseDisplayName(phase)}</b></div>
     <div><span>Axis</span><b>${playerControllerLabel(axis)}</b></div>
     <div><span>Allies</span><b>${playerControllerLabel(allies)}</b></div>
-    <div><span>默认 AI</span><b>${aiMode === "external" ? "外部 API" : aiMode === "heuristic" ? "本地启发式" : "规则 AI"}</b></div>
     <div><span>AI 行动</span><b>${auto ? "轮到 AI 自动执行" : "无 AI 方"}</b></div>
   `;
 }
@@ -1655,24 +3759,48 @@ function applySetupOptionsToState() {
   state.player_control.axis = el("setupAxisRoleSelect")?.value || "human";
   state.player_control.allies = el("setupAlliesRoleSelect")?.value || "human";
   state.ai_autoplay = anySideAiControlled();
-  if (el("aiModeSelect") && el("setupAiModeSelect")) el("aiModeSelect").value = el("setupAiModeSelect").value;
   if (el("aiTargetInput") && el("setupAiTargetInput")) el("aiTargetInput").value = el("setupAiTargetInput").value;
   syncAiAutoControls();
 }
 
 async function startFromSetup() {
+  const startButton = el("setupStartBtn");
+  if (startButton?.disabled) return;
+  const originalLabel = startButton?.textContent || "开始游戏";
+  if (startButton) {
+    startButton.disabled = true;
+    startButton.textContent = "正在进入...";
+  }
+  await new Promise((resolve) => requestAnimationFrame(resolve));
   const scenario = el("setupScenarioSelect")?.value || "july";
-  const nextState = await loadJson(SCENARIO_URLS[scenario] || SCENARIO_URLS.july, FALLBACK_STATE);
-  applyStateDefaults(nextState);
-  applySetupOptionsToState();
-  logEvent("setup", `开局配置：${scenario} T${state.turn} ${phaseLabel(state.phase)}`, { scenario, player_control: state.player_control, ai_autoplay: state.ai_autoplay });
-  if (el("scenarioSelect")) el("scenarioSelect").value = state.scenario || scenario;
-  hideSetupScreen();
-  renderState();
-  renderDataOutput();
-  focusMapOnUnits();
-  renderAutoJudge();
-  scheduleAiAutoplay();
+  try {
+    const nextState = await loadJson(SCENARIO_URLS[scenario] || SCENARIO_URLS.july, FALLBACK_STATE);
+    applyStateDefaults(nextState);
+    applySetupOptionsToState();
+    logEvent("setup", `开局配置：${scenarioDisplayName(scenario)} T${state.turn} ${phaseDisplayName(state.phase)}`, { scenario, player_control: state.player_control, ai_autoplay: state.ai_autoplay });
+    persistCurrentGameSlot({
+      id: `slot-${Date.now()}`,
+      name: autoSaveSlotName(),
+      autoSave: true,
+      render: false
+    });
+    if (el("scenarioSelect")) el("scenarioSelect").value = state.scenario || scenario;
+    gameUiReady = true;
+    applyZoom();
+    renderState();
+    renderDataOutput();
+    renderSaveSlots({ renderGameUi: false });
+    renderAutoJudge();
+    hideSetupScreen();
+    focusOpeningView({ phaseTab: true });
+    scheduleAiAutoplay();
+  }
+  finally {
+    if (startButton) {
+      startButton.disabled = false;
+      startButton.textContent = originalLabel;
+    }
+  }
 }
 
 function readLocalJson(key, fallback) {
@@ -1690,18 +3818,135 @@ function writeLocalJson(key, value) {
 }
 
 function saveSlots() {
-  return readLocalJson(SAVE_SLOTS_STORAGE_KEY, []);
+  if (!saveSlotsCache) saveSlotsCache = readLocalJson(SAVE_SLOTS_STORAGE_KEY, []);
+  return saveSlotsCache;
 }
 
 function writeSaveSlots(slots) {
-  writeLocalJson(SAVE_SLOTS_STORAGE_KEY, slots.slice(0, MAX_SAVE_SLOTS));
+  saveSlotsCache = slots.slice(0, MAX_SAVE_SLOTS);
+  writeLocalJson(SAVE_SLOTS_STORAGE_KEY, saveSlotsCache);
+}
+
+function autoSaveSlotName() {
+  return `${scenarioShortName(state.scenario)} 自动存档`;
+}
+
+function buildSaveSlot(id, name, options = {}) {
+  const previous = options.previous || {};
+  const savedAt = new Date().toISOString();
+  return {
+    ...previous,
+    id,
+    name,
+    auto_save: options.autoSave == null ? !!previous.auto_save : !!options.autoSave,
+    created_at: previous.created_at || savedAt,
+    saved_at: savedAt,
+    scenario: state.scenario || "custom",
+    turn: Number(state.turn || 1),
+    phase: state.phase,
+    state: structuredClone(state)
+  };
+}
+
+function persistCurrentGameSlot(options = {}) {
+  const slots = saveSlots();
+  const id = options.id || activeSaveSlotId || `slot-${Date.now()}`;
+  const previous = slots.find((item) => item.id === id);
+  const name = options.name || previous?.name || currentSaveSlotName();
+  const slot = buildSaveSlot(id, name, { previous, autoSave: !!options.autoSave });
+  const next = [slot, ...slots.filter((item) => item.id !== id)];
+  writeSaveSlots(next);
+  activeSaveSlotId = id;
+  if (options.render !== false) {
+    renderSaveSlots();
+    if (el("saveSlotSelect")) el("saveSlotSelect").value = id;
+  }
+  if (options.outputId) setOutput(options.outputId, { saved: slotLabel(slot), slots: next.length });
+  return { slot, slots: next };
+}
+
+function saveCurrentGameOnExit() {
+  if (!activeSaveSlotId) return;
+  try {
+    persistCurrentGameSlot({ id: activeSaveSlotId, render: false });
+  }
+  catch (error) {
+    console.warn("Auto save on exit failed", error);
+  }
 }
 
 function slotLabel(slot) {
   if (!slot) return "";
   const when = slot.saved_at ? new Date(slot.saved_at).toLocaleString() : "";
-  const title = slot.name || `${slot.scenario || "custom"} Turn ${slot.turn || 1}`;
-  return `${title} · ${slot.scenario || "custom"} T${slot.turn || 1} · ${phaseLabel(slot.phase)}${when ? ` · ${when}` : ""}`;
+  const title = slot.name || `${scenarioDisplayName(slot.scenario)} Turn ${slot.turn || 1}`;
+  return `${title} · ${scenarioDisplayName(slot.scenario)} T${slot.turn || 1} · ${phaseDisplayName(slot.phase)}${when ? ` · ${when}` : ""}`;
+}
+
+function latestSaveSummary() {
+  const latest = saveSlots()[0];
+  if (!latest) return "暂无本地存档，进入游戏后可在设置里保存。";
+  const when = latest.saved_at ? new Date(latest.saved_at).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+  const title = latest.name || `${scenarioShortName(latest.scenario)} Turn ${latest.turn || 1}`;
+  return `最近：${title} · ${scenarioDisplayName(latest.scenario)} · T${latest.turn || 1} · ${phaseShortLabel(latest.phase)}${when ? ` · ${when}` : ""}`;
+}
+
+function renderSetupLatestSave() {
+  const target = el("setupLatestSaveText");
+  const button = el("setupModeLoadBtn");
+  const hasSaves = saveSlots().length > 0;
+  if (target) target.textContent = latestSaveSummary();
+  if (button) {
+    button.disabled = !hasSaves;
+    button.classList.toggle("disabled", !hasSaves);
+    button.title = hasSaves ? "读取最近保存的局面" : "暂无可加载的本地存档";
+  }
+}
+
+function renderSettingsLatestSave() {
+  const target = el("settingsLatestSave");
+  if (!target) return;
+  const latest = saveSlots()[0];
+  target.className = `latest-save-card ${latest ? "" : "empty"}`;
+  if (!latest) {
+    target.innerHTML = `
+      <span>最近存档</span>
+      <b>暂无本地存档</b>
+      <small>保存当前局面后，这里会显示最近一次保存。</small>
+    `;
+    return;
+  }
+  const when = latest.saved_at ? new Date(latest.saved_at).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+  target.innerHTML = `
+    <span>最近存档</span>
+    <b>${escapeHtml(latest.name || `${scenarioShortName(latest.scenario)} Turn ${latest.turn || 1}`)}</b>
+    <small>${escapeHtml(scenarioDisplayName(latest.scenario))} · T${escapeHtml(latest.turn || 1)} · ${escapeHtml(phaseDisplayName(latest.phase))}${when ? ` · ${escapeHtml(when)}` : ""}</small>
+    <button id="loadLatestSlotBtn" type="button" class="secondary-action">读取最近存档</button>
+  `;
+}
+
+function renderSettingsCurrentGame() {
+  const target = el("settingsCurrentGame");
+  if (!target) return;
+  const victory = victoryStatusSummary();
+  const latest = saveSlots()[0];
+  const latestText = latest
+    ? `${latest.name || scenarioShortName(latest.scenario)} · T${latest.turn || 1} · ${phaseShortLabel(latest.phase)}`
+    : "暂无本地存档";
+  const aiText = anySideAiControlled()
+    ? (state.ai_autoplay ? "AI 自动推进已开启" : "AI 已配置但暂停")
+    : "双方由玩家操作";
+  target.innerHTML = `
+    <div class="settings-current-main">
+      <span>当前局面</span>
+      <strong>${escapeHtml(scenarioDisplayName(state.scenario))}</strong>
+      <small>T${escapeHtml(state.turn || 1)} · ${escapeHtml(phaseDisplayName(state.phase))} · ${escapeHtml(aiText)}</small>
+    </div>
+    <div class="settings-current-facts">
+      <span><b>VP ${escapeHtml(victory.vp)}</b>${escapeHtml(victory.level)}</span>
+      <span><b>终局</b>T${escapeHtml(victory.finalTurn)}</span>
+      <span><b>最近存档</b>${escapeHtml(latestText)}</span>
+    </div>
+  `;
 }
 
 function renderSaveSlotSelect(selectId, emptyLabel = "新存档槽") {
@@ -1723,35 +3968,29 @@ function renderSaveSlotSelect(selectId, emptyLabel = "新存档槽") {
   if (selected && slots.some((slot) => slot.id === selected)) select.value = selected;
 }
 
-function renderSaveSlots() {
+function renderSaveSlots(options = {}) {
   renderSaveSlotSelect("saveSlotSelect", "新存档槽");
   renderSaveSlotSelect("setupSaveSlotSelect", "选择一个存档");
-  renderActionControls();
+  if (activeSaveSlotId && el("saveSlotSelect") && saveSlots().some((slot) => slot.id === activeSaveSlotId)) {
+    el("saveSlotSelect").value = activeSaveSlotId;
+  }
+  renderSetupLatestSave();
+  if (options.renderGameUi ?? gameUiReady) {
+    renderSettingsLatestSave();
+    renderSettingsCurrentGame();
+    renderActionControls();
+  }
 }
 
 function currentSaveSlotName() {
-  return el("saveSlotNameInput")?.value.trim() || `${state.scenario || "custom"} Turn ${state.turn || 1} ${phaseLabel(state.phase)}`;
+  return el("saveSlotNameInput")?.value.trim() || `${scenarioShortName(state.scenario)} Turn ${state.turn || 1} ${phaseDisplayName(state.phase)}`;
 }
 
 function saveCurrentSlot() {
-  const slots = saveSlots();
   const selectedId = el("saveSlotSelect")?.value;
   const id = selectedId || `slot-${Date.now()}`;
   logEvent("save", `保存局面到槽位：${currentSaveSlotName()}`, { slot_id: id });
-  const slot = {
-    id,
-    name: currentSaveSlotName(),
-    saved_at: new Date().toISOString(),
-    scenario: state.scenario || "custom",
-    turn: Number(state.turn || 1),
-    phase: state.phase,
-    state: structuredClone(state)
-  };
-  const next = [slot, ...slots.filter((item) => item.id !== id)];
-  writeSaveSlots(next);
-  renderSaveSlots();
-  if (el("saveSlotSelect")) el("saveSlotSelect").value = id;
-  setOutput("saveOutput", { saved: slotLabel(slot), slots: next.length });
+  persistCurrentGameSlot({ id, name: currentSaveSlotName(), outputId: "saveOutput" });
 }
 
 function loadSlotById(id, options = {}) {
@@ -1761,20 +4000,27 @@ function loadSlotById(id, options = {}) {
     return;
   }
   applyStateDefaults(structuredClone(slot.state));
+  gameUiReady = true;
+  activeSaveSlotId = slot.id;
   logEvent("load", `读取存档槽位：${slot.name || slot.id}`, { slot_id: slot.id, saved_at: slot.saved_at });
   if (el("scenarioSelect")) el("scenarioSelect").value = state.scenario || "july";
   renderState();
   renderDataOutput();
-  focusMapOnUnits();
   renderAutoJudge();
   syncSetupControls();
   if (options.hideSetup) hideSetupScreen();
+  focusOpeningView({ phaseTab: true, expandPanel: !!options.hideSetup });
   setOutput(options.outputId || "saveOutput", { loaded: slotLabel(slot) });
   scheduleAiAutoplay();
 }
 
 function loadSelectedSlot() {
   loadSlotById(el("saveSlotSelect")?.value, { outputId: "saveOutput" });
+}
+
+function loadLatestSlot() {
+  const latest = saveSlots()[0];
+  loadSlotById(latest?.id, { outputId: "saveOutput" });
 }
 
 function loadSetupSelectedSlot() {
@@ -1795,6 +4041,7 @@ function deleteSelectedSlot() {
   }
   const next = saveSlots().filter((slot) => slot.id !== id);
   writeSaveSlots(next);
+  if (activeSaveSlotId === id) activeSaveSlotId = null;
   renderSaveSlots();
   setOutput("saveOutput", { deleted: id, slots: next.length });
 }
@@ -1959,7 +4206,7 @@ function drawZoc(svg) {
     polygon.setAttribute("points", hexPolygonPoints(x, y));
     polygon.setAttribute("class", `zoc-hex ${sides.has("axis") ? "axis" : ""} ${sides.has("allies") ? "allies" : ""}`);
     const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-    title.textContent = `${hex}: ZOC ${[...sides].join(", ")}`;
+    title.textContent = `${hex}: ZOC ${[...sides].map(sideDisplayName).join(", ")}`;
     polygon.append(title);
     svg.append(polygon);
   }
@@ -1969,6 +4216,7 @@ function drawReachableHexes(svg) {
   const unit = selectedUnitId ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
   if (!unit || !isMovableUnit(unit) || !canMoveInCurrentPhase(unit, moveOptions()) || unit.state !== "fresh") return;
   const reachable = reachableHexes(selectedUnitId, moveOptions());
+  const showCostLabels = reachable.size <= 72;
   for (const [hex, info] of reachable.entries()) {
     if (hex === normalizeHex(unit.hex)) continue;
     const { x, y } = hexToPoint(hex);
@@ -1980,6 +4228,22 @@ function drawReachableHexes(svg) {
     title.textContent = `${hex}: ${info.cost} MP`;
     polygon.append(title);
     svg.append(polygon);
+    if (showCostLabels) {
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      label.setAttribute("class", "reachable-cost-label");
+      label.setAttribute("transform", `translate(${x} ${y - 18})`);
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("x", -15);
+      rect.setAttribute("y", -9);
+      rect.setAttribute("width", 30);
+      rect.setAttribute("height", 18);
+      rect.setAttribute("rx", 9);
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      text.setAttribute("y", 1);
+      text.textContent = `${info.cost}`;
+      label.append(rect, text);
+      svg.append(label);
+    }
   }
 }
 
@@ -1987,17 +4251,36 @@ function drawCombatTargets(svg) {
   const unit = selectedUnitId ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
   if (!unit || !isCombatUnit(unit) || unit.side !== state.active_side || phaseKind() !== "combat") return;
   const enemyByHex = unitsByHex(enemyUnits(unit.side));
+  const targetPairs = new Map(combatTargetOptionsForSelectedUnit().map((pair) => [pair.defender_hex, pair]));
   for (const hex of neighbors(unit.hex)) {
     if (!enemyByHex[hex]) continue;
     const { x, y } = hexToPoint(hex);
     if (!isInsideMapZone(x, y)) continue;
+    const pair = targetPairs.get(hex);
+    const preview = pair ? combatTargetPreview(pair) : null;
     const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
     polygon.setAttribute("points", hexPolygonPoints(x, y));
-    polygon.setAttribute("class", `combat-target-hex ${selectedCombatDefenderHex === hex ? "selected" : ""}`);
+    polygon.setAttribute("class", `combat-target-hex ${selectedCombatDefenderHex === hex ? "selected" : ""} ${preview?.legal === false ? "blocked" : ""}`);
     const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-    title.textContent = `${hex}: 可攻击 ${enemyByHex[hex].map((u) => u.name || u.id).join(", ")}`;
+    title.textContent = `${hex}: ${preview?.legal === false ? preview.reason : `可攻击 ${enemyByHex[hex].map((u) => u.name || u.id).join(", ")}`}`;
     polygon.append(title);
     svg.append(polygon);
+    if (preview) {
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      label.setAttribute("class", `combat-odds-label ${preview.legal ? "" : "blocked"}`);
+      label.setAttribute("transform", `translate(${x} ${y - 18})`);
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("x", -22);
+      rect.setAttribute("y", -10);
+      rect.setAttribute("width", 44);
+      rect.setAttribute("height", 20);
+      rect.setAttribute("rx", 10);
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      text.setAttribute("y", 1);
+      text.textContent = preview.legal ? (preview.column || "?") : "阻止";
+      label.append(rect, text);
+      svg.append(label);
+    }
   }
 }
 
@@ -2022,13 +4305,15 @@ function clickRouteHex(hex) {
   const unit = selectedUnit();
   if (!unit || !canMoveUnitNow({ id: selectedUnitId, ...unit })) return;
   const hx = normalizeHex(hex);
+  if (el("moveTargetInput")) el("moveTargetInput").value = hx;
   const autoPath = findLegalPath(selectedUnitId, hx, moveOptions());
   if (autoPath) {
     movePathDraft = autoPath;
     syncMovePathInput();
     renderRouteStatus();
+    renderActionControls();
     renderMap();
-    switchTab("move");
+    switchTab("move", { expandPanel: true });
     return;
   }
   if (!movePathDraft.length || movePathDraft[0] !== normalizeHex(unit.hex)) {
@@ -2043,8 +4328,9 @@ function clickRouteHex(hex) {
   }
   syncMovePathInput();
   renderRouteStatus();
+  renderActionControls();
   renderMap();
-  switchTab("move");
+  switchTab("move", { expandPanel: true });
 }
 
 function drawHexClickZones(svg) {
@@ -2064,13 +4350,7 @@ function drawHexClickZones(svg) {
       polygon.addEventListener("click", (event) => {
         event.stopPropagation();
         if (combatPicking && unitsByHex(enemyUnits(unit.side))[hex]) {
-          selectedCombatDefenderHex = hex;
-          el("combatDefendersInput").value = hex;
-          el("combatAttackersInput").value = selectedUnitId;
-          switchTab("combat");
-          setOutput("combatOutput", checkCombat(parseCombatAction()));
-          renderActionControls();
-          renderMap();
+          selectCombatTarget(hex, selectedUnitId);
         }
         else if (routing) clickRouteHex(hex);
         else selectHex(hex);
@@ -2084,6 +4364,8 @@ function renderMap() {
   const svg = el("mapOverlay");
   svg.innerHTML = "";
   const viewMode = el("mapViewModeSelect")?.value || "command";
+  renderMapLegend();
+  syncLayerCountBadge();
   const showTerrain = el("showTerrainToggle").checked || viewMode === "terrain" || viewMode === "all";
   const showUnits = el("showUnitsToggle").checked;
   const showMarkers = el("showMarkersToggle").checked;
@@ -2091,6 +4373,11 @@ function renderMap() {
   const showZoc = el("showZocToggle").checked || viewMode === "zoc" || viewMode === "all";
   const expandStacks = el("expandStacksToggle").checked;
   const showHex = el("showHexToggle").checked || viewMode === "terrain";
+  const selectedForMove = selectedUnitId && state.units?.[selectedUnitId]
+    ? { id: selectedUnitId, ...state.units[selectedUnitId] }
+    : null;
+  const actionableUnitIds = new Set(actionableUnitsForCurrentPhase().map((unit) => unit.id));
+  const focusUnitsOnMap = viewMode === "move" || viewMode === "combat";
 
   if (showTerrain) {
     for (const [hex, tags] of Object.entries(terrain.hexes || {})) {
@@ -2099,7 +4386,7 @@ function renderMap() {
       polygon.setAttribute("points", hexPolygonPoints(x, y));
       polygon.setAttribute("class", `terrain-hex ${terrainClass(tags)}`);
       polygon.append(document.createElementNS("http://www.w3.org/2000/svg", "title"));
-      polygon.querySelector("title").textContent = `${hex}: ${tags.join(", ")}`;
+      polygon.querySelector("title").textContent = `${hex}: ${terrainSummaryLabel(tags)}`;
       svg.append(polygon);
     }
   }
@@ -2115,16 +4402,16 @@ function renderMap() {
       const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
       text.setAttribute("x", x);
       text.setAttribute("y", y + 4);
-      text.textContent = "Mine";
+      text.textContent = "雷区";
       const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-      title.textContent = `${hex}: ${mines.map((mine) => `${mine.side} ${mine.name || mine.id}`).join("; ")}`;
+      title.textContent = `${hex}: ${mines.map((mine) => `${sideDisplayName(mine.side)} ${mine.name || mine.id}`).join("; ")}`;
       group.append(polygon, text, title);
       svg.append(group);
     }
   }
 
   if (showZoc) drawZoc(svg);
-  const showReachable = el("showReachableToggle")?.checked;
+  const showReachable = el("showReachableToggle")?.checked || (viewMode === "move" && !!selectedForMove && canMoveUnitNow(selectedForMove));
   if (showReachable && (viewMode === "move" || viewMode === "all")) drawReachableHexes(svg);
   if (viewMode === "combat" || viewMode === "all") drawCombatTargets(svg);
   drawSupplyPath(svg);
@@ -2156,20 +4443,32 @@ function renderMap() {
       const visibleUnits = visibleStackUnits(units, showMarkers);
       stackLayout(visibleUnits, x, y, expandStacks).forEach(({ unit, size, x: unitX, y: unitY }) => {
         const marker = !isCombatUnit(unit);
+        const actionable = actionableUnitIds.has(unit.id);
+        const muted = focusUnitsOnMap && isPlayableSide(unit.side) && !actionable && unit.id !== selectedUnitId;
         const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        g.setAttribute("class", `unit-marker ${unit.side} ${marker ? "marker" : "counter"} ${unit.id === selectedUnitId ? "selected" : ""}`);
+        g.setAttribute("class", `unit-marker ${unit.side} ${marker ? "marker" : "counter"} ${unit.id === selectedUnitId ? "selected" : ""} ${actionable ? "actionable" : ""} ${muted ? "phase-muted" : ""}`);
         g.setAttribute("data-unit-id", unit.id);
         g.setAttribute("transform", `translate(${unitX} ${unitY})`);
         g.addEventListener("click", (event) => {
           event.stopPropagation();
           selectUnit(unit.id, { showStateTab: phaseKind() !== "combat" });
           if (phaseKind() === "combat" && isCombatUnit(unit) && unit.side === state.active_side) {
-            switchTab("combat");
+            switchTab("combat", { expandPanel: true });
             el("combatAttackersInput").value = unit.id;
             renderActionControls();
           }
         });
         const imagePath = counterImageFor(unit);
+        if (isPlayableSide(unit.side)) {
+          const frame = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+          frame.setAttribute("class", "unit-side-frame");
+          frame.setAttribute("x", -3);
+          frame.setAttribute("y", -3);
+          frame.setAttribute("width", size + 6);
+          frame.setAttribute("height", size + 6);
+          frame.setAttribute("rx", 3);
+          g.append(frame);
+        }
         const image = document.createElementNS("http://www.w3.org/2000/svg", "image");
         image.setAttribute("href", imagePath);
         image.setAttribute("width", size);
@@ -2177,16 +4476,19 @@ function renderMap() {
         image.setAttribute("preserveAspectRatio", "xMidYMid meet");
         g.append(image);
         const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-        title.textContent = `${unit.name || unit.id} ${unit.side} ${hex}`;
+        title.textContent = `${unit.name || unit.id} ${sideDisplayName(unit.side)} ${hex}`;
         g.append(title);
         svg.append(g);
       });
     }
   }
+  renderMapActionHint();
 }
 
 function renderState() {
   renderTurnBanner();
+  renderSideCommandBar();
+  syncPhaseRecommendedTab();
   el("turnInput").value = state.turn || 1;
   el("activeSideSelect").value = state.active_side || "axis";
   el("phaseSelect").value = state.phase || rules.turn_sequence[0];
@@ -2199,6 +4501,8 @@ function renderState() {
   const stacking = checkStacking();
   const supply = checkSupply(state.active_side || "axis");
   const unsupplied = Object.values(supply).filter((value) => value !== "supplied").length;
+  renderStateBrief({ unsupplied, stacking });
+  renderSettingsCurrentGame();
   el("stateStats").innerHTML = `
     <div class="stat"><b>${combat.length}</b>作战单位</div>
     <div class="stat"><b>${engineers.length}</b>工程兵</div>
@@ -2209,9 +4513,12 @@ function renderState() {
   `;
   renderUnitList();
   renderMoveUnits();
+  renderSelectionSummary();
   renderSelectedUnit();
   renderSelectedHex();
+  renderMapSelectionHud();
   renderOperationHint();
+  renderActionableUnits();
   renderCombatControls();
   renderCalibration();
   syncPlayerControls();
@@ -2247,9 +4554,10 @@ function renderUnitList() {
   for (const side of sideOrder) {
     const sideUnits = units.filter((unit) => unit.side === side);
     if (!sideUnits.length) continue;
+    const activeSideRoster = side === state.active_side || (side === "neutral" && !isPlayableSide(state.active_side));
     const sideSection = document.createElement("details");
     sideSection.className = `unit-side-section ${side}`;
-    sideSection.open = !!filter;
+    sideSection.open = !!filter || activeSideRoster;
     sideSection.innerHTML = `
       <summary class="unit-side-header">
         <span>${sideLabels[side] || side}</span>
@@ -2268,7 +4576,7 @@ function renderUnitList() {
     for (const group of sortedGroups) {
       const typeSection = document.createElement("details");
       typeSection.className = "unit-type-section";
-      typeSection.open = !!filter;
+      typeSection.open = !!filter || activeSideRoster;
       typeSection.innerHTML = `
         <summary class="unit-type-header">
           <span>${group.label}</span>
@@ -2289,39 +4597,51 @@ function renderUnitList() {
 
 function renderUnitCard(unit) {
     const card = document.createElement("div");
+    const supply = isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))
+      ? supplyStateLabel(supplyState(unit.id))
+      : unitTypeGroup(unit).label;
     card.className = `unit-card ${unit.side} ${unit.id === selectedUnitId ? "selected" : ""}`;
     card.innerHTML = `
       <div class="unit-title">
         <span>${unit.name || unit.id}</span>
         <span>${unitTypeGroup(unit).label} ${unit.hex || ""}</span>
       </div>
-      <div class="unit-subtitle">${unit.id}</div>
-      <div class="unit-meta">
-        <label>hex <input data-unit="${unit.id}" data-field="hex" value="${unit.hex || ""}"></label>
-        <label>阵营
-          <select data-unit="${unit.id}" data-field="side">
-            <option value="axis" ${unit.side === "axis" ? "selected" : ""}>axis</option>
-            <option value="allies" ${unit.side === "allies" ? "selected" : ""}>allies</option>
-          </select>
-        </label>
-        <label>战力 <input data-unit="${unit.id}" data-field="attack" type="number" value="${unit.attack || 0}"></label>
-        <label>移动 <input data-unit="${unit.id}" data-field="movement" type="number" value="${unit.movement || 0}"></label>
+      <div class="unit-meta readonly">
+        <span><b>ID</b>${escapeHtml(unit.id)}</span>
+        <span><b>坐标</b>${escapeHtml(unit.hex || "未部署")}</span>
+        <span><b>A/D</b>${escapeHtml(unit.attack ?? 0)}/${escapeHtml(unit.defense ?? unit.attack ?? 0)}</span>
+        <span><b>MP</b>${escapeHtml(unit.movement ?? 0)}</span>
+        <span><b>补给</b>${escapeHtml(supply)}</span>
       </div>
     `;
     card.addEventListener("click", (event) => {
-      if (event.target.matches("input, select, option")) return;
       selectUnit(unit.id);
     });
-    card.querySelectorAll("input, select").forEach((input) => {
-      input.addEventListener("change", () => {
-        const target = state.units[input.dataset.unit];
-        const field = input.dataset.field;
-        target[field] = input.type === "number" ? Number(input.value) : input.value;
-        if (field === "attack" && !target.defense) target.defense = target.attack;
-        renderState();
-      });
-    });
     return card;
+}
+
+function filterRulebook() {
+  const input = el("ruleSearch");
+  const status = el("ruleSearchStatus");
+  if (!input) return;
+  const query = input.value.trim().toLowerCase();
+  const sections = [...document.querySelectorAll("#tab-rulebook .rule-section")];
+  let visible = 0;
+  for (const section of sections) {
+    const text = section.textContent.toLowerCase();
+    const matched = !query || text.includes(query);
+    section.classList.toggle("hidden", !matched);
+    if (matched) visible += 1;
+    if (query && matched) section.open = true;
+    else if (!query) section.open = section.matches("#tab-rulebook .rule-section:nth-of-type(-n + 2)");
+  }
+  if (status) status.textContent = query ? `${visible} / ${sections.length} 条` : "全部规则";
+}
+
+function setRulebookOpen(open) {
+  document.querySelectorAll("#tab-rulebook .rule-section:not(.hidden)").forEach((section) => {
+    section.open = !!open;
+  });
 }
 
 function renderMoveUnits() {
@@ -2336,9 +4656,6 @@ function renderMoveUnits() {
   }
   if (selectedUnitId && [...select.options].some((option) => option.value === selectedUnitId)) select.value = selectedUnitId;
   else if (selected && [...select.options].some((option) => option.value === selected)) select.value = selected;
-  if ((!selectedUnitId || !state.units[selectedUnitId] || el("tab-move")?.classList.contains("active")) && select.value) {
-    selectedUnitId = select.value;
-  }
   const fullUnit = syncMoveDraftToUnit(select.value);
   syncMoveModeAvailability(fullUnit);
   renderRouteStatus();
@@ -2399,7 +4716,7 @@ function renderCalibration() {
     card.innerHTML = `
       ${counterImageFor(unit) ? `<img src="${counterImageFor(unit)}" alt="">` : ""}
       <div>
-        <div class="unit-title"><span>${unit.name || unit.id}</span><span>${unit.side} ${unit.hex}</span></div>
+        <div class="unit-title"><span>${unit.name || unit.id}</span><span>${sideDisplayName(unit.side)} ${unit.hex}</span></div>
         <div class="unit-subtitle">${unit.id}</div>
         <div class="unit-meta">
           <label>战力 <input data-unit="${unit.id}" data-field="attack" type="number" value="${unit.attack || 0}"></label>
@@ -2407,9 +4724,9 @@ function renderCalibration() {
           <label>移动 <input data-unit="${unit.id}" data-field="movement" type="number" value="${unit.movement || 0}"></label>
           <label>状态
             <select data-unit="${unit.id}" data-field="stats_status">
-              <option value="needs_manual_review" ${pending ? "selected" : ""}>needs_manual_review</option>
-              <option value="from_name" ${unit.stats_status === "from_name" ? "selected" : ""}>from_name</option>
-              <option value="verified" ${unit.stats_status === "verified" ? "selected" : ""}>verified</option>
+              <option value="needs_manual_review" ${pending ? "selected" : ""}>待确认</option>
+              <option value="from_name" ${unit.stats_status === "from_name" ? "selected" : ""}>来自名称</option>
+              <option value="verified" ${unit.stats_status === "verified" ? "selected" : ""}>已确认</option>
             </select>
           </label>
         </div>
@@ -2443,19 +4760,278 @@ function renderDataOutput() {
   for (const tags of Object.values(terrain.edges || {})) {
     for (const tag of tags) edgeCounts[tag] = (edgeCounts[tag] || 0) + 1;
   }
-  el("dataOutput").textContent = JSON.stringify({
-    terrain_status: "human_reviewed",
-    terrain_hex_tags: counts,
-    edge_tags: edgeCounts,
-    units: Object.keys(state.units || {}).length,
-    scenario: state.scenario || "custom",
-    calibration: settings
-  }, null, 2);
+  const target = el("dataOutput");
+  if (!target) return;
+  const terrainTagCount = Object.values(counts).reduce((sum, value) => sum + value, 0);
+  const edgeTagCount = Object.values(edgeCounts).reduce((sum, value) => sum + value, 0);
+  target.innerHTML = `
+    <div><span>地形标签</span><b>${escapeHtml(terrainTagCount)}</b><small>${escapeHtml(Object.keys(counts).length)} 类</small></div>
+    <div><span>边标签</span><b>${escapeHtml(edgeTagCount)}</b><small>${escapeHtml(Object.keys(edgeCounts).length)} 类</small></div>
+    <div><span>单位</span><b>${escapeHtml(Object.keys(state.units || {}).length)}</b><small>${escapeHtml(scenarioShortName(state.scenario))}</small></div>
+    <div><span>地图校准</span><b>${escapeHtml(Math.round(Number(settings.zoom) || 0))}%</b><small>${escapeHtml(settings.unitSize)}px 单位</small></div>
+  `;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function feedbackTone(value) {
+  if (feedbackNeedsAttention(value)) return "bad";
+  if (value && typeof value === "object" && value.legal !== false) return "ok";
+  return "idle";
+}
+
+function feedbackSummaryText(value) {
+  if (feedbackNeedsAttention(value)) return "裁判反馈：需要处理";
+  if (value && typeof value === "object" && value.legal !== false) return "裁判反馈：可执行";
+  if (typeof value === "string" && value.trim()) return "裁判反馈：提示";
+  return "裁判反馈";
+}
+
+function formatFeedbackOutput(value) {
+  if (typeof value === "string" || !value || typeof value !== "object") {
+    const text = String(value ?? "");
+    const bad = feedbackNeedsAttention(text);
+    return `
+      <div class="feedback-card ${bad ? "bad" : "idle"}">
+        <div class="feedback-card-head">
+          <span>${bad ? "注意" : "提示"}</span>
+          <strong>${escapeHtml(text || "暂无裁判反馈")}</strong>
+        </div>
+      </div>
+    `;
+  }
+  const legal = value.legal !== false;
+  const status = legal ? "裁判通过" : "裁判阻止";
+  const details = value.details || {};
+  const headline = value.reason || value.status || (legal ? "规则允许" : "规则阻止");
+  const chips = [];
+  if (details.destination) chips.push(["目标", details.destination]);
+  if (details.spent != null || details.allowance != null) chips.push(["MP", `${details.spent ?? "?"}/${details.allowance ?? "?"}`]);
+  if (details.mode) chips.push(["模式", details.mode === "road" ? "道路" : "普通"]);
+  if (details.odds_column) chips.push(["赔率", details.odds_column]);
+  if (details.die) chips.push(["骰子", details.die]);
+  if (details.outcome) chips.push(["结果", details.outcome]);
+  const lines = [];
+  if (details.spent != null || details.allowance != null) lines.push(["移动力", `${details.spent ?? "?"} / ${details.allowance ?? "?"}`]);
+  if (details.mode) lines.push(["移动方式", details.mode === "road" ? "道路模式" : "普通"]);
+  if (details.attack != null || details.defense != null) lines.push(["战力比", `${details.attack ?? "?"} : ${details.defense ?? "?"}`]);
+  if (details.defender_hexes?.length) lines.push(["防御格", details.defender_hexes.join(", ")]);
+  if (details.effects?.eliminated?.length) lines.push(["消灭", details.effects.eliminated.join(", ")]);
+  if (details.effects?.retreated?.retreated?.length) lines.push(["撤退", details.effects.retreated.retreated.join(", ")]);
+  if (details.effects?.advanced) lines.push(["战后推进", `${details.effects.advanced.unit} -> ${details.effects.advanced.to}`]);
+  if (details.missing?.length) lines.push(["还需攻击", details.missing.join(", ")]);
+  if (value.undone) lines.push(["撤销", value.undone]);
+  const body = lines.length
+    ? `<dl>${lines.map(([key, val]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(val)}</dd>`).join("")}</dl>`
+    : "";
+  return `
+    <div class="feedback-card ${legal ? "ok" : "bad"}">
+      <div class="feedback-card-head">
+        <span>${escapeHtml(status)}</span>
+        <strong>${escapeHtml(headline)}</strong>
+      </div>
+      ${chips.length ? `<div class="feedback-chips">${chips.map(([key, val]) => `<span><b>${escapeHtml(key)}</b>${escapeHtml(val)}</span>`).join("")}</div>` : ""}
+      ${body}
+    </div>
+  `;
+}
+
+function feedbackNeedsAttention(value) {
+  if (typeof value === "string") return /不能|阻止|失败|错误|没有|找不到|请先/.test(value);
+  if (!value || typeof value !== "object") return false;
+  return value.legal === false || !!value.error || value.status === "error";
+}
+
+function feedbackPresenceText(value) {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  return value.reason || value.status || value.legal || value.details || value.error || "";
+}
+
+function syncWorkflowFeedback(target, value) {
+  const shell = target.closest(".workflow-feedback");
+  const drawer = target.closest(".feedback-drawer");
+  const container = shell || drawer;
+  if (!container) return;
+  const needsAttention = feedbackNeedsAttention(value);
+  const hasFeedback = !!String(feedbackPresenceText(value) ?? "").trim();
+  container.classList.toggle("empty", !hasFeedback);
+  container.classList.toggle("needs-attention", needsAttention);
+  container.classList.toggle("has-feedback", hasFeedback);
+  container.classList.toggle("feedback-ok", feedbackTone(value) === "ok");
+  const summary = drawer?.querySelector("summary");
+  if (summary) summary.textContent = feedbackSummaryText(value);
+  if (needsAttention && drawer) drawer.open = true;
+}
+
+function formatSaveOutput(value) {
+  if (!value) return "";
+  if (typeof value === "string") {
+    return `<div class="feedback-card idle"><div class="feedback-card-head"><span>提示</span><strong>${escapeHtml(value)}</strong></div></div>`;
+  }
+  const bad = feedbackNeedsAttention(value);
+  let status = bad ? "需要处理" : "已更新";
+  let headline = value.reason || value.note || "存档状态已更新";
+  const chips = [];
+  if (value.saved) {
+    status = "已保存";
+    headline = value.saved;
+  }
+  else if (value.loaded) {
+    status = "已读取";
+    headline = value.loaded;
+  }
+  else if (value.deleted) {
+    status = "已删除";
+    headline = value.deleted;
+  }
+  else if (Array.isArray(value.slots)) {
+    status = "存档列表";
+    headline = value.slots.length ? `${value.slots.length} 个本地存档` : "暂无本地存档";
+  }
+  if (value.slots != null && !Array.isArray(value.slots)) chips.push(["槽位", value.slots]);
+  if (value.selected_scenario) chips.push(["场景", scenarioDisplayName(value.selected_scenario)]);
+  return `
+    <div class="feedback-card ${bad ? "bad" : "ok"}">
+      <div class="feedback-card-head">
+        <span>${escapeHtml(status)}</span>
+        <strong>${escapeHtml(headline)}</strong>
+      </div>
+      ${chips.length ? `<div class="feedback-chips">${chips.map(([key, val]) => `<span><b>${escapeHtml(key)}</b>${escapeHtml(val)}</span>`).join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function aiStatusLabel(status) {
+  const labels = {
+    thinking: "思考中",
+    auto_running: "自动推进",
+    auto_paused_at_step_limit: "暂时停顿",
+    auto_waiting_for_human: "等待玩家",
+    auto_stopped: "已停止",
+    final_victory: "最终胜负",
+    "AI 已暂停": "AI 已暂停",
+    "当前没有 AI 控制方": "没有 AI 方"
+  };
+  return labels[status] || status || "AI 状态";
+}
+
+function actionSummary(action) {
+  if (!action || typeof action !== "object") return "";
+  if (action.type === "move") return `移动 ${action.unit || "单位"}${action.to ? ` -> ${action.to}` : ""}`;
+  if (action.type === "combat") {
+    const targets = action.defender_hexes?.length ? action.defender_hexes.join(", ") : action.defender_hex || "目标";
+    return `攻击 ${targets}`;
+  }
+  if (action.type === "exit_west") return `撤出 ${action.unit || "单位"}`;
+  if (action.type === "pass") return "跳过当前阶段";
+  return action.type ? String(action.type).replaceAll("_", " ") : "";
+}
+
+function formatAiOutput(value) {
+  if (!value) return "";
+  if (typeof value === "string") {
+    const bad = feedbackNeedsAttention(value);
+    return `<div class="feedback-card ${bad ? "bad" : "idle"}"><div class="feedback-card-head"><span>${bad ? "注意" : "AI"}</span><strong>${escapeHtml(value)}</strong></div></div>`;
+  }
+  const bad = feedbackNeedsAttention(value);
+  let status = value.error ? "AI 受阻" : aiStatusLabel(value.status);
+  let headline = value.reason || value.error || value.note || "AI 状态已更新";
+  const chips = [];
+  const lines = [];
+  if (value.side) chips.push(["阵营", sideDisplayName(value.side)]);
+  if (value.phase) chips.push(["阶段", phaseLabel(value.phase)]);
+  if (value.controller) chips.push(["控制", playerControllerLabel(value.controller)]);
+  if (value.mode) chips.push(["模式", aiModeLabel(value.mode)]);
+  if (value.step != null) chips.push(["步数", value.step]);
+  if (value.max_steps != null) chips.push(["上限", value.max_steps]);
+  if (value.applied) {
+    const applied = value.applied;
+    status = applied.legal === false ? "执行失败" : "已执行";
+    headline = applied.reason || actionSummary(applied.action) || "AI 已执行动作";
+    if (applied.action) lines.push(["动作", actionSummary(applied.action)]);
+  }
+  if (value.suggestion?.action) {
+    lines.push(["建议", actionSummary(value.suggestion.action)]);
+    if (!headline || headline === "AI 状态已更新") headline = actionSummary(value.suggestion.action);
+  }
+  if (value.action) {
+    lines.push(["动作", actionSummary(value.action)]);
+    if (!headline || headline === "AI 状态已更新") headline = actionSummary(value.action);
+  }
+  const aiDetail = value.suggestion || value;
+  if (aiDetail?.type === "external") {
+    const match = aiDetail.assessment?.candidate_match;
+    if (match) {
+      const rank = match.exact_candidate ? `#${match.candidate_rank}` : "非候选";
+      const score = aiDetail.assessment?.score ?? match.candidate_score;
+      const delta = match.score_delta_from_best;
+      lines.push(["外部评估", `候选 ${rank}${score != null ? ` · 分数 ${Number(score).toFixed(1)}` : ""}${delta != null ? ` · 差值 ${Number(delta).toFixed(1)}` : ""}`]);
+    }
+    const reviewRecord = (aiDetail.tool_results || []).find((item) => item.tool === "final_action_review");
+    const review = aiDetail.final_review || reviewRecord?.result;
+    if (review) {
+      const rejected = reviewRecord && reviewRecord.result?.accept === false;
+      lines.push(["纠偏", `${rejected ? "已打回一次" : "已检查"} · ${review.accept ? "最终接受" : "最终仍有风险"}`]);
+      if (review.issues?.length) lines.push(["纠偏原因", review.issues.join("; ")]);
+    }
+    if (aiDetail.tool_results?.length) lines.push(["工具", `${aiDetail.tool_results.length} 次调用/检查`]);
+  }
+  if (value.victory) {
+    status = "最终胜负";
+    headline = value.victory.level || "场景结束";
+    lines.push(["VP", value.victory.victory_points ?? ""]);
+  }
+  if (Array.isArray(value.log)) {
+    const last = value.log[value.log.length - 1];
+    lines.push(["记录", `${value.log.length} 条 AI 记录`]);
+    if (last) lines.push(["最近", last.error || last.reason || actionSummary(last.action) || last.to || last.phase || "阶段更新"]);
+  }
+  const body = lines.length
+    ? `<dl>${lines.map(([key, val]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(val)}</dd>`).join("")}</dl>`
+    : "";
+  return `
+    <div class="feedback-card ${bad ? "bad" : "ok"} ai-feedback-card">
+      <div class="feedback-card-head">
+        <span>${escapeHtml(status)}</span>
+        <strong>${escapeHtml(headline)}</strong>
+      </div>
+      ${chips.length ? `<div class="feedback-chips">${chips.map(([key, val]) => `<span><b>${escapeHtml(key)}</b>${escapeHtml(val)}</span>`).join("")}</div>` : ""}
+      ${body}
+    </div>
+  `;
 }
 
 function setOutput(id, value) {
   const target = el(id);
   if (!target) return;
+  if (id === "moveOutput" || id === "combatOutput") {
+    target.innerHTML = formatFeedbackOutput(value);
+    syncWorkflowFeedback(target, value);
+    return;
+  }
+  if (id === "saveOutput") {
+    target.innerHTML = formatSaveOutput(value);
+    return;
+  }
+  if (id === "logOutput") {
+    if (!value) {
+      target.innerHTML = "";
+      return;
+    }
+    target.innerHTML = formatFeedbackOutput(value);
+    return;
+  }
+  if (id === "aiOutput") {
+    target.innerHTML = formatAiOutput(value);
+    return;
+  }
   target.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
@@ -2483,40 +5059,109 @@ function logEvent(type, summary, details = {}) {
   };
   state.game_log.push(entry);
   renderGameLog();
+  renderSideCommandBar();
   return entry;
 }
 
 function logLine(entry) {
-  return `T${entry.turn} ${phaseLabel(entry.phase)} [${entry.side || "-"}] ${entry.type}: ${entry.summary}`;
+  return `T${entry.turn} ${phaseDisplayName(entry.phase)} [${sideDisplayName(entry.side)}] ${eventTypeLabel(entry.type)}: ${entry.summary}`;
 }
 
 function gameLogText() {
   return (state.game_log || []).map(logLine).join("\n");
 }
 
+function logEntryFocusTarget(entry = {}) {
+  const details = entry.details || {};
+  const action = details.action || details.verdict?.action || {};
+  const unitId = details.unit || action.unit || action.attackers?.[0] || details.attackers?.[0];
+  if (unitId && state.units?.[unitId]?.hex) return { type: "unit", id: unitId, label: "定位单位" };
+  const path = details.path || action.path || [];
+  const pathHex = Array.isArray(path) && path.length ? path[path.length - 1] : "";
+  const defenderHex = details.defender_hex || action.defender_hexes?.[0] || details.defender_hexes?.[0] || details.defender_hex;
+  const hex = pathHex || defenderHex || details.destination || details.to || "";
+  if (hex && onMap(hex)) return { type: "hex", hex: normalizeHex(hex), label: "定位格" };
+  return null;
+}
+
 function renderGameLog() {
   const list = el("gameLogList");
   if (!list) return;
+  renderLogOverview();
   const entries = (state.game_log || []).slice(-80).reverse();
   list.innerHTML = "";
   if (!entries.length) {
-    list.innerHTML = `<div class="unit-list-empty">还没有对局日志</div>`;
+    list.innerHTML = `
+      <div class="log-empty-state">
+        <b>还没有行动记录</b>
+        <span>移动、战斗、AI 和阶段推进会自动记录在这里。</span>
+      </div>
+    `;
     setOutput("logOutput", "");
     return;
   }
   for (const entry of entries) {
     const item = document.createElement("article");
+    const focusTarget = logEntryFocusTarget(entry);
+    const time = entry.time ? new Date(entry.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
     item.className = `game-log-entry ${entry.type || ""}`;
     item.innerHTML = `
-      <h3>${entry.summary || entry.type}<span>T${entry.turn} · ${phaseLabel(entry.phase)}</span></h3>
-      <p>${entry.side || ""} · ${new Date(entry.time).toLocaleTimeString()} · ${entry.type}</p>
+      <div class="game-log-meta">
+        <b>${escapeHtml(eventTypeLabel(entry.type))}</b>
+        <span>T${escapeHtml(entry.turn || state.turn || 1)}</span>
+      </div>
+      <div class="game-log-body">
+        <strong>${escapeHtml(entry.summary || eventTypeLabel(entry.type))}</strong>
+        <small>${escapeHtml(sideDisplayName(entry.side))} · ${escapeHtml(phaseDisplayName(entry.phase))}${time ? ` · ${escapeHtml(time)}` : ""}</small>
+      </div>
+      ${focusTarget ? `<button class="log-focus-button" type="button" data-log-focus-type="${escapeHtml(focusTarget.type)}" data-log-focus-value="${escapeHtml(focusTarget.id || focusTarget.hex)}">${escapeHtml(focusTarget.label)}</button>` : ""}
     `;
     list.append(item);
   }
-  setOutput("logOutput", {
-    entries: state.game_log.length,
-    latest: (state.game_log || []).slice(-12)
-  });
+  setOutput("logOutput", "");
+}
+
+function logTypeCounts(entries = []) {
+  const counts = {};
+  for (const entry of entries) {
+    const key = eventTypeLabel(entry.type);
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 4);
+}
+
+function renderLogOverview() {
+  const panel = el("logOverview");
+  if (!panel) return;
+  const entries = state.game_log || [];
+  const latest = entries.at(-1);
+  const counts = logTypeCounts(entries);
+  const focusTarget = latest ? logEntryFocusTarget(latest) : null;
+  panel.className = `log-overview ${entries.length ? "" : "empty"}`;
+  panel.innerHTML = `
+    <div class="log-overview-main">
+      <span>行动历史</span>
+      <strong>${escapeHtml(entries.length ? `${entries.length} 条记录` : "暂无记录")}</strong>
+      <small>${escapeHtml(entries.length ? `最近：${latest.summary || eventTypeLabel(latest.type)}` : "开始游戏后，移动、战斗、阶段推进都会记录在这里。")}</small>
+    </div>
+    ${counts.length ? `<div class="log-overview-chips">${counts.map(([key, count]) => `<span><b>${escapeHtml(count)}</b>${escapeHtml(key)}</span>`).join("")}</div>` : ""}
+    ${focusTarget ? `<button class="log-focus-button" type="button" data-log-focus-type="${escapeHtml(focusTarget.type)}" data-log-focus-value="${escapeHtml(focusTarget.id || focusTarget.hex)}">${escapeHtml(focusTarget.label)}</button>` : ""}
+  `;
+}
+
+function handleGameLogClick(event) {
+  const button = event.target.closest?.("[data-log-focus-type]");
+  if (!button) return;
+  const type = button.dataset.logFocusType;
+  const value = button.dataset.logFocusValue;
+  if (type === "unit" && state.units?.[value]) {
+    selectUnit(value, { showStateTab: true });
+    focusMapOnHex(state.units[value].hex);
+  }
+  else if (type === "hex" && value) {
+    selectHex(value);
+    focusMapOnHex(value);
+  }
 }
 
 function downloadTextFile(filename, content, type = "text/plain") {
@@ -2538,6 +5183,16 @@ function applyZoom() {
   el("mapStage").style.transform = `scale(${scale})`;
   el("mapStage").style.width = `${4100 * scale}px`;
   el("mapStage").style.height = `${3275 * scale}px`;
+  if (el("zoomValue")) el("zoomValue").textContent = `${Math.round(Number(settings.zoom) || 0)}%`;
+}
+
+function syncLayerCountBadge() {
+  const badge = el("layerCountBadge");
+  if (!badge) return;
+  const ids = ["showUnitsToggle", "showMarkersToggle", "expandStacksToggle", "showMinesToggle", "showReachableToggle", "showZocToggle", "showTerrainToggle", "showHexToggle"];
+  const count = ids.filter((id) => el(id)?.checked).length;
+  badge.textContent = String(count);
+  badge.title = `已开启 ${count} 个图层`;
 }
 
 function focusMapOnUnits() {
@@ -2552,6 +5207,26 @@ function focusMapOnUnits() {
   const viewport = el("mapViewport");
   viewport.scrollLeft = ((minX + maxX) / 2) * scale - viewport.clientWidth / 2;
   viewport.scrollTop = ((minY + maxY) / 2) * scale - viewport.clientHeight / 2;
+}
+
+function preferredOpeningUnit() {
+  const actionable = actionableUnitsForCurrentPhase().filter((unit) => unit.hex && !unit.eliminated);
+  if (actionable.length) return actionable[0];
+  return unitsArray().find((unit) => unit.side === state.active_side && unit.hex && !unit.eliminated && isMapCounter(unit));
+}
+
+function focusOpeningView(options = {}) {
+  const unit = preferredOpeningUnit();
+  if (unit) {
+    selectedUnitId = unit.id;
+    selectedHexId = unit.hex || null;
+    if (isMovableUnit(unit)) syncMoveDraftToUnit(unit.id);
+    if (options.phaseTab !== false) focusCurrentPhaseTab({ expandPanel: !!options.expandPanel });
+    renderState();
+    setTimeout(() => focusMapOnHex(unit.hex), 40);
+    return;
+  }
+  focusMapOnUnits();
 }
 
 function focusMapOnHex(hex) {
@@ -2750,6 +5425,7 @@ function enumerateAiRoadLineActions(unitId, limit = 3) {
 function aiUnitPriority(unit) {
   const full = { id: unit.id, ...unit };
   const target = rulesAiMoveTarget(full);
+  if (full.side === "allies" && !isSupplyUnit(full) && normalizeHex(target) === normalizeHex(full.hex)) return -999;
   const targetDistance = unit.hex ? distance(unit.hex, target) : 99;
   const strength = Number(unit.attack || 0) + Number(unit.movement || 0) * 0.15;
   const octoberSupply = octoberAxisSupplyExitPlan(full);
@@ -2928,6 +5604,77 @@ function combatRiskScore(crtColumnMap) {
   return values.reduce((sum, outcome) => sum + (weights[outcome] || 0), 0) / values.length;
 }
 
+function combatOutcomeStats(crtColumnMap = {}) {
+  const outcomes = Object.values(crtColumnMap || {}).filter(Boolean);
+  const count = (predicate) => outcomes.filter(predicate).length;
+  return {
+    faces: outcomes.length,
+    defender_eliminated: count((outcome) => outcome === "De" || outcome === "Ex"),
+    defender_retreat: count((outcome) => /^D[123]$/.test(String(outcome))),
+    attacker_eliminated: count((outcome) => outcome === "Ae"),
+    attacker_retreat: count((outcome) => /^A[123]$/.test(String(outcome))),
+    exchange: count((outcome) => outcome === "Ex"),
+    defender_harm: count((outcome) => /^D[123]$/.test(String(outcome)) || outcome === "De" || outcome === "Ex"),
+    attacker_harm: count((outcome) => /^A[123]$/.test(String(outcome)) || outcome === "Ae" || outcome === "Ex")
+  };
+}
+
+function combatTargetIntelForAi(action) {
+  const defenderHexes = (action.defender_hexes || []).map(normalizeHex);
+  const attackerSide = state.active_side;
+  const defenderSide = enemySide(attackerSide);
+  const alamein = rules.game?.alamein_hex || "3711";
+  return defenderHexes.map((hex) => {
+    const defenders = (unitsByHex()[hex] || [])
+      .filter((unit) => unit.side === defenderSide && isCombatUnit(unit))
+      .map((unit) => ({
+        id: unit.id,
+        name: unit.name || unit.id,
+        atk: Number(unit.attack || 0),
+        def: Number(unit.defense ?? unit.attack ?? 0),
+        effective_defense: effectiveDefense(unit, hex),
+        supply: aiSupplyStateForAi(unit.id)
+      }));
+    const terrainTags = hexTags(hex);
+    return {
+      hex,
+      terrain: terrainTags,
+      control: state.control?.[hex] || "",
+      defenders,
+      defender_supply_states: [...new Set(defenders.map((unit) => unit.supply).filter(Boolean))],
+      friendly_mines: friendlyMinesAt(defenderSide, hex).map((mine) => mine.id),
+      enemy_mines: enemyMinesAt(attackerSide, hex).map((mine) => mine.id),
+      terrain_defense_bonus: terrainDefenseBonus(hex),
+      is_primary_objective: hex === alamein,
+      distance_to_axis_objective: distance(hex, fixedAiTarget("axis")),
+      distance_to_allies_objective: distance(hex, fixedAiTarget("allies")),
+      retreat_options_estimate: defenders.reduce((sum, defender) => {
+        const unit = state.units[defender.id];
+        if (!unit) return sum;
+        return sum + neighbors(hex).filter((nb) => legalRetreatHex({ ...unit, id: defender.id }, nb, attackerSide)).length;
+      }, 0)
+    };
+  });
+}
+
+function combatStrategicValue(action) {
+  if (!action || action.type !== "combat") return 0;
+  const details = action.verdict?.details || {};
+  const stats = combatOutcomeStats(details.crt_column || {});
+  const targetIntel = combatTargetIntelForAi(action);
+  const objectiveBonus = targetIntel.some((target) => target.is_primary_objective) ? 28 : 0;
+  const terrainBonus = targetIntel.some((target) => target.terrain.includes("alamein_box")) ? 12 : 0;
+  const supplyTargetBonus = targetIntel.reduce((sum, target) => (
+    sum + target.defenders.filter((defender) => /supply/i.test(defender.name)).length * 18
+  ), 0);
+  const blockedRetreatBonus = targetIntel.some((target) => target.retreat_options_estimate <= target.defenders.length) ? 16 : 0;
+  const defenderStrength = Number(details.defense || 0);
+  const attackerStrength = Number(details.attack || 0);
+  return stats.defender_harm * 9 + stats.defender_eliminated * 8 - stats.attacker_harm * 7
+    + objectiveBonus + terrainBonus + supplyTargetBonus + blockedRetreatBonus
+    + Math.max(0, attackerStrength - defenderStrength) * 1.5;
+}
+
 function scoreAiAction(action) {
   if (action.type === "pass") return -999;
   const target = normalizeHex(el("aiTargetInput").value || "3711");
@@ -3100,7 +5847,10 @@ function rulesAiDirectionScore(unit, start, destination) {
   if (nearbyEnemy) {
     const before = distance(start, nearbyEnemy.hex);
     const after = distance(destination, nearbyEnemy.hex);
-    return (before - after) * 8 - Math.max(0, hexColumn(destination) - 38) * 2;
+    const awayPenalty = after > before ? (after - before) * 16 : 0;
+    const alamein = fixedAiTarget("allies");
+    const abandonsBoxPenalty = distance(start, alamein) <= 4 && distance(destination, alamein) > distance(start, alamein) ? 10 : 0;
+    return (before - after) * 8 - awayPenalty - abandonsBoxPenalty - Math.max(0, hexColumn(destination) - 38) * 2;
   }
   if (delta < 0) return delta * 14;
   if (delta > 2) return -delta * 3;
@@ -3118,31 +5868,54 @@ function rulesAiScore(action) {
     const columns = rules.combat?.odds_columns || DEFAULT_RULES.combat?.odds_columns || ["1-4", "1-3", "1-2", "1-1", "2-1", "3-1", "4-1", "5-1", "6-1", "7-1"];
     const oddsIndex = columns.indexOf(details.odds_column);
     const crtScore = combatRiskScore(details.crt_column);
-    const exchangeRisk = Object.values(details.crt_column || {}).filter((outcome) => outcome === "Ex" || outcome?.startsWith("A")).length;
-    return 120 + oddsIndex * 15 + crtScore * 12 - exchangeRisk * 6 + Number(details.attack || 0) - Number(details.defense || 0);
+    const stats = combatOutcomeStats(details.crt_column);
+    const strategic = combatStrategicValue(action);
+    const badOddsPenalty = oddsIndex >= 0 && oddsIndex < 3 ? (3 - oddsIndex) * 20 : 0;
+    const exchangeRisk = stats.exchange + stats.attacker_harm;
+    return 110 + oddsIndex * 14 + crtScore * 10 + strategic - exchangeRisk * 5 - badOddsPenalty + Number(details.attack || 0) - Number(details.defense || 0);
   }
   if (action.type === "move") {
     const unit = state.units[action.unit];
     if (!unit) return -10000;
+    const full = { id: action.unit, ...unit };
     const start = normalizeHex(unit.hex);
     const destination = normalizeHex(action.path[action.path.length - 1]);
     const target = rulesAiMoveTarget(unit);
     const progress = distance(start, target) - distance(destination, target);
     const direction = rulesAiDirectionScore(unit, start, destination);
-    const zocPenalty = enemyZocSources(unit.side, destination).size ? 8 : 0;
-    const minePenalty = enemyMinesAt(unit.side, destination).length ? 4 : 0;
+    const targetDistance = distance(destination, target);
+    const zocSources = enemyZocSources(unit.side, destination);
+    const mineCount = enemyMinesAt(unit.side, destination).length;
+    const adjacentEnemyStrength = enemyUnits(unit.side)
+      .filter((enemy) => enemy.hex && distance(destination, enemy.hex) <= 1)
+      .reduce((sum, enemy) => sum + Number(enemy.attack || enemy.defense || 0), 0);
+    const defense = Math.max(1, Number(unit.defense ?? unit.attack ?? 1));
+    const zocPenalty = zocSources.size ? 10 + zocSources.size * 6 : 0;
+    const minePenalty = mineCount ? (isEngineer(full) ? 6 : 26 + mineCount * 4) : 0;
+    const overmatchPenalty = zocSources.size ? Math.max(0, adjacentEnemyStrength - defense) * 3 : 0;
+    const fragileContactPenalty = zocSources.size && defense <= 1 ? 12 : 0;
     const supply = aiScoreSupplyState(action.unit);
     const supplyPenalty = supply === "isolated" ? 20 : supply === "unsupplied" ? 8 : supply === "partially_supplied" ? 3 : 0;
-    const roadBonus = action.mode === "road" && !enemyZocSources(unit.side, destination).size ? (isSupplyUnit(unit) ? 8 : 2) : 0;
+    const roadBonus = action.mode === "road" && !zocSources.size ? (isSupplyUnit(unit) ? 8 : 2) : 0;
     const terrainBonus = hexTags(destination).includes("hill_or_ridge") ? 2 : hexTags(destination).includes("alamein_box") ? 3 : 0;
     const spentPenalty = Number(action.verdict?.details?.spent || 0) * 0.25;
     const strength = Number(unit.attack || 0) + Number(unit.movement || 0) * 0.2;
-    const progressWeight = unit.side === "axis" ? 18 : isSupplyUnit(unit) ? 12 : 8;
+    const usefulProgress = Math.max(0, progress);
+    const progressScore = Math.min(usefulProgress, 8) * (unit.side === "axis" ? 18 : isSupplyUnit(unit) ? 12 : 8)
+      + Math.max(0, usefulProgress - 8) * (unit.side === "axis" ? 6 : 3);
+    const negativeProgressPenalty = unit.side !== "axis" && !isSupplyUnit(unit) && progress < 0 ? Math.abs(progress) * 12 : 0;
     const farFromTargetPenalty = unit.side === "axis" || isSupplyUnit(unit)
-      ? distance(destination, target)
-      : Math.max(0, distance(destination, target) - 2);
-    const formationPenalty = isSupplyUnit(unit) && enemyZocSources(unit.side, destination).size ? 30 : 0;
-    return progress * progressWeight + direction - farFromTargetPenalty - zocPenalty - minePenalty - supplyPenalty - formationPenalty - spentPenalty + roadBonus + terrainBonus + strength;
+      ? targetDistance * 2
+      : Math.max(0, targetDistance - 2);
+    const turnsRemaining = Math.max(0, scenarioFinalTurnForAi() - Number(state.turn || 1) + 1);
+    const finalThreatBonus = turnsRemaining <= 1 && unit.side === "axis"
+      ? targetDistance <= 2 ? 45 : targetDistance <= 4 ? 20 : targetDistance <= 6 ? 6 : -12
+      : targetDistance <= 2 ? 12 : targetDistance <= 4 ? 5 : 0;
+    const formationPenalty = isSupplyUnit(unit) && zocSources.size ? 40 : 0;
+    const interceptionBonus = unit.side !== "axis" && !isSupplyUnit(unit) && progress > 0
+      ? 14 + Math.min(progress, 3) * 6
+      : 0;
+    return progressScore + direction + finalThreatBonus + interceptionBonus - negativeProgressPenalty - farFromTargetPenalty - zocPenalty - minePenalty - overmatchPenalty - fragileContactPenalty - supplyPenalty - formationPenalty - spentPenalty + roadBonus + terrainBonus + strength;
   }
   return -10000;
 }
@@ -3160,7 +5933,7 @@ function suggestRulesAction() {
       type: "rules",
       policy: "固定规则：Axis 向 Alamein/东方推进；Allies 防守关键区并只就近截击，不以 Axis 后方补给源为全局目标；战斗阶段优先公开 CRT 期望值高的合法攻击。",
       target: fixedAiTarget(state.active_side),
-      action: best || { type: "pass", reason: "规则 AI 没有找到值得执行的合法动作" },
+      action: best || { type: "pass", reason: "复杂规则 AI 没有找到值得执行的合法动作" },
       candidates: candidates.slice(0, 10).map((action) => ({ score: action.score, action: compactAction(action) }))
     };
   }
@@ -3187,10 +5960,55 @@ function suggestHeuristicAction() {
   }
 }
 
+function resolveMoveIntent(rawAction = {}) {
+  const intent = rawAction?.action || rawAction;
+  const unitId = intent?.unit;
+  const destination = intent?.destination || intent?.target || intent?.hex;
+  if (!unitId || !destination) return { legal: false, reason: "move_intent 需要 unit 和 destination", action: intent };
+  let target;
+  try {
+    target = normalizeHex(destination);
+  }
+  catch (error) {
+    return { legal: false, reason: error.message, action: intent };
+  }
+  const modes = intent.mode && intent.mode !== "auto" ? [intent.mode] : ["normal", "road"];
+  const plans = [];
+  for (const mode of modes) {
+    const path = findLegalPath(unitId, target, { mode });
+    if (!path || path.length <= 1) continue;
+    const verdict = checkMove(unitId, path, { mode });
+    if (!verdict.legal) continue;
+    const action = {
+      type: "move",
+      unit: unitId,
+      path,
+      mode,
+      destination: target,
+      spent: verdict.details?.spent,
+      verdict
+    };
+    plans.push({ action, verdict, score: rulesAiScore(action) });
+  }
+  plans.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  const best = plans[0];
+  if (!best) return { legal: false, reason: `找不到 ${unitId} 到 ${target} 的合法路径`, action: intent };
+  return {
+    legal: true,
+    reason: `move_intent 已规划为 ${best.action.mode} 路径`,
+    details: best.verdict.details,
+    action: best.action,
+    verdict: best.verdict,
+    planned_from_intent: { unit: unitId, destination: target, requested_mode: intent.mode || "auto" },
+    plan_score: best.score
+  };
+}
+
 function normalizeAiAction(raw) {
   const action = raw?.action || raw;
   if (!action || typeof action !== "object") return { type: "pass", reason: "空动作" };
   if (action.type === "exit_west") return { type: "exit_west", unit: action.unit };
+  if (action.type === "move_intent") return { type: "move_intent", unit: action.unit, destination: action.destination || action.target || action.hex, mode: action.mode || "auto" };
   if (action.type === "move") return { type: "move", unit: action.unit, path: (action.path || []).map(normalizeHex), mode: action.mode || "normal" };
   if (action.type === "combat") return { type: "combat", attackers: action.attackers || [], defender_hexes: (action.defender_hexes || []).map(normalizeHex), no_retreat_order: !!action.no_retreat_order };
   return { type: "pass", reason: action.reason || raw?.reason || "不行动" };
@@ -3206,6 +6024,7 @@ function validateAiAction(rawAction) {
   }
   if (action.type === "pass") return { legal: true, reason: "AI 选择不行动", action };
   if (action.type === "exit_west") return canExitWest(action.unit);
+  if (action.type === "move_intent") return resolveMoveIntent(action);
   if (action.type === "move") return { ...checkMove(action.unit, action.path, { mode: action.mode || "normal" }), action };
   if (action.type === "combat") return { ...publicCombatVerdict(action), action };
   return { legal: false, reason: `未知 AI 动作 ${action.type}`, action };
@@ -3250,14 +6069,14 @@ function applyAiAction(rawAction) {
 
 function aiToolsSchema() {
   return [
-    { name: "list_legal_actions", arguments: { limit: "number" } },
+    { name: "list_legal_actions", arguments: { limit: "number" }, returns: "scored actions with evaluation summaries, risks, and tactical tags" },
     { name: "check_move", arguments: { unit: "string", path: ["hex"], mode: "normal|road" } },
     { name: "find_path", arguments: { unit: "string", target: "hex", mode: "normal|road" } },
     { name: "check_combat", arguments: { attackers: ["unit-id"], defender_hexes: ["hex"] } },
     { name: "inspect_unit", arguments: { unit: "unit-id" } },
     { name: "inspect_hex", arguments: { hex: "hex" } },
     { name: "trace_supply", arguments: { unit: "unit-id" } },
-    { name: "evaluate_action", arguments: { action: { type: "move|combat|pass" } } }
+    { name: "evaluate_action", arguments: { action: { type: "move_intent|move|combat|exit_west|pass" } }, returns: "front-end legality plus score, planned route for move_intent, candidate rank, evaluation, risks, and tactical tags" }
   ];
 }
 
@@ -3305,7 +6124,7 @@ function inspectUnitForAi(unitId) {
       effective_attack: isCombatUnit(full) ? effectiveAttack(full) : 0,
       effective_defense: isCombatUnit(full) ? effectiveDefense(full) : 0,
       effective_movement: effectiveMovement(full),
-      supply_state: isPlayableSide(unit.side) ? supplyState(unitId) : "",
+      supply_state: isPlayableSide(unit.side) ? aiSupplyStateForAi(unitId) : "",
       zoc_hexes: zocHexes(full),
       terrain: unit.hex ? hexTags(unit.hex) : [],
       can_move_now: isMovableUnit(full) && canMoveInCurrentPhase(full, { mode: "normal" }) && unit.state === "fresh",
@@ -3338,15 +6157,120 @@ function traceSupplyForAi(unitId) {
   return {
     legal: true,
     unit: unitId,
-    supply_state: isPlayableSide(unit.side) ? supplyState(unitId) : "",
+    supply_state: isPlayableSide(unit.side) ? aiSupplyStateForAi(unitId) : "",
     path,
     blocked: path.length ? [] : [...supplyBlockedHexes(unit.side)].slice(0, 80)
   };
 }
 
+function sameAiAction(a, b) {
+  let left;
+  let right;
+  try {
+    left = normalizeAiAction(a);
+    right = normalizeAiAction(b);
+  }
+  catch {
+    return false;
+  }
+  if (left.type !== right.type) return false;
+  if (left.type === "pass") return true;
+  if (left.type === "exit_west") return left.unit === right.unit;
+  if (left.type === "move") {
+    return left.unit === right.unit &&
+      (left.mode || "normal") === (right.mode || "normal") &&
+      (left.path || []).join("-") === (right.path || []).join("-");
+  }
+  if (left.type === "combat") {
+    return [...(left.attackers || [])].sort().join(",") === [...(right.attackers || [])].sort().join(",") &&
+      [...(left.defender_hexes || [])].sort().join(",") === [...(right.defender_hexes || [])].sort().join(",") &&
+      !!left.no_retreat_order === !!right.no_retreat_order;
+  }
+  return false;
+}
+
+function actionWithVerdictForAi(validation) {
+  const action = validation?.action || {};
+  if (action.type === "move" || action.type === "combat") return { ...action, verdict: validation };
+  return action;
+}
+
+function candidateMatchForAi(action, candidates = candidateActionsForAi()) {
+  const index = candidates.findIndex((item) => sameAiAction(action, item.action));
+  const best = candidates[0] || null;
+  const matched = index >= 0 ? candidates[index] : null;
+  return {
+    exact_candidate: index >= 0,
+    candidate_rank: index >= 0 ? index + 1 : null,
+    candidate_score: matched?.score ?? null,
+    best_score: best?.score ?? null,
+    score_delta_from_best: matched && best ? Number((matched.score - best.score).toFixed(2)) : null,
+    best_action: best?.action || null
+  };
+}
+
+function evaluateActionForAi(rawAction, candidates = null) {
+  const validation = validateAiAction(rawAction);
+  const candidateList = candidates || candidateActionsForAi();
+  const match = validation.action ? candidateMatchForAi(validation.action, candidateList) : candidateMatchForAi(rawAction, candidateList);
+  if (!validation.legal) return { ...validation, candidate_match: match };
+  const previousSupplyCache = aiScoreSupplyCache;
+  aiScoreSupplyCache ||= aiSupplyScoreMap(state.active_side);
+  try {
+    const action = actionWithVerdictForAi(validation);
+    const score = Number(rulesAiScore(action).toFixed(2));
+    return {
+      ...validation,
+      score,
+      evaluation: actionEvaluationForAi(action),
+      candidate_match: match,
+      note: match.exact_candidate
+        ? "Action matches a scored candidate."
+        : "Legal but not an exact candidate; compare score/evaluation against best_action before using."
+    };
+  }
+  finally {
+    aiScoreSupplyCache = previousSupplyCache;
+  }
+}
+
+function finalActionReviewForAi(rawAction, assessment) {
+  const action = assessment?.action || assessment?.validation?.action || rawAction || {};
+  const match = assessment?.candidate_match || {};
+  const bestAction = match.best_action || null;
+  const bestScore = Number(match.best_score);
+  const score = Number(assessment?.score);
+  const issues = [];
+  if (!assessment?.legal) issues.push(assessment?.reason || "final action is illegal");
+  if (isNoOpAiAction(action)) issues.push("final action is a no-op move");
+  if (action?.type === "pass" && bestAction?.type && bestAction.type !== "pass" && Number.isFinite(bestScore) && bestScore > 0) {
+    issues.push("pass rejects useful non-pass candidate");
+  }
+  if (match.exact_candidate && Number(match.candidate_rank) > 5 && Number.isFinite(Number(match.score_delta_from_best)) && Number(match.score_delta_from_best) < -20) {
+    issues.push(`candidate rank ${match.candidate_rank} is too far below best action`);
+  }
+  if (!match.exact_candidate && Number.isFinite(score) && Number.isFinite(bestScore) && score < bestScore - 20) {
+    issues.push("non-candidate final action scores much worse than best candidate");
+  }
+  return {
+    accept: issues.length === 0,
+    issues,
+    action,
+    assessment,
+    instruction: issues.length
+      ? "Choose a stronger legal final_action. Prefer candidate_match.best_action or a top candidate_actions item; copy its action exactly."
+      : "Final action accepted."
+  };
+}
+
 function runAiTool(tool, args = {}) {
   try {
-    if (tool === "list_legal_actions") return { legal: true, actions: enumerateLegalAiActions(Number(args.limit || 50)).map(compactAction) };
+    if (tool === "list_legal_actions") {
+      const actions = enumerateLegalAiActions(Number(args.limit || 50))
+        .map((action) => ({ score: rulesAiScore(action), action: compactAction(action), evaluation: actionEvaluationForAi(action) }))
+        .sort((a, b) => b.score - a.score);
+      return { legal: true, actions };
+    }
     if (tool === "check_move") return checkMove(args.unit, args.path || [], { mode: args.mode || "normal" });
     if (tool === "find_path") {
       const path = findLegalPath(args.unit, args.target, { mode: args.mode || "normal" });
@@ -3356,7 +6280,7 @@ function runAiTool(tool, args = {}) {
     if (tool === "inspect_unit") return inspectUnitForAi(args.unit);
     if (tool === "inspect_hex") return inspectHexForAi(args.hex);
     if (tool === "trace_supply") return traceSupplyForAi(args.unit);
-    if (tool === "evaluate_action") return validateAiAction(args.action);
+    if (tool === "evaluate_action") return evaluateActionForAi(args.action);
     return { legal: false, reason: `未知工具 ${tool}` };
   }
   catch (error) {
@@ -3365,54 +6289,961 @@ function runAiTool(tool, args = {}) {
 }
 
 function aiRulesSummary() {
-  return "你是 El Alamein 外部 AI。你可以调用只读工具查询规则结果。最终只能返回 move/combat/pass。combat 不允许包含 die；骰点由前端裁判在结算时产生。所有最终动作都会被前端裁判二次验证。";
+  return "你是 El Alamein 外部 game agent，目标是让当前阵营赢得剧本。你可以调用只读工具查询规则结果。移动时优先返回 move_intent，只给 unit、destination、mode:auto；前端会规划完整合法路线。最终只能返回当前阶段允许的 move_intent/move/combat/exit_west/pass。combat 不允许包含 die；骰点由前端裁判在结算时产生。所有最终动作都会被前端裁判二次验证。";
 }
 
-function externalAiPayload(toolResults = []) {
-  const limit = Number(el("aiMaxActionsInput")?.value || 50);
+function nearestEnemiesForAi(unit, limit = 3) {
+  if (!unit?.hex || !isPlayableSide(unit.side)) return [];
+  return enemyUnits(unit.side)
+    .filter((enemy) => enemy.hex && !enemy.eliminated)
+    .map((enemy) => ({
+      id: enemy.id,
+      name: enemy.name || enemy.id,
+      hex: enemy.hex,
+      atk: Number(enemy.attack || 0),
+      def: Number(enemy.defense ?? enemy.attack ?? 0),
+      distance: distance(unit.hex, enemy.hex)
+    }))
+    .sort((a, b) => a.distance - b.distance || String(a.hex).localeCompare(String(b.hex)))
+    .slice(0, limit);
+}
+
+function unitContextPriorityForAi(unit) {
+  const full = { id: unit.id, ...unit };
+  const target = fixedAiTarget(unit.side);
+  const nearest = nearestEnemiesForAi(full, 1)[0];
+  const nearEnemyScore = nearest ? Math.max(0, 12 - nearest.distance) * 3 : 0;
+  const objectiveScore = unit.hex ? Math.max(0, 18 - distance(unit.hex, target)) : 0;
+  const actionScore = unit.side === state.active_side && unit.state === "fresh" ? 18 : 0;
+  const contactScore = unit.hex && enemyZocSources(unit.side, unit.hex).size ? 20 : 0;
+  const combatScore = isCombatUnit(full) ? Number(unit.attack || 0) + Number(unit.defense ?? unit.attack ?? 0) : 0;
+  return actionScore + contactScore + nearEnemyScore + objectiveScore + combatScore;
+}
+
+function nearbyDetailUnitIdsForAi(side, limit) {
+  return new Set(unitsArray()
+    .filter((unit) => unit.side === side && isMapCounter(unit) && !unit.eliminated && unit.hex)
+    .map((unit) => ({ id: unit.id, score: unitContextPriorityForAi(unit) }))
+    .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+    .slice(0, Math.max(0, Number(limit || 0)))
+    .map((item) => item.id));
+}
+
+function compactUnitForAi(unit, options = {}) {
+  const full = { id: unit.id, ...unit };
+  const target = isPlayableSide(unit.side) && unit.hex ? fixedAiTarget(unit.side) : "";
+  const includeNearby = options.includeNearby !== false;
+  const nearbyLimit = Number(options.nearbyLimit || aiContextDefaults().maxNearbyEnemiesPerUnit || 3);
+  const supply = isPlayableSide(unit.side) ? aiSupplyStateForAi(unit.id) : "";
+  const suppliedFull = supply ? { ...full, supply_state: supply } : full;
   return {
-    model: el("aiModelInput")?.value || "",
-    side: state.active_side,
-    turn: Number(state.turn || 1),
-    phase: state.phase,
-    scenario: state.scenario || "custom",
-    state_summary: aiStateSummary(),
-    legal_actions: enumerateLegalAiActions(limit).map(compactAction),
-    tools: aiToolsSchema(),
-    tool_results: toolResults,
-    rules_summary: aiRulesSummary()
+    id: unit.id,
+    name: unit.name || unit.id,
+    side: unit.side,
+    hex: unit.hex,
+    kind: unit.kind || "ground",
+    atk: Number(unit.attack || 0),
+    def: Number(unit.defense ?? unit.attack ?? 0),
+    mp: Number(unit.movement || 0),
+    state: unit.state || "fresh",
+    supply,
+    road: !!unit.road_mode,
+    mech: isMechanized(unit),
+    terrain: unit.hex ? hexTags(unit.hex) : [],
+    map_area: unit.hex ? mapAreaForAi(unit.hex) : [],
+    effective_attack: isCombatUnit(full) ? effectiveAttack(suppliedFull) : 0,
+    effective_defense: isCombatUnit(full) ? effectiveDefense(suppliedFull) : Number(unit.defense ?? unit.attack ?? 0),
+    effective_movement: isMapCounter(full) ? effectiveMovement(suppliedFull) : Number(unit.movement || 0),
+    distance_to_objective: target && unit.hex ? distance(unit.hex, target) : null,
+    enemy_zoc_here: unit.hex && isPlayableSide(unit.side) ? enemyZocSources(unit.side, unit.hex).size > 0 : false,
+    zoc_hexes: isCombatUnit(full) ? zocHexes(full) : [],
+    can_move_now: unit.side === state.active_side && isMovableUnit(full) && canMoveInCurrentPhase(full, { mode: "normal" }) && unit.state === "fresh",
+    can_attack_now: unit.side === state.active_side && phaseKind() === "combat" && isCombatUnit(full) && unit.state === "fresh" && !unit.attacked_this_turn,
+    nearby_enemies: includeNearby ? nearestEnemiesForAi(full, nearbyLimit) : []
   };
 }
 
+function forceDigestForAi(side) {
+  const context = aiContextDefaults();
+  const limit = Number(context.maxUnitsPerSide || 28);
+  const nearbyLimit = Number(context.maxNearbyEnemiesPerUnit || 3);
+  const detailIds = nearbyDetailUnitIdsForAi(side, context.maxNearbyEnemyDetailUnitsPerSide ?? 18);
+  const units = unitsArray()
+    .filter((unit) => unit.side === side && isMapCounter(unit) && !unit.eliminated)
+    .sort((a, b) => {
+      const aFresh = a.state === "fresh" ? 0 : 1;
+      const bFresh = b.state === "fresh" ? 0 : 1;
+      if (aFresh !== bFresh) return aFresh - bFresh;
+      return String(a.hex || "").localeCompare(String(b.hex || ""));
+    });
+  const combat = units.filter(isCombatUnit);
+  const supply = units.filter(isSupplyUnit);
+  return {
+    side,
+    total_units: units.length,
+    fresh_units: units.filter((unit) => unit.state === "fresh").length,
+    combat_units: combat.length,
+    supply_units: supply.length,
+    sample_units: units.slice(0, limit).map((unit) => compactUnitForAi(unit, { includeNearby: detailIds.has(unit.id), nearbyLimit })),
+    omitted_units: Math.max(0, units.length - limit)
+  };
+}
+
+function unitIndexForAi(side) {
+  const limit = Number(aiContextDefaults().maxUnitIndexPerSide || 160);
+  return unitsArray()
+    .filter((unit) => unit.side === side && isMapCounter(unit) && !unit.eliminated && unit.hex)
+    .sort((a, b) => String(a.hex || "").localeCompare(String(b.hex || "")) || a.id.localeCompare(b.id))
+    .slice(0, Math.max(0, limit))
+    .map((unit) => ({
+      id: unit.id,
+      h: unit.hex,
+      k: unit.kind || "ground",
+      a: Number(unit.attack || 0),
+      d: Number(unit.defense ?? unit.attack ?? 0),
+      m: Number(unit.movement || 0),
+      s: unit.state || "fresh",
+      sup: isPlayableSide(unit.side) ? aiSupplyStateForAi(unit.id) : "",
+      area: operationalAreaCodeForAi(unit.hex)
+    }));
+}
+
+function primaryOperationalAreaForAi(hex) {
+  const areas = mapAreaForAi(hex);
+  const sector = areas.find((item) => /sector$/.test(item)) || "unknown sector";
+  const depth = areas.find((item) => /approach|battlefield|objective area/.test(item)) || "unknown depth";
+  return `${sector} / ${depth}`;
+}
+
+function compactBattleUnitForAi(unit, objective = fixedAiTarget(unit.side)) {
+  return {
+    id: unit.id,
+    name: unit.name || unit.id,
+    side: unit.side,
+    hex: unit.hex,
+    kind: unit.kind || "ground",
+    atk: Number(unit.attack || 0),
+    def: Number(unit.defense ?? unit.attack ?? 0),
+    mp: Number(unit.movement || 0),
+    supply: isPlayableSide(unit.side) ? aiSupplyStateForAi(unit.id) : "",
+    map_area: unit.hex ? mapAreaForAi(unit.hex) : [],
+    distance_to_objective: unit.hex ? distance(unit.hex, objective) : null
+  };
+}
+
+function emptyAreaSideForAi() {
+  return { units: 0, combat_units: 0, attack: 0, defense: 0, fresh: 0, supplied: 0, partial: 0, isolated: 0 };
+}
+
+function addAreaSideStatsForAi(stats, unit) {
+  stats.units += 1;
+  if (isCombatUnit(unit)) stats.combat_units += 1;
+  stats.attack += Number(unit.attack || 0);
+  stats.defense += Number(unit.defense ?? unit.attack ?? 0);
+  if (unit.state === "fresh") stats.fresh += 1;
+  const supply = isPlayableSide(unit.side) ? aiSupplyStateForAi(unit.id) : "";
+  if (supply === "supplied") stats.supplied += 1;
+  else if (supply === "partially_supplied") stats.partial += 1;
+  else if (supply === "isolated") stats.isolated += 1;
+}
+
+function battlefieldSummaryForAi() {
+  const activeSide = state.active_side;
+  const opposingSide = enemySide(activeSide);
+  const objective = rules.game?.alamein_hex || "3711";
+  const areaMap = new Map();
+  const areaFor = (hex) => {
+    const label = primaryOperationalAreaForAi(hex);
+    if (!areaMap.has(label)) {
+      areaMap.set(label, {
+        area: label,
+        active: emptyAreaSideForAi(),
+        enemy: emptyAreaSideForAi(),
+        active_nearest_objective_unit: null,
+        enemy_nearest_objective_unit: null,
+        contact_hexes: []
+      });
+    }
+    return areaMap.get(label);
+  };
+  const mapUnits = unitsArray().filter((unit) => isMapCounter(unit) && unit.hex && !unit.eliminated);
+  for (const unit of mapUnits) {
+    const area = areaFor(unit.hex);
+    const sideKey = unit.side === activeSide ? "active" : unit.side === opposingSide ? "enemy" : "";
+    if (!sideKey) continue;
+    addAreaSideStatsForAi(area[sideKey], unit);
+    const compact = compactBattleUnitForAi(unit, objective);
+    const nearestKey = `${sideKey}_nearest_objective_unit`;
+    if (!area[nearestKey] || Number(compact.distance_to_objective ?? 99) < Number(area[nearestKey].distance_to_objective ?? 99)) {
+      area[nearestKey] = compact;
+    }
+    if (enemyZocSources(unit.side, unit.hex).size || enemyMinesAt(unit.side, unit.hex).length) area.contact_hexes.push(unit.hex);
+  }
+  const byObjectiveDistance = (a, b) => distance(a.hex, objective) - distance(b.hex, objective) || a.id.localeCompare(b.id);
+  const unitsNearObjective = mapUnits
+    .filter((unit) => distance(unit.hex, objective) <= 4)
+    .sort(byObjectiveDistance)
+    .slice(0, 12)
+    .map((unit) => compactBattleUnitForAi(unit, objective));
+  const closestActive = mapUnits
+    .filter((unit) => unit.side === activeSide)
+    .sort(byObjectiveDistance)
+    .slice(0, 5)
+    .map((unit) => compactBattleUnitForAi(unit, objective));
+  const closestEnemy = mapUnits
+    .filter((unit) => unit.side === opposingSide)
+    .sort(byObjectiveDistance)
+    .slice(0, 5)
+    .map((unit) => compactBattleUnitForAi(unit, objective));
+  const regionalBalance = [...areaMap.values()]
+    .map((area) => ({ ...area, contact_hexes: [...new Set(area.contact_hexes)].slice(0, 8) }))
+    .sort((a, b) => (b.active.attack + b.enemy.attack + b.active.units + b.enemy.units) - (a.active.attack + a.enemy.attack + a.active.units + a.enemy.units))
+    .slice(0, 8);
+  return {
+    description: "Operational board summary by region: force density, supply health, contact, and objective pressure.",
+    active_side: activeSide,
+    enemy_side: opposingSide,
+    primary_objective_hex: objective,
+    objective_zone: {
+      radius_hexes: 4,
+      control: state.control?.[objective] || "",
+      zoc_by_axis: enemyZocSources("allies", objective).size > 0,
+      zoc_by_allies: enemyZocSources("axis", objective).size > 0,
+      units: unitsNearObjective
+    },
+    closest_active_to_objective: closestActive,
+    closest_enemy_to_objective: closestEnemy,
+    regional_balance: regionalBalance
+  };
+}
+
+function phaseStrategyForAi() {
+  const strategy = aiStrategyDefaults();
+  const kind = phaseKind();
+  return {
+    doctrine: strategy.doctrine || "",
+    active_phase_objective: strategy.phaseObjectives?.[kind] || strategy.phaseObjectives?.[state.phase] || "",
+    priorities: strategy.priorities || [],
+    action_contract: strategy.actionContract || ""
+  };
+}
+
+function recentLogForAi() {
+  const limit = Number(aiContextDefaults().maxRecentLogItems || 8);
+  return actionLog.slice(-limit).map((item) => ({
+    type: item.type,
+    text: item.text,
+    turn: item.turn,
+    phase: item.phase
+  }));
+}
+
+function objectiveHexesForAi() {
+  return {
+    axis_primary: fixedAiTarget("axis"),
+    allies_primary: fixedAiTarget("allies"),
+    alamein: rules.game?.alamein_hex || "3711",
+    axis_supply_sources: rules.game?.axis_supply_sources || [],
+    allies_supply_sources: rules.game?.allies_supply_sources || []
+  };
+}
+
+function phaseAllowedActionsForAi(kind = phaseKind()) {
+  if (kind === "combat") return ["combat", "pass"];
+  if (!["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) return ["pass"];
+  const actions = ["move_intent", "move", "pass"];
+  if (state.scenario === "october" && state.active_side === "axis" && Number(state.turn || 1) > 10) actions.splice(1, 0, "exit_west");
+  return actions;
+}
+
+function decisionBriefForAi(candidateActions = []) {
+  const nonPass = candidateActions.filter((item) => item.action?.type !== "pass");
+  const top = candidateActions[0] || null;
+  const bestNonPass = nonPass[0] || null;
+  const kind = phaseKind();
+  return {
+    read_first: true,
+    side: state.active_side,
+    phase: state.phase,
+    allowed: phaseAllowedActionsForAi(kind),
+    phase_goal: kind === "combat"
+      ? "Attack only if worthwhile and legal; otherwise pass."
+      : ["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)
+        ? "Choose the strongest legal move/exit that improves victory position without reckless exposure."
+        : "Pass unless a legal action is explicitly available.",
+    top: top ? {
+      score: top.score,
+      type: top.action?.type || "",
+      ref: "candidate_actions[0].action",
+      summary: top.evaluation?.summary || "",
+      risks: top.evaluation?.risks || []
+    } : null,
+    best_non_pass: bestNonPass ? {
+      score: bestNonPass.score,
+      type: bestNonPass.action?.type || "",
+      summary: bestNonPass.evaluation?.summary || ""
+    } : null,
+    candidate_policy: bestNonPass
+      ? "Prefer a high-ranked candidate_action. If choosing one, copy its action exactly."
+      : "No useful non-pass candidate is exposed; pass is acceptable unless a tool reveals a stronger legal action.",
+    tool_policy: "Use tools when legality, route, combat, or supply is uncertain; evaluate non-candidate final actions.",
+    pass_policy: bestNonPass ? "Do not pass while useful non-pass candidates exist unless a tool proves them bad." : "Pass is acceptable now."
+  };
+}
+
+function rulesBriefForAi() {
+  const movement = rules.movement || {};
+  const stacking = rules.stacking || {};
+  const combat = rules.combat || {};
+  return {
+    game: rules.game?.title || "First Alamein",
+    role: "You are the active side's game agent. Your job is to win the scenario, using only legal actions accepted by the front-end judge.",
+    turn_sequence: rules.turn_sequence || DEFAULT_RULES.turn_sequence,
+    movement: [
+      "Units move only in movement phases for their side and become spent after moving.",
+      `Enemy occupied hexes are ${movement.enemy_occupied_hex || "forbidden"}.`,
+      movement.enter_enemy_zoc_must_stop ? "Entering enemy ZOC requires stopping." : "Enemy ZOC does not force a stop.",
+      movement.cannot_move_directly_between_zocs_of_same_enemy_unit ? "Do not move directly between ZOCs of the same enemy unit." : "",
+      "Road mode is faster but must still pass the judge's check_move validation."
+    ].filter(Boolean),
+    combat: [
+      combat.attacker_must_be_fresh ? "Attackers must be fresh." : "",
+      combat.must_attack_adjacent_fresh_enemy_units ? "Combat targets are adjacent enemy defender hexes required by the rules." : "",
+      `Minimum odds ${combat.minimum_odds || "1-4"}, maximum odds ${combat.maximum_odds || "7-1"}.`,
+      "Do not include die in combat actions; the front-end judge rolls or uses the selected die.",
+      "Prefer attacks with good odds and useful positional or supply consequences."
+    ].filter(Boolean),
+    stacking: {
+      axis_max_units_per_hex: stacking.axis_max_units_per_hex,
+      allied_max_units_per_hex: stacking.allied_max_units_per_hex,
+      one_side_per_hex: stacking.one_side_per_hex
+    },
+    supply: {
+      axis_sources: rules.game?.axis_supply_sources || [],
+      allies_sources: rules.game?.allies_supply_sources || [],
+      note: "Supplied and partially supplied units are much more valuable for victory and survival."
+    }
+  };
+}
+
+function victoryBriefForAi() {
+  const victory = checkVictory();
+  const scenario = state.scenario || "custom";
+  const alamein = rules.game?.alamein_hex || "3711";
+  const brief = {
+    current_vp: Number(victory.victory_points || 0),
+    current_level: victory.level || "",
+    final_turn: victory.final_turn || scenarioFinalTurnForAi(),
+    final_check: "Winner is decided at End of Game-Turn on the final scenario turn.",
+    vp_scale: [
+      "60+ Axis Decisive",
+      "50-59 Axis Substantive",
+      "40-49 Axis Marginal",
+      "30-39 Draw",
+      "20-29 Allied Marginal",
+      "10-19 Allied Substantive",
+      "0-9 Allied Decisive"
+    ],
+    side_goals: {
+      axis: [
+        `Increase VP and pressure/capture ${alamein} with supplied or partially supplied combat units.`,
+        "Destroy Allied combat units, isolate them, and push the farthest supplied Axis combat unit east when the scenario awards it.",
+        scenario === "october" ? "After Turn 10, withdraw valuable Axis units west when exit_west is legal." : ""
+      ].filter(Boolean),
+      allies: [
+        `Deny Axis VP, hold or contest ${alamein}, preserve combat units, and keep supply open.`,
+        "Use terrain, mines, ZOC, and counterattacks to slow Axis tempo.",
+        "A supplied Allied unit threatening Axis entry/source hexes is strategically valuable when legal."
+      ]
+    },
+    scoring_breakdown: (victory.breakdown || []).slice(-8)
+  };
+  return brief;
+}
+
+function missionForAi() {
+  const side = state.active_side;
+  const opponent = enemySide(side);
+  const victory = victoryBriefForAi();
+  const sideGoals = victory.side_goals?.[side] || [];
+  return {
+    identity: "game_agent",
+    side,
+    opponent,
+    objective: side === "axis"
+      ? "Win as Axis by raising VP, maintaining supply, pressuring Alamein/eastern routes, and avoiding wasteful losses."
+      : "Win as Allies by keeping VP low, holding the Alamein position, preserving units, and disrupting Axis supply/tempo.",
+    immediate_phase_goal: phaseStrategyForAi().active_phase_objective,
+    current_phase_allowed_actions: phaseAllowedActionsForAi(),
+    win_guidance: sideGoals,
+    decision_rule: "Choose the legal action that most improves your chance to win the scenario. Use tools when legality, supply, pathing, or combat odds are uncertain."
+  };
+}
+
+function compactHexUnitsForAi(hex) {
+  return (unitsByHex()[normalizeHex(hex)] || []).map((unit) => ({
+    id: unit.id,
+    name: unit.name || unit.id,
+    side: unit.side,
+    kind: unit.kind || "ground",
+    atk: Number(unit.attack || 0),
+    def: Number(unit.defense ?? unit.attack ?? 0),
+    state: unit.state || "fresh",
+    supply: isPlayableSide(unit.side) ? aiSupplyStateForAi(unit.id) : ""
+  }));
+}
+
+function hexIntelForAi(rawHex, label = "") {
+  let hex;
+  try {
+    hex = normalizeHex(rawHex);
+  }
+  catch {
+    return null;
+  }
+  const units = compactHexUnitsForAi(hex);
+  const mineList = minesAt(hex).map((mine) => ({ id: mine.id, side: mine.side, name: mine.name || mine.id }));
+  return {
+    hex,
+    label,
+    terrain: hexTags(hex),
+    map_area: mapAreaForAi(hex),
+    control: state.control?.[hex] || "",
+    units,
+    mines: mineList,
+    zoc_by_axis: enemyZocSources("allies", hex).size > 0,
+    zoc_by_allies: enemyZocSources("axis", hex).size > 0,
+    road_neighbors: neighbors(hex).filter((nb) => edgeTags(normalizeEdge(hex, nb)).includes("road")),
+    distance_from_axis_objective: distance(hex, fixedAiTarget("axis")),
+    distance_from_allies_objective: distance(hex, fixedAiTarget("allies"))
+  };
+}
+
+function keyHexesForAi(candidateActions = []) {
+  const context = aiContextDefaults();
+  const limit = Number(context.maxMapIntelHexes || 16);
+  const labeled = new Map();
+  const add = (hex, label) => {
+    if (!hex) return;
+    try {
+      const normalized = normalizeHex(hex);
+      if (!labeled.has(normalized)) labeled.set(normalized, label);
+    }
+    catch {}
+  };
+  const objectives = objectiveHexesForAi();
+  add(objectives.alamein, "Alamein / primary victory hex");
+  add(objectives.axis_primary, "Axis primary objective");
+  add(objectives.allies_primary, "Allied primary objective");
+  for (const hex of objectives.axis_supply_sources || []) add(hex, "Axis supply source");
+  for (const hex of objectives.allies_supply_sources || []) add(hex, "Allied supply source");
+  for (const item of candidateActions) {
+    const action = item.action || item;
+    if (action.type === "move") add(action.destination || action.path?.at(-1), "candidate destination");
+    if (action.type === "combat") for (const hex of action.defender_hexes || []) add(hex, "candidate combat target");
+  }
+  for (const unit of unitsArray().filter((item) => isMapCounter(item) && item.hex && !item.eliminated)) {
+    if (enemyZocSources(unit.side, unit.hex).size || enemyMinesAt(unit.side, unit.hex).length) add(unit.hex, "contact / hazard");
+  }
+  return [...labeled.entries()]
+    .slice(0, limit)
+    .map(([hex, label]) => hexIntelForAi(hex, label))
+    .filter(Boolean);
+}
+
+function frontlineUnitsForAi() {
+  const context = aiContextDefaults();
+  const limit = Number(context.maxFrontlineUnits || 10);
+  const side = state.active_side;
+  const activeTarget = fixedAiTarget(side);
+  return unitsArray()
+    .filter((unit) => unit.side === side && isMapCounter(unit) && !unit.eliminated && unit.hex)
+    .map((unit) => {
+      const full = { id: unit.id, ...unit };
+      const nearest = nearestEnemiesForAi(full, Number(context.maxNearbyEnemiesPerUnit || 3));
+      const closestEnemyDistance = nearest[0]?.distance ?? 99;
+      return {
+        pressure_score: Math.max(0, 12 - closestEnemyDistance) + Math.max(0, 12 - distance(unit.hex, activeTarget)),
+        unit: compactUnitForAi(full),
+        nearest_enemies: nearest,
+        friendly_stack: compactHexUnitsForAi(unit.hex).filter((item) => item.side === side).map((item) => item.id),
+        enemy_zoc_sources: [...enemyZocSources(side, unit.hex)],
+        enemy_mines_here: enemyMinesAt(side, unit.hex).map((mine) => mine.id)
+      };
+    })
+    .sort((a, b) => b.pressure_score - a.pressure_score || a.unit.id.localeCompare(b.unit.id))
+    .slice(0, limit)
+    .map(({ pressure_score, ...item }) => item);
+}
+
+function mapIntelForAi(candidateActions = []) {
+  return {
+    description: "Compressed board intel: key geography, front-line units, ZOC, mines, roads, and distances. Use inspect_hex/find_path/trace_supply for details.",
+    key_hexes: keyHexesForAi(candidateActions),
+    frontline: frontlineUnitsForAi()
+  };
+}
+
+function victoryImpactForAi(action) {
+  const finalTurn = scenarioFinalTurnForAi();
+  const turnsRemaining = Math.max(0, finalTurn - Number(state.turn || 1) + 1);
+  const alamein = rules.game?.alamein_hex || "3711";
+  const victory = aiVictoryImpactCache || checkVictory();
+  const base = {
+    turns_remaining: turnsRemaining,
+    final_turn: finalTurn,
+    urgency: turnsRemaining <= 1 ? "final turn or final check imminent" : turnsRemaining <= 2 ? "late scenario" : "developing scenario",
+    current_vp: Number(victory.victory_points || 0),
+    current_level: victory.level || ""
+  };
+  if (!action) return base;
+  if (action.type === "pass") {
+    return { ...base, summary: "Pass has no direct VP effect and may waste tempo if useful candidates exist." };
+  }
+  if (action.type === "exit_west") {
+    const unit = state.units[action.unit];
+    return {
+      ...base,
+      summary: "October Axis west exit can directly affect withdrawal VP when legal.",
+      vp_relevance: "direct",
+      unit: action.unit,
+      unit_value_hint: unit?.kind === "supply" ? "supply unit" : Number(unit?.attack || unit?.defense || 0)
+    };
+  }
+  if (action.type === "combat") {
+    const targets = (action.defender_hexes || []).map((hex) => normalizeHex(hex));
+    return {
+      ...base,
+      summary: targets.includes(alamein)
+        ? "Combat targets Alamein, the primary victory hex."
+        : "Combat may affect VP indirectly through losses, retreats, supply, or access routes.",
+      vp_relevance: targets.includes(alamein) ? "primary_objective" : "indirect",
+      targets_primary_objective: targets.includes(alamein),
+      defender_hexes: targets
+    };
+  }
+  if (action.type === "move") {
+    const unit = state.units[action.unit];
+    const start = unit?.hex ? normalizeHex(unit.hex) : "";
+    const destination = normalizeHex(action.destination || action.path?.at(-1) || start);
+    const before = start ? distance(start, alamein) : null;
+    const after = destination ? distance(destination, alamein) : null;
+    const supplied = unit && isPlayableSide(unit.side) ? aiSupplyStateForAi(action.unit) : "";
+    return {
+      ...base,
+      summary: destination === alamein
+        ? "Move reaches Alamein, the primary victory hex, if the action remains legal and supplied enough for scoring."
+        : before != null && after != null && after < before
+          ? "Move improves distance to Alamein / eastern victory area."
+          : "Move has no immediate primary-objective gain.",
+      vp_relevance: destination === alamein ? "primary_objective" : before != null && after != null && after < before ? "positional_progress" : "low_direct",
+      objective_hex: alamein,
+      distance_to_objective_before: before,
+      distance_to_objective_after: after,
+      destination_is_primary_objective: destination === alamein,
+      unit_supply_before_move: supplied
+    };
+  }
+  return base;
+}
+
+function actionEvaluationForAi(action) {
+  if (!action) return { summary: "missing action" };
+  if (action.type === "pass") {
+    return {
+      summary: "Pass ends the current phase. Use only when no useful legal action remains.",
+      victory_impact: victoryImpactForAi(action),
+      risks: ["cedes tempo"]
+    };
+  }
+  if (action.type === "exit_west") {
+    const unit = state.units[action.unit];
+    return {
+      summary: "Withdraws a unit west for October scenario VP when legal.",
+      unit: action.unit,
+      victory_impact: victoryImpactForAi(action),
+      value_hint: unit?.kind === "supply" ? "high value supply exit" : `combat value ${Number(unit?.attack || unit?.defense || 0)}`,
+      risks: []
+    };
+  }
+  if (action.type === "combat") {
+    const details = action.verdict?.details || {};
+    const crt = details.crt_column || {};
+    const stats = combatOutcomeStats(crt);
+    const targetIntel = combatTargetIntelForAi(action);
+    const attackerBad = stats.attacker_harm;
+    const defenderBad = stats.defender_harm;
+    const strategic = combatStrategicValue(action);
+    const attackers = (action.attackers || []).map((id) => {
+      const unit = state.units[id];
+      return unit ? {
+        id,
+        name: unit.name || id,
+        hex: unit.hex,
+        atk: Number(unit.attack || 0),
+        supply: aiSupplyStateForAi(id)
+      } : { id };
+    });
+    return {
+      summary: `Combat at ${details.odds_column || "unknown odds"} against ${action.defender_hexes?.join(", ") || "unknown target"}.`,
+      odds_column: details.odds_column,
+      attack: details.attack,
+      defense: details.defense,
+      expected_crt_score: Number(combatRiskScore(crt).toFixed(2)),
+      strategic_value: Number(strategic.toFixed(2)),
+      victory_impact: victoryImpactForAi(action),
+      outcome_faces: stats,
+      attackers,
+      targets: targetIntel,
+      defender_damage_faces: defenderBad,
+      attacker_loss_faces: attackerBad,
+      tactical_tags: [
+        defenderBad >= 4 ? "high defender pressure" : "",
+        stats.defender_eliminated >= 2 ? "elimination chance" : "",
+        stats.defender_retreat >= 3 ? "retreat pressure" : "",
+        targetIntel.some((target) => target.is_primary_objective) ? "primary objective target" : "",
+        targetIntel.some((target) => target.retreat_options_estimate <= target.defenders.length) ? "limited defender retreat" : "",
+        attackerBad >= 3 ? "meaningful attacker risk" : "",
+        (details.attack || 0) >= (details.defense || 0) * 2 ? "strong odds" : ""
+      ].filter(Boolean),
+      risks: [
+        attackerBad >= 3 ? "attacker losses likely on several die faces" : "",
+        stats.exchange >= 2 ? "exchange risk" : "",
+        targetIntel.some((target) => target.terrain.includes("hill_or_ridge")) ? "rugged defense may cancel defender retreat" : "",
+        (details.attack || 0) < (details.defense || 1) ? "low odds attack" : ""
+      ].filter(Boolean)
+    };
+  }
+  if (action.type === "move") {
+    const unit = state.units[action.unit];
+    if (!unit || !action.path?.length) return { summary: "Move action has unknown unit or path." };
+    const start = normalizeHex(unit.hex);
+    const destination = normalizeHex(action.path[action.path.length - 1]);
+    const target = rulesAiMoveTarget(unit);
+    const before = distance(start, target);
+    const after = distance(destination, target);
+    const progress = before - after;
+    const zocSources = [...enemyZocSources(unit.side, destination)];
+    const mines = enemyMinesAt(unit.side, destination).map((mine) => mine.id);
+    const terrainTags = hexTags(destination);
+    const nearest = nearestEnemiesForAi({ id: action.unit, ...unit, hex: destination }, 3);
+    const risks = [
+      zocSources.length ? `enters enemy ZOC from ${zocSources.join(", ")}` : "",
+      mines.length ? `enters enemy mines ${mines.join(", ")}` : "",
+      isSupplyUnit({ id: action.unit, ...unit }) && zocSources.length ? "supply unit exposed in enemy ZOC" : "",
+      aiScoreSupplyState(action.unit) === "isolated" ? "unit is isolated before move" : "",
+      progress < 0 ? "moves away from primary objective" : ""
+    ].filter(Boolean);
+    const tags = [
+      progress > 0 ? "objective progress" : "",
+      action.mode === "road" ? "road movement" : "",
+      terrainTags.includes("alamein_box") ? "Alamein box" : "",
+      terrainTags.includes("hill_or_ridge") ? "defensive terrain" : "",
+      zocSources.length ? "contact" : "",
+      nearest[0]?.distance <= 2 ? "near enemy" : ""
+    ].filter(Boolean);
+    return {
+      summary: `${action.unit} ${start} -> ${destination}; objective distance ${before} -> ${after}.`,
+      start,
+      destination,
+      objective: target,
+      distance_before: before,
+      distance_after: after,
+      progress,
+      victory_impact: victoryImpactForAi(action),
+      spent: action.verdict?.details?.spent,
+      allowance: action.verdict?.details?.allowance,
+      terrain: terrainTags,
+      map_area: mapAreaForAi(destination),
+      enemy_zoc_sources: zocSources,
+      enemy_mines: mines,
+      nearest_enemies: nearest,
+      tactical_tags: tags,
+      risks
+    };
+  }
+  return { summary: `Unsupported action type ${action.type}` };
+}
+
+function isNoOpAiAction(action) {
+  if (!action || action.type !== "move") return false;
+  const unit = state.units[action.unit];
+  const start = unit?.hex ? normalizeHex(unit.hex) : "";
+  const destination = action.destination || action.path?.at(-1);
+  return !!start && normalizeHex(destination || start) === start && (action.path || []).length <= 1;
+}
+
+function isUsefulAiMoveCandidate(action) {
+  if (!action || action.type !== "move") return true;
+  const unit = state.units[action.unit];
+  if (!unit || unit.side !== "allies" || isSupplyUnit({ id: action.unit, ...unit })) return true;
+  const start = normalizeHex(unit.hex);
+  const destination = normalizeHex(action.destination || action.path?.at(-1) || start);
+  const target = rulesAiMoveTarget({ id: action.unit, ...unit });
+  return distance(start, target) - distance(destination, target) > 0;
+}
+
+function candidateActionsForAi() {
+  const context = aiContextDefaults();
+  const limit = Number(context.maxLegalActions || el("aiMaxActionsInput")?.value || 50);
+  const candidateLimit = Number(context.maxCandidateActions || 12);
+  const previousSupplyCache = aiScoreSupplyCache;
+  const previousVictoryCache = aiVictoryImpactCache;
+  aiScoreSupplyCache ||= aiSupplyScoreMap(state.active_side);
+  aiVictoryImpactCache ||= checkVictory();
+  try {
+    const candidates = enumerateLegalAiActions(limit)
+      .map((action) => ({
+        score: Number(rulesAiScore(action).toFixed(2)),
+        action: compactAction(action),
+        evaluation: actionEvaluationForAi(action)
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(candidateLimit * 2, candidateLimit));
+    const meaningful = candidates.filter((item) => !isNoOpAiAction(item.action) && isUsefulAiMoveCandidate(item.action));
+    const passItem = candidates.find((item) => item.action?.type === "pass") || {
+      score: -999,
+      action: { type: "pass", reason: "No useful legal action" },
+      evaluation: actionEvaluationForAi({ type: "pass" })
+    };
+    const selected = (meaningful.length ? meaningful : candidates)
+      .filter((item) => item.action?.type !== "pass")
+      .slice(0, Math.max(0, candidateLimit - 1));
+    if (candidateLimit > 0) selected.push(passItem);
+    return selected;
+  }
+  finally {
+    aiScoreSupplyCache = previousSupplyCache;
+    aiVictoryImpactCache = previousVictoryCache;
+  }
+}
+
+function compactExternalAiContext(toolResults = []) {
+  return withAiContextSupplyCache(() => {
+    const finalTurn = scenarioFinalTurnForAi();
+    const toolLimit = Number(aiContextDefaults().maxToolResults || 6);
+    const candidateActions = candidateActionsForAi();
+    const payload = {
+      protocol: {
+        response_json_only: true,
+        allowed_final_actions: ["move_intent", "move", "combat", "exit_west", "pass"],
+        current_phase_allowed_actions: phaseAllowedActionsForAi(),
+        compressed_fields: {
+          unit_index: {
+            h: "hex",
+            k: "kind",
+            a: "attack",
+            d: "defense",
+            m: "movement points",
+            s: "state",
+            sup: "supply state",
+            area: "operational area code: N/C/S = north/central/south sector; W/M/E = west/middle/east depth, e.g. N/M"
+          }
+        },
+        tool_call_shape: { type: "tool_call", tool: "inspect_unit", arguments: {} },
+        final_action_shape: { type: "final_action", reason: "short reason", action: { type: "move_intent", unit: "unit-id", destination: "hex", mode: "auto" } }
+      },
+      game: {
+        scenario: state.scenario || "custom",
+        turn: Number(state.turn || 1),
+        final_turn: finalTurn,
+        turns_remaining: Math.max(0, finalTurn - Number(state.turn || 1) + 1),
+        phase: state.phase,
+        phase_kind: phaseKind(),
+        active_side: state.active_side,
+        victory_points: Number(state.victory_points || 0)
+      },
+      decision_brief: decisionBriefForAi(candidateActions),
+      mission: missionForAi(),
+      rules_brief: rulesBriefForAi(),
+      victory: victoryBriefForAi(),
+      strategy: phaseStrategyForAi(),
+      objectives: objectiveHexesForAi(),
+      forces: {
+        active: forceDigestForAi(state.active_side),
+        enemy: forceDigestForAi(enemySide(state.active_side))
+      },
+      unit_index: {
+        active: unitIndexForAi(state.active_side),
+        enemy: unitIndexForAi(enemySide(state.active_side))
+      },
+      battlefield_summary: battlefieldSummaryForAi(),
+      map_intel: mapIntelForAi(candidateActions),
+      candidate_actions: candidateActions,
+      recent_log: recentLogForAi(),
+      tools: aiToolsSchema(),
+      tool_results: toolResults.slice(-toolLimit)
+    };
+    if (aiContextDefaults().includeFullStateSummary) payload.full_state_summary = aiStateSummary();
+    return payload;
+  });
+}
+
+function externalAiPayload(toolResults = []) {
+  const api = aiApiDefaults();
+  return {
+    provider: AiDefaults.provider || "custom",
+    model: el("aiModelInput")?.value || api.model || "",
+    rules_summary: aiRulesSummary(),
+    context: compactExternalAiContext(toolResults)
+  };
+}
+
+function externalAiSystemPrompt() {
+  const strategy = aiStrategyDefaults();
+  return [
+    "You are the game agent for the active side in El Alamein. Your objective is to win the scenario, not merely to output any legal move.",
+    aiRulesSummary(),
+    strategy.doctrine || "",
+    strategy.actionContract || "",
+    ...(strategy.priorities || []).map((item) => `Priority: ${item}`),
+    "Read decision_brief first, then mission, rules_brief, victory, game, forces, battlefield_summary, map_intel, candidate_actions, and recent_log before choosing.",
+    "Only return final actions allowed by protocol.current_phase_allowed_actions.",
+    "You are playing a hex-and-counter wargame through a validating front end.",
+    "For movement, prefer move_intent with unit + destination + mode:auto. The local planner will choose the full legal route. Use full move only when you intentionally need a specific path.",
+    "Prefer candidate_actions from the user context. Read each candidate's score and evaluation.risks/tactical_tags before choosing. If you choose a movement candidate, you may return move_intent with the same unit and destination.",
+    "Before returning a non-candidate final_action, call evaluate_action and compare its score/risk to the best candidate.",
+    "If tool_results contains final_action_review with accept=false, do not repeat that action; choose the recommended best_action or another stronger legal candidate.",
+    "Use tool_call when a unit, hex, route, supply path, or combat verdict is uncertain.",
+    "Return compact JSON only. Do not wrap it in Markdown. Never include die rolls in combat."
+  ].filter(Boolean).join("\n");
+}
+
+function externalAiUserPrompt(toolResults = []) {
+  return JSON.stringify(externalAiPayload(toolResults));
+}
+
+function parseAiJsonText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    const error = new Error("模型返回空内容");
+    error.rawContent = "";
+    throw error;
+  }
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const jsonText = (fenced ? fenced[1] : raw).trim();
+  try {
+    return JSON.parse(jsonText);
+  }
+  catch (error) {
+    const wrapped = new Error(`模型返回的 JSON 无法解析：${error.message}`);
+    wrapped.rawContent = jsonText;
+    throw wrapped;
+  }
+}
+
+function normalizeExternalAiResponse(json) {
+  const message = json?.choices?.[0]?.message;
+  const content = message?.content;
+  if (content != null && String(content).trim()) return parseAiJsonText(content);
+  if (message?.reasoning_content) {
+    const error = new Error("模型只返回了 reasoning_content，未返回最终 JSON");
+    error.rawContent = message.reasoning_content;
+    throw error;
+  }
+  if (content != null) return parseAiJsonText(content);
+  return json;
+}
+
+function externalAiRepairPrompt(rawContent, toolResults = []) {
+  return JSON.stringify({
+    task: "Repair the invalid model output into one valid JSON object only.",
+    invalid_output: String(rawContent || "").slice(0, 1600),
+    allowed_shapes: [
+      { type: "tool_call", tool: "inspect_unit", arguments: { unit: "unit-id" } },
+      { type: "final_action", reason: "short reason", action: { type: "pass", reason: "short reason" } }
+    ],
+    constraints: [
+      "Return JSON only.",
+      "Prefer a final_action if a tool result already confirms a legal candidate.",
+      "If uncertain, return a final_action pass.",
+      "Do not include Markdown or commentary."
+    ],
+    context: compactExternalAiContext(toolResults)
+  });
+}
+
+function externalAiRequestBody(toolResults = [], options = {}) {
+  const api = aiApiDefaults();
+  if (api.kind !== "chat_completions") return externalAiPayload(toolResults);
+  const repairing = options.repairContent != null;
+  return {
+    model: el("aiModelInput")?.value || api.model || "",
+    messages: [
+      {
+        role: "system",
+        content: repairing
+          ? "You repair invalid JSON for a wargame AI. Return exactly one valid compact JSON object."
+          : externalAiSystemPrompt()
+      },
+      {
+        role: "user",
+        content: repairing ? externalAiRepairPrompt(options.repairContent, toolResults) : externalAiUserPrompt(toolResults)
+      }
+    ],
+    temperature: repairing ? 0 : Number(api.temperature ?? 0.25),
+    max_tokens: repairing ? Number(api.repairMaxTokens || 900) : Number(api.maxTokens || 2200),
+    response_format: api.responseFormat || { type: "json_object" }
+  };
+}
+
+async function fetchExternalAiJson(url, headers, body, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`API ${response.status} ${response.statusText}`);
+    return normalizeExternalAiResponse(await response.json());
+  }
+  finally {
+    clearTimeout(timer);
+  }
+}
+
+function externalAiErrorMessage(error) {
+  if (error.name === "AbortError") return "API 请求超时";
+  const message = error.message || String(error);
+  if (/failed to fetch|networkerror|load failed/i.test(message)) {
+    return "API 网络请求失败。若浏览器直连 DeepSeek 被 CORS 拦截，请改用本地/服务器代理转发 Chat Completions 请求。";
+  }
+  return message;
+}
+
 async function requestExternalAiAction() {
-  const url = el("aiApiUrlInput")?.value.trim();
+  syncExternalAiDefaults();
+  const api = aiApiDefaults();
+  const url = el("aiApiUrlInput")?.value.trim() || api.url || "";
   if (!url) return { type: "external", error: "请填写 API URL" };
-  const maxRounds = Number(el("aiMaxToolRoundsInput")?.value || 4);
-  const timeoutMs = Number(el("aiTimeoutInput")?.value || 20) * 1000;
+  const maxRounds = Number(el("aiMaxToolRoundsInput")?.value || api.maxToolRounds || 4);
+  const timeoutMs = Number(el("aiTimeoutInput")?.value || api.timeoutSeconds || 20) * 1000;
   const toolResults = [];
   const calls = [];
+  const headers = { "Content-Type": "application/json" };
+  const key = el("aiApiKeyInput")?.value || api.apiKey || "";
+  if (key) headers.Authorization = `Bearer ${key}`;
+  let finalReviewUsed = false;
   for (let round = 0; round <= maxRounds; round++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let json;
     try {
-      const headers = { "Content-Type": "application/json" };
-      const key = el("aiApiKeyInput")?.value;
-      if (key) headers.Authorization = `Bearer ${key}`;
-      const response = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(externalAiPayload(toolResults)),
-        signal: controller.signal
-      });
-      if (!response.ok) throw new Error(`API ${response.status} ${response.statusText}`);
-      json = await response.json();
+      json = await fetchExternalAiJson(url, headers, externalAiRequestBody(toolResults), timeoutMs);
     }
     catch (error) {
-      return { type: "external", error: error.name === "AbortError" ? "API 请求超时" : error.message, tool_results: toolResults };
-    }
-    finally {
-      clearTimeout(timer);
+      if (error.rawContent != null) {
+        try {
+          json = await fetchExternalAiJson(url, headers, externalAiRequestBody(toolResults, { repairContent: error.rawContent }), timeoutMs);
+        }
+        catch (repairError) {
+          return { type: "external", error: externalAiErrorMessage(repairError), original_error: externalAiErrorMessage(error), raw_response: error.rawContent, tool_results: toolResults };
+        }
+      }
+      else {
+        return { type: "external", error: externalAiErrorMessage(error), tool_results: toolResults };
+      }
     }
 
     if (json.type === "tool_call") {
@@ -3426,7 +7257,20 @@ async function requestExternalAiAction() {
 
     const finalAction = json.type === "final_action" ? json.action : json.action || json;
     const validation = validateAiAction(finalAction);
-    return { type: "external", action: validation.action || finalAction, reason: json.reason || "", validation, tool_results: toolResults, raw_response: json };
+    const assessment = evaluateActionForAi(finalAction);
+    const review = finalActionReviewForAi(finalAction, assessment);
+    if (!review.accept && !finalReviewUsed && round < maxRounds) {
+      finalReviewUsed = true;
+      const record = {
+        tool: "final_action_review",
+        arguments: { action: finalAction },
+        result: review
+      };
+      toolResults.push(record);
+      calls.push(record);
+      continue;
+    }
+    return { type: "external", action: validation.action || finalAction, reason: json.reason || "", validation, assessment, final_review: review, review_used: finalReviewUsed, tool_results: toolResults, raw_response: json };
   }
   return { type: "external", error: "外部 AI 未返回最终动作", tool_results: toolResults, calls };
 }
@@ -3441,6 +7285,7 @@ async function suggestAiAction() {
 function renderAiConfig() {
   const config = el("aiExternalConfig");
   if (!config) return;
+  syncExternalAiDefaults();
   config.classList.toggle("active", aiModeForSide(state.active_side) === "external" || el("aiModeSelect")?.value === "external");
   renderAiProfiles();
   syncAiAutoControls();
@@ -3450,7 +7295,7 @@ function renderAiConfig() {
 async function playAiForCurrentSide() {
   const controller = playerController(state.active_side);
   if (controller === "human") {
-    const result = { legal: false, reason: `${state.active_side} 当前由人类玩家控制` };
+    const result = { legal: false, reason: `${state.active_side} 当前由玩家控制` };
     setOutput("aiOutput", result);
     return result;
   }
@@ -3714,7 +7559,7 @@ async function loadScenario(name) {
   el("scenarioSelect").value = state.scenario || name;
   renderState();
   renderDataOutput();
-  focusMapOnUnits();
+  focusOpeningView({ phaseTab: true });
   renderAutoJudge();
   scheduleAiAutoplay();
 }
@@ -3729,7 +7574,7 @@ function initControls() {
   for (const phase of rules.turn_sequence || DEFAULT_RULES.turn_sequence) {
     const option = document.createElement("option");
     option.value = phase;
-    option.textContent = phaseLabel(phase);
+    option.textContent = phaseDisplayName(phase);
     el("phaseSelect").append(option);
     const setupOption = option.cloneNode(true);
     el("setupPhaseSelect")?.append(setupOption);
@@ -3740,13 +7585,44 @@ function initControls() {
       switchTab(tab.dataset.tab);
     });
   });
-  el("turnBanner")?.addEventListener("click", (event) => {
-    const button = event.target.closest?.("[data-tab]");
-    if (!button?.classList.contains("phase-tab-jump")) return;
-    switchTab(button.dataset.tab);
+  el("phaseActionDock")?.addEventListener("click", handlePhaseActionDockClick);
+  el("selectionSummaryPanel")?.addEventListener("click", handleSelectionSummaryClick);
+  document.addEventListener("click", (event) => {
+    if (event.target.closest?.(".phase-dock-more")) return;
+    closeDockMenus();
+    if (!event.target.closest?.(".map-toolbar")) closeMapToolMenus();
   });
+  el("sideCommandBar")?.addEventListener("click", (event) => {
+    const commandButton = event.target.closest?.("button[data-command]");
+    if (commandButton) {
+      handlePhaseActionDockClick(event);
+      return;
+    }
+    handleGameLogClick(event);
+  });
+  document.querySelector(".side-panel")?.addEventListener("click", handleActionableUnitsClick);
+  document.querySelector(".side-panel")?.addEventListener("click", (event) => {
+    if (event.target.closest?.("#loadLatestSlotBtn")) loadLatestSlot();
+  });
+  el("combatTargetList")?.addEventListener("click", handleCombatTargetListClick);
+  el("routeStepList")?.addEventListener("click", handleRouteStepListClick);
+  el("tab-log")?.addEventListener("click", handleGameLogClick);
   document.addEventListener("keydown", (event) => {
     const target = event.target;
+    if (event.key === "Escape") {
+      const hadOpenMenus = !!document.querySelector(".phase-dock-more[open], .map-view-menu[open], .map-layer-menu[open]");
+      closeDockMenus();
+      closeMapToolMenus();
+      if (target?.matches?.("input, select, textarea, button")) {
+        target.blur?.();
+      }
+      else if (!hadOpenMenus) {
+        clearInteractionFocus();
+        renderState();
+      }
+      event.preventDefault();
+      return;
+    }
     if (target?.matches?.("input, select, textarea, button")) return;
     const key = event.key.toLowerCase();
     if (key === "m") {
@@ -3761,18 +7637,8 @@ function initControls() {
       activateSupplyForSelectedUnit();
       event.preventDefault();
     }
-    else if (event.key === "Escape") {
-      selectedUnitId = null;
-      selectedHexId = null;
-      selectedCombatDefenderHex = null;
-      highlightedSupplyPath = [];
-      movePathDraft = [];
-      syncMovePathInput();
-      renderState();
-      movePathDraft = [];
-      syncMovePathInput();
-      renderRouteStatus();
-      renderMap();
+    else if (key === "n") {
+      cycleActionableUnit(1);
       event.preventDefault();
     }
   });
@@ -3783,6 +7649,7 @@ function initControls() {
     state.phase = el("phaseSelect").value;
     syncActiveSideFromPhase();
     renderState();
+    focusCurrentPhaseTab();
     scheduleAiAutoplay();
   });
   el("axisPlayerSelect")?.addEventListener("change", () => {
@@ -3808,7 +7675,15 @@ function initControls() {
   el("setupModeLoadBtn")?.addEventListener("click", loadSetupSelectedSlot);
   el("setupBackHomeBtn")?.addEventListener("click", () => setSetupMode("home"));
   el("setupStartBtn")?.addEventListener("click", startFromSetup);
-  ["setupScenarioSelect", "setupTurnInput", "setupPhaseSelect", "setupAxisRoleSelect", "setupAlliesRoleSelect", "setupAiModeSelect", "setupAiTargetInput"].forEach((id) => {
+  document.querySelectorAll("[data-setup-scenario]").forEach((button) => {
+    button.addEventListener("click", () => openSetupScenario(button.dataset.setupScenario));
+  });
+  window.addEventListener("pagehide", saveCurrentGameOnExit);
+  window.addEventListener("beforeunload", saveCurrentGameOnExit);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") saveCurrentGameOnExit();
+  });
+  ["setupScenarioSelect", "setupTurnInput", "setupPhaseSelect", "setupAxisRoleSelect", "setupAlliesRoleSelect", "setupAiTargetInput"].forEach((id) => {
     el(id)?.addEventListener("input", () => {
       if (id === "setupScenarioSelect") {
         const scenario = el("setupScenarioSelect").value;
@@ -3834,19 +7709,52 @@ function initControls() {
     const slot = saveSlots().find((item) => item.id === el("setupSaveSlotSelect").value);
     setOutput("setupSaveOutput", slot ? { selected: slotLabel(slot) } : { reason: "请选择一个存档槽" });
   });
-  el("nextPhaseBtn").addEventListener("click", advancePhase);
+  el("sidePanelToggleBtn")?.addEventListener("click", toggleSidePanel);
+  el("gameSettingsBtn")?.addEventListener("click", () => switchTab("settings", { expandPanel: true }));
   el("unitSearch").addEventListener("input", renderUnitList);
-  ["showUnitsToggle", "showMarkersToggle", "expandStacksToggle", "showMinesToggle", "showReachableToggle", "showZocToggle", "showTerrainToggle", "showHexToggle", "mapViewModeSelect"].forEach((id) => el(id).addEventListener("change", () => { renderOperationHint(); renderMap(); }));
+  el("ruleSearch")?.addEventListener("input", filterRulebook);
+  el("expandRulesBtn")?.addEventListener("click", () => setRulebookOpen(true));
+  el("collapseRulesBtn")?.addEventListener("click", () => setRulebookOpen(false));
+  document.querySelectorAll("[data-map-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setMapViewMode(button.dataset.mapMode);
+      closeMapToolMenus();
+      renderOperationHint();
+      renderMap();
+    });
+  });
+  document.querySelectorAll(".map-view-menu, .map-layer-menu").forEach((details) => {
+    details.addEventListener("toggle", () => {
+      if (details.open) closeMapToolMenus(details);
+    });
+  });
+  ["showUnitsToggle", "showMarkersToggle", "expandStacksToggle", "showMinesToggle", "showReachableToggle", "showZocToggle", "showTerrainToggle", "showHexToggle"].forEach((id) => {
+    el(id).addEventListener("change", () => {
+      syncMapModeButtons();
+      renderOperationHint();
+      renderMap();
+    });
+  });
+  el("mapViewModeSelect").addEventListener("change", () => {
+    syncMapModeButtons();
+    closeMapToolMenus();
+    renderOperationHint();
+    renderMap();
+  });
   el("moveUnitSelect").addEventListener("change", () => selectUnit(el("moveUnitSelect").value, { showStateTab: false }));
   el("moveModeSelect").addEventListener("change", () => { renderRouteStatus(); renderActionControls(); renderMap(); });
-  el("combatDieSelect").addEventListener("change", renderAutoJudge);
+  el("combatResolveDieSelect").addEventListener("change", () => {
+    renderAutoJudge();
+    renderActionControls();
+  });
   el("useSelectedCombatBtn").addEventListener("click", () => {
     if (selectedUnitId) el("combatAttackersInput").value = selectedUnitId;
     if (selectedCombatDefenderHex) el("combatDefendersInput").value = selectedCombatDefenderHex;
     setOutput("combatOutput", checkCombat(parseCombatAction()));
     renderActionControls();
   });
-  el("previewCombatBtn").addEventListener("click", () => setOutput("combatOutput", checkCombat(parseCombatAction())));
+  el("previewCombatBtn").addEventListener("click", previewCombatFromInputs);
+  el("randomCombatBtn")?.addEventListener("click", resolveCombatWithRandomDie);
   el("resolveCombatBtn").addEventListener("click", () => {
     setOutput("combatOutput", resolveCombat(parseCombatAction()));
     renderActionControls();
@@ -3856,13 +7764,25 @@ function initControls() {
     setOutput("combatOutput", clearMine(el("engineerSelect").value, el("mineHexInput").value));
     renderActionControls();
   });
-  ["combatAttackersInput", "combatDefendersInput", "combatResolveDieSelect", "engineerSelect", "mineHexInput"].forEach((id) => {
+  ["combatAttackersInput", "combatDefendersInput", "engineerSelect", "mineHexInput"].forEach((id) => {
     el(id)?.addEventListener("input", renderActionControls);
     el(id)?.addEventListener("change", renderActionControls);
+  });
+  ["combatAttackersInput", "combatDefendersInput"].forEach((id) => {
+    el(id)?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      previewCombatFromInputs();
+    });
   });
   el("calibrationStatusFilter").addEventListener("change", renderCalibration);
   el("calibrationSearch").addEventListener("input", renderCalibration);
   el("moveTargetInput")?.addEventListener("input", renderActionControls);
+  el("moveTargetInput")?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    runAutoRouteFromTarget();
+  });
   el("movePathInput").addEventListener("input", () => {
     try {
       movePathDraft = parsePathInput(el("movePathInput").value).map(normalizeHex);
@@ -3874,20 +7794,7 @@ function initControls() {
     renderActionControls();
     renderMap();
   });
-  el("autoRouteBtn").addEventListener("click", () => {
-    const unitId = el("moveUnitSelect").value;
-    const target = el("moveTargetInput").value;
-    const path = findLegalPath(unitId, target, moveOptions());
-    if (!path) {
-      setOutput("moveOutput", { legal: false, reason: "找不到合法自动路线", target });
-      return;
-    }
-    movePathDraft = path;
-    syncMovePathInput();
-    renderRouteStatus();
-    renderActionControls();
-    renderMap();
-  });
+  el("autoRouteBtn").addEventListener("click", runAutoRouteFromTarget);
   el("enterRoadModeBtn").addEventListener("click", () => {
     el("moveModeSelect").value = "road";
     renderRouteStatus();
@@ -3897,18 +7804,18 @@ function initControls() {
   el("leaveRoadModeBtn").addEventListener("click", () => {
     const unitId = el("moveUnitSelect").value;
     if (!unitId || !state.units[unitId]) return;
-    const unit = { id: unitId, ...state.units[unitId] };
-    if (!canLeaveRoadModeNow(unit)) {
-      setOutput("moveOutput", { legal: false, reason: "当前不能离开道路模式" });
+    const verdict = RulesEngine.checkLeaveRoadMode(rulesContext(), unitId);
+    if (!verdict.legal) {
+      setOutput("moveOutput", verdict);
       renderActionControls();
       return;
     }
     pushHistory("leave_road_mode");
-    state.units[unitId].road_mode = false;
-    state.units[unitId].facing = null;
+    const result = RulesEngine.leaveRoadMode(rulesContext(), unitId);
     el("moveModeSelect").value = "normal";
+    logEvent("leave_road_mode", `${unitId} 退出道路模式`, result.details);
     renderState();
-    setOutput("moveOutput", { legal: true, reason: `${unitId} 已离开道路模式` });
+    setOutput("moveOutput", result);
   });
   el("exitWestBtn").addEventListener("click", () => {
     const unitId = el("moveUnitSelect").value;
@@ -3918,13 +7825,15 @@ function initControls() {
   });
 
   el("loadScenarioBtn").addEventListener("click", () => loadScenario(el("scenarioSelect").value));
-  el("scenarioSelect").addEventListener("change", () => loadScenario(el("scenarioSelect").value));
+  el("scenarioSelect").addEventListener("change", () => {
+    setOutput("saveOutput", { selected_scenario: el("scenarioSelect").value, note: "点击“加载场景”后才会覆盖当前局面" });
+  });
   el("loadExampleBtn").addEventListener("click", async () => {
     applyStateDefaults(await loadJson("./example_state.json", FALLBACK_STATE));
     logEvent("load_example", "加载示例局面", {});
     renderState();
     renderDataOutput();
-    focusMapOnUnits();
+    focusOpeningView({ phaseTab: true });
     scheduleAiAutoplay();
   });
   el("importBtn").addEventListener("click", () => el("fileInput").click());
@@ -3935,7 +7844,7 @@ function initControls() {
     logEvent("import", `导入局面 JSON：${file.name}`, { file: file.name });
     renderState();
     renderDataOutput();
-    focusMapOnUnits();
+    focusOpeningView({ phaseTab: true });
     scheduleAiAutoplay();
   });
   el("exportBtn").addEventListener("click", () => {
@@ -3955,7 +7864,6 @@ function initControls() {
   });
   el("clearLogBtn")?.addEventListener("click", () => {
     state.game_log = [];
-    logEvent("log", "清空并重新开始日志", {});
     renderGameLog();
   });
   el("saveSlotBtn")?.addEventListener("click", saveCurrentSlot);
@@ -3989,6 +7897,16 @@ function initControls() {
       state.units[unitId].road_facing = path.length > 1 ? hexDirection(path[path.length - 2], path[path.length - 1]) : state.units[unitId].road_facing;
       state.units[unitId].facing = state.units[unitId].road_facing;
       state.units[unitId].state = "spent";
+      state.units[unitId].temporary_overstack = false;
+      if (verdict.details?.repaired_temporary_overstack) {
+        for (const hex of [fromHex, state.units[unitId].hex]) {
+          const stackOk = RulesEngine.checkStacking(rulesContext(), state, { hexes: [hex] });
+          if (!stackOk.legal) continue;
+          for (const candidate of Object.values(state.units || {})) {
+            if (candidate.hex && normalizeHex(candidate.hex) === hex) candidate.temporary_overstack = false;
+          }
+        }
+      }
       if (isEngineer({ id: unitId, ...state.units[unitId] }) && phaseKind() === "initial_movement" && enemyMinesAt(state.units[unitId].side, state.units[unitId].hex).length) {
         RulesEngine.clearMine(rulesContext(), unitId, state.units[unitId].hex);
       }
@@ -3999,7 +7917,7 @@ function initControls() {
       renderState();
     }
     renderAutoJudge();
-    el("moveOutput").textContent = JSON.stringify(verdict, null, 2);
+    setOutput("moveOutput", verdict);
   });
   el("undoRouteBtn").addEventListener("click", () => {
     if (movePathDraft.length > 1) movePathDraft.pop();
@@ -4062,24 +7980,23 @@ function initControls() {
     });
   }
   renderSaveSlots();
+  syncExternalAiDefaults({ force: true });
   renderAiConfig();
   syncSetupControls();
+  syncMapModeButtons();
+  setSidePanelCollapsed(localStorage.getItem(SIDE_PANEL_COLLAPSED_KEY) === "1", { persist: false });
 }
 
 async function main() {
   syncVersionLabels();
   await initData();
   initControls();
-  applyZoom();
-  renderState();
-  renderDataOutput();
-  focusMapOnUnits();
-  renderAutoJudge();
 }
 
 globalThis.AlameinStudioDebug = {
   getState: () => structuredClone(state),
   aiStateSummary: () => aiStateSummary(),
+  externalAiPayload: (toolResults = []) => externalAiPayload(toolResults),
   checkVictory: () => checkVictory(),
   suggestRulesAction: () => suggestRulesAction(),
   enumerateLegalAiActions: (limit = 50) => enumerateLegalAiActions(limit).map(compactAction),

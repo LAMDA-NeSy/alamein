@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Cache-Control" content="no-store">
+    <meta http-equiv="Pragma" content="no-cache">
+    <title>El Alamein 棋子图册</title>
+    <link rel="stylesheet" href="./styles.css?v=20260712-13">
+  </head>
+  <body class="rules-page">
+    <main class="rules-shell rules-shell-wide">
+      <header class="rules-hero rules-hero-game">
+        <div class="rules-hero-main">
+          <span>El Alamein Counter Atlas · v2026.07.12.13</span>
+          <h1>棋子图册</h1>
+          <p>本页按玩家识别顺序介绍《El Alamein》里的常见棋子：作战单位、非机械化兵种、工兵、补给、雷区、道路模式、补给前锋、状态标记和工具标记。相同类型的棋子规则相同，区别主要在番号、国籍、战斗强度和移动力。</p>
+          <nav class="rules-actions" aria-label="图册页操作">
+            <a href="./index.html?v=20260712-13">返回游戏</a>
+            <a href="./rules.html?v=20260712-13">规则书</a>
+            <a href="#combat-units">作战单位</a>
+            <a href="#markers">标记棋子</a>
+          </nav>
+        </div>
+        <aside class="rules-command-panel" aria-label="图册速览">
+          <div>
+            <b>棋子类型</b>
+            <strong>单位 + 标记</strong>
+          </div>
+          <div>
+            <b>读法重点</b>
+            <strong>番号 / 战力 / 移动力</strong>
+          </div>
+          <div>
+            <b>颜色阵营</b>
+            <strong>Axis / Allies</strong>
+          </div>
+          <div>
+            <b>规则关联</b>
+            <strong>移动、战斗、补给</strong>
+          </div>
+        </aside>
+      </header>
+
+      <section class="rules-play-strip counter-atlas-strip" aria-label="棋子读法">
+        <div>
+          <span>1</span>
+          <b>看阵营</b>
+          <small>棋子颜色和国籍标识先决定它属于轴心国还是盟军。</small>
+        </div>
+        <div>
+          <span>2</span>
+          <b>看类型</b>
+          <small>装甲、侦察、步兵、工兵、补给和标记适用不同规则。</small>
+        </div>
+        <div>
+          <span>3</span>
+          <b>看数值</b>
+          <small>战斗强度用于攻防，移动力决定一个阶段最多能花多少 MP。</small>
+        </div>
+        <div>
+          <span>4</span>
+          <b>看状态</b>
+          <small>道路模式、补给不足、孤立、雷区会改变移动和战斗。</small>
+        </div>
+      </section>
+
+      <div class="rules-layout rules-layout-game">
+        <nav class="rules-toc rules-toc-game" aria-label="棋子图册目录">
+          <a href="#reading">如何读棋子</a>
+          <a href="#combat-units">作战单位</a>
+          <a href="#non-mech">非机械化兵种</a>
+          <a href="#support">补给与工程</a>
+          <a href="#markers">标记棋子</a>
+          <a href="#tools">图表与工具</a>
+        </nav>
+
+        <article class="rules-content">
+          <section id="reading" class="rules-section rules-section-feature">
+            <div class="rules-section-head">
+              <span>Guide</span>
+              <h2>如何读一枚棋子</h2>
+            </div>
+            <p>棋子通常表示一个历史单位。玩家首先看它属于哪一方，再看兵种和数值。多数作战单位都能移动和战斗；补给单位、道路模式、雷区、状态标记则用来改变局面或记录规则状态。</p>
+            <div class="counter-reading-panel">
+              <figure class="counter-reading-figure">
+                <div class="counter-diagram" aria-label="第7装甲单位棋子标注图">
+                  <div class="counter-diagram-piece">
+                    <img src="./mod_images/7-panzer.png" alt="第7装甲单位棋子，底部数值为6-10">
+                    <i class="counter-mark counter-mark-name" aria-hidden="true"></i>
+                    <i class="counter-mark counter-mark-type" aria-hidden="true"></i>
+                    <i class="counter-mark counter-mark-combat" aria-hidden="true"></i>
+                    <i class="counter-mark counter-mark-move" aria-hidden="true"></i>
+                  </div>
+                  <span class="counter-leader counter-leader-name" aria-hidden="true"></span>
+                  <span class="counter-leader counter-leader-type" aria-hidden="true"></span>
+                  <span class="counter-leader counter-leader-combat" aria-hidden="true"></span>
+                  <span class="counter-leader counter-leader-move" aria-hidden="true"></span>
+                  <div class="counter-callout counter-callout-name"><b>番号 / 名称</b><small>第 7 装甲</small></div>
+                  <div class="counter-callout counter-callout-type"><b>兵种符号</b><small>装甲单位</small></div>
+                  <div class="counter-callout counter-callout-combat"><b>6</b><small>战斗强度</small></div>
+                  <div class="counter-callout counter-callout-move"><b>10</b><small>移动力</small></div>
+                </div>
+                <figcaption>装甲单位示例</figcaption>
+              </figure>
+              <div>
+                <dl>
+                  <div><dt>番号 / 名称</dt><dd>识别具体历史部队，例如第 7 装甲。</dd></div>
+                  <div><dt>兵种符号</dt><dd>决定它按装甲、侦察、步兵、工兵等哪类规则行动。</dd></div>
+                  <div><dt>6（横线左侧）</dt><dd>战斗强度。攻击或防御时，将这个数值计入己方总战斗强度；它可能受到补给、地形和道路模式等规则修正。</dd></div>
+                  <div><dt>10（横线右侧）</dt><dd>移动力。表示该单位在一次移动阶段中最多可以花费 10 点 MP；进入不同地形和切换道路模式会消耗 MP。</dd></div>
+                </dl>
+              </div>
+            </div>
+          </section>
+
+          <section id="combat-units" class="rules-section">
+            <div class="rules-section-head">
+              <span>Combat Units</span>
+              <h2>作战单位</h2>
+            </div>
+            <p>作战单位是地图上的主力棋子，通常拥有战斗强度和移动力。它们可以移动、攻击、防御、控制相邻格，并影响补给线。</p>
+            <div class="counter-atlas-grid">
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/7-panzer.png" alt="德国装甲单位">
+                  <img src="./mod_images/22-CW-Arm.png" alt="英联邦装甲单位">
+                  <img src="./mod_images/132-It-tank.png" alt="意大利坦克单位">
+                </div>
+                <div>
+                  <b>装甲 / 坦克单位</b>
+                  <p>高机动、高战斗力的机械化作战单位。通常能在机械化移动阶段再次移动，但参加本玩家回合战斗阶段攻击后不能再进行机械化移动。</p>
+                  <small>示例：Panzer、CW Arm、Italian Tank</small>
+                </div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/10-recon.png" alt="侦察单位">
+                  <img src="./mod_images/4-CW-Recon.png" alt="英联邦侦察单位">
+                  <img src="./mod_images/S-It-recon.png" alt="意大利侦察单位">
+                </div>
+                <div>
+                  <b>侦察单位</b>
+                  <p>属于机械化单位，移动力通常较高。用于快速推进、占位、威胁补给线和形成控制区。</p>
+                  <small>示例：Recon、CW Recon、Italian Recon</small>
+                </div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/104-pzg.png" alt="装甲掷弹兵">
+                  <img src="./mod_images/2-10-pzg.png" alt="装甲掷弹兵">
+                  <img src="./mod_images/Ram-pzg.png" alt="Ramcke 机械化步兵">
+                </div>
+                <div>
+                  <b>机械化步兵 / 装甲掷弹兵</b>
+                  <p>介于装甲和普通步兵之间的机动战斗单位。它们通常按机械化规则移动，也会受到道路模式和补给规则影响。</p>
+                  <small>示例：PzG、Mech Infantry</small>
+                </div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/5-Ind-inf.png" alt="印度步兵">
+                  <img src="./mod_images/7-CW-inf.png" alt="英联邦步兵">
+                  <img src="./mod_images/16-It-inf.png" alt="意大利步兵">
+                </div>
+                <div>
+                  <b>步兵单位</b>
+                  <p>最常见的非机械化作战单位。它们移动较慢，但适合守点、维持战线、占据关键地形和承担防御。</p>
+                  <small>示例：Indian、CW、Italian Infantry</small>
+                </div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/5Bers-Mech.png" alt="Bersaglieri 机械化单位">
+                  <img src="./mod_images/9Bers-Mech.png" alt="Bersaglieri 机械化单位">
+                  <img src="./mod_images/GGFF-Mech.png" alt="GGFF 机械化单位">
+                </div>
+                <div>
+                  <b>意大利机动步兵</b>
+                  <p>包括 Bersaglieri 和 GGFF 等单位。它们在地图上按具体棋子数值行动，是否机械化以棋子和场景数据为准。</p>
+                  <small>示例：Bersaglieri、GGFF</small>
+                </div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/1-FR-inf.png" alt="法国单位">
+                  <img src="./mod_images/1-Grk-Inf.png" alt="希腊单位">
+                  <img src="./mod_images/1-Pol-inf.png" alt="波兰单位">
+                </div>
+                <div>
+                  <b>盟军多国步兵</b>
+                  <p>法国、希腊、波兰、澳大利亚、新西兰、南非、印度等单位都按作战单位规则使用，区别主要在番号、国籍和数值。</p>
+                  <small>示例：French、Greek、Polish Infantry</small>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section id="non-mech" class="rules-section">
+            <div class="rules-section-head">
+              <span>Non-Mechanized</span>
+              <h2>非机械化兵种</h2>
+            </div>
+            <p>非机械化单位不能在机械化移动阶段移动。它们进入道路模式的时机也更受限制，通常只能在初始移动阶段进入道路模式。</p>
+            <div class="counter-atlas-grid compact">
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/16-Air-Landing.png" alt="空降着陆单位">
+                  <img src="./mod_images/47-Air-Landing.png" alt="空降着陆单位">
+                  <img src="./mod_images/65-Air-Landing.png" alt="空降着陆单位">
+                </div>
+                <div><b>滑翔机 / 空降着陆步兵</b><p>按非机械化作战单位处理。它们是特殊来源的步兵单位，但在移动、战斗、堆叠和补给上仍看具体规则。</p></div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/4-Para-Inf.png" alt="伞兵单位">
+                  <img src="./mod_images/5-Para-Inf.png" alt="伞兵单位">
+                  <img src="./mod_images/186-Para-Rgt.png" alt="伞兵团">
+                </div>
+                <div><b>伞兵 / 空降步兵</b><p>属于步兵类作战单位。可攻击、防御、形成控制区，按棋子数值和补给状态结算。</p></div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/102-aa.png" alt="防空单位">
+                  <img src="./mod_images/609-aa.png" alt="防空单位">
+                  <img src="./mod_images/66-aa.png" alt="防空单位">
+                </div>
+                <div><b>防空单位</b><p>规则书将其列入非机械化单位。它们按棋子上的战斗强度和移动力参与地图行动。</p></div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/axis-engineers.png" alt="轴心国工兵">
+                  <img src="./mod_images/allied-engineers.png" alt="盟军工兵">
+                  <img src="./mod_images/engineer.png" alt="工兵图标">
+                </div>
+                <div><b>工兵单位</b><p>可进入敌方雷区并清雷；若本玩家回合未清雷，可协助攻击敌方雷区内单位，抵消雷区防御加倍。</p></div>
+              </article>
+            </div>
+          </section>
+
+          <section id="support" class="rules-section">
+            <div class="rules-section-head">
+              <span>Support</span>
+              <h2>补给与工程棋子</h2>
+            </div>
+            <div class="counter-atlas-grid compact">
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/Axis-Supply-1.png" alt="轴心国补给单位">
+                  <img src="./mod_images/Axis-Supply-2.png" alt="轴心国补给单位">
+                  <img src="./mod_images/Allied-Supply.png" alt="盟军补给单位">
+                </div>
+                <div><b>补给单位</b><p>不是普通战斗单位。它们用于延伸补给网络，移动阶段独立，不能像战斗单位那样攻击。</p></div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/Axis-Supply-Vanguard.png" alt="轴心国补给前锋">
+                  <img src="./mod_images/Allies-Supply-Vanguard.png" alt="盟军补给前锋">
+                  <img src="./mod_images/supply-vanguard-tan.png" alt="补给前锋标记">
+                </div>
+                <div><b>补给前锋标记</b><p>表示道路上补给已推进到哪里。道路补给规则会根据该标记和道路是否被敌军/ZOC/雷区阻断来判定补给。</p></div>
+              </article>
+            </div>
+          </section>
+
+          <section id="markers" class="rules-section">
+            <div class="rules-section-head">
+              <span>Markers</span>
+              <h2>标记棋子</h2>
+            </div>
+            <p>标记棋子不一定代表部队，更多用于记录地图状态。它们会影响移动、战斗、补给或界面显示。</p>
+            <div class="counter-atlas-grid compact">
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/mines-allies.png" alt="盟军雷区">
+                  <img src="./mod_images/mines-axis.png" alt="轴心国雷区">
+                  <img src="./mod_images/mines-brown.png" alt="雷区标记">
+                </div>
+                <div><b>雷区标记</b><p>影响进入移动费用和战斗防御。攻击位于己方雷区中的单位时，防御强度通常加倍，工兵可抵消这种加成。</p></div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/Axis-Road-Mode.png" alt="轴心国道路模式">
+                  <img src="./mod_images/Allies-Road-Mode.png" alt="盟军道路模式">
+                  <img src="./mod_images/roadmode-black.png" alt="道路模式标记">
+                </div>
+                <div><b>道路模式标记</b><p>表示单位以道路行军队形移动。移动距离大幅提高，但战斗强度减半，前后道路空间必须保持空置。</p></div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/OOS.png" alt="无补给标记">
+                  <img src="./mod_images/Isolated.png" alt="孤立标记">
+                  <img src="./mod_images/eliminated.png" alt="消灭标记">
+                </div>
+                <div><b>状态标记</b><p>用于记录无补给、孤立、消灭等状态。补给状态会直接影响移动、攻击、防御和是否会因孤立被移除。</p></div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/game-turn-axis.png" alt="轴心国回合标记">
+                  <img src="./mod_images/game-turn-allies.png" alt="盟军回合标记">
+                  <img src="./mod_images/game-turn-white.png" alt="游戏回合标记">
+                </div>
+                <div><b>回合标记</b><p>用于记录当前 Game-Turn 和行动方。场景长度、首回合特殊规则和最终结算都依赖回合数。</p></div>
+              </article>
+            </div>
+          </section>
+
+          <section id="tools" class="rules-section">
+            <div class="rules-section-head">
+              <span>Charts & Tools</span>
+              <h2>图表与界面工具</h2>
+            </div>
+            <div class="counter-atlas-grid compact">
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/CRT.png" alt="战斗结果表">
+                  <img src="./mod_images/TEC.png" alt="地形效果表">
+                  <img src="./mod_images/Scenario-Variations.png" alt="场景变体表">
+                </div>
+                <div><b>规则图表</b><p>CRT 用于战斗结算，TEC 用于地形移动和战斗修正，场景变体表用于可选设置。</p></div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/1D6_Black_1.png" alt="骰子 1">
+                  <img src="./mod_images/1D6_Black_4.png" alt="骰子 4">
+                  <img src="./mod_images/1D6_Black_6.png" alt="骰子 6">
+                </div>
+                <div><b>骰子</b><p>战斗和部分清雷判定使用 1d6。战斗时根据比值栏和骰点在 CRT 上得到结果。</p></div>
+              </article>
+              <article class="counter-atlas-card">
+                <div class="counter-atlas-images">
+                  <img src="./mod_images/z-move.png" alt="移动工具">
+                  <img src="./mod_images/z-step-forward.png" alt="前进工具">
+                  <img src="./mod_images/z-zoom-in.png" alt="放大工具">
+                </div>
+                <div><b>界面工具图标</b><p>这些图标用于网页操作或 VASSAL 工具，不代表地图上的作战单位。它们帮助移动、缩放、显示或隐藏信息。</p></div>
+              </article>
+            </div>
+          </section>
+        </article>
+      </div>
+    </main>
+  </body>
+</html>
