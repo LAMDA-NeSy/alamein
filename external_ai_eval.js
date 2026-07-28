@@ -64,8 +64,7 @@ function sameAction(left = {}, right = {}) {
   }
   if (left.type === "combat") {
     return [...(left.attackers || [])].sort().join(",") === [...(right.attackers || [])].sort().join(",") &&
-      [...(left.defender_hexes || [])].sort().join(",") === [...(right.defender_hexes || [])].sort().join(",") &&
-      !!left.no_retreat_order === !!right.no_retreat_order;
+      [...(left.defender_hexes || [])].sort().join(",") === [...(right.defender_hexes || [])].sort().join(",");
   }
   return false;
 }

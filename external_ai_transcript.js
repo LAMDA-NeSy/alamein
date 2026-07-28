@@ -49,6 +49,7 @@ function mapArea(ctx, hex) {
   const tags = RulesEngine.hexTags(ctx, normalized);
   const areas = [];
   if (tags.includes("alamein_box")) areas.push("Alamein box");
+  if (tags.includes("coastline")) areas.push("coastal hex");
   if (tags.includes("hill_or_ridge")) areas.push("ridge line");
   if (tags.includes("depression")) areas.push("depression");
   if (tags.includes("minefield") || RulesEngine.minesAt(ctx, normalized).length) areas.push("minefield belt");
@@ -266,9 +267,9 @@ function compactUnit(id, unit, ctx, allUnits = [], options = {}) {
     effective_movement: RulesEngine.isMapCounter(full) ? RulesEngine.effectiveMovement(ctx, suppliedFull) : Number(unit.movement || 0),
     distance_to_objective: unit.hex ? distance(unit.hex, objective) : null,
     enemy_zoc_here: unit.hex && RulesEngine.isPlayableSide(unit.side) ? RulesEngine.enemyZocSources(ctx, unit.side, unit.hex).size > 0 : false,
-    zoc_hexes: RulesEngine.isCombatUnit(full) ? RulesEngine.zocHexes(ctx, full) : [],
+    zoc_hexes: RulesEngine.isCombatUnit(full) ? RulesEngine.zocHexes(full) : [],
     can_move_now: unit.side === ctx.state.active_side && unit.state === "fresh" && RulesEngine.canMoveInCurrentPhase(ctx, full),
-    can_attack_now: unit.side === ctx.state.active_side && unit.state === "fresh" && kind === "combat" && RulesEngine.isCombatUnit(full) && !unit.attacked_this_turn && !unit.attacked_this_phase,
+    can_attack_now: unit.side === ctx.state.active_side && unit.state === "fresh" && kind === "combat" && RulesEngine.canAttackUnit(full) && !unit.attacked_this_turn && !unit.attacked_this_phase,
     nearby_enemies: includeNearby ? nearestEnemies(full, allUnits, nearbyLimit) : []
   };
 }
@@ -476,7 +477,7 @@ function decisionBrief(ctx, candidates, activeSide) {
 
 function rulesBrief(rules) {
   return {
-    game: rules.game?.title || "First Alamein",
+    game: rules.game?.title || "El Alamein",
     role: "You are the active side's game agent. Your job is to win the scenario, using only legal actions accepted by the front-end judge.",
     turn_sequence: rules.turn_sequence,
     movement: [
@@ -700,12 +701,14 @@ function combatOutcomeStats(crtColumnMap = {}) {
   };
 }
 
-function crtColumn(ctx, column) {
+function crtColumn(ctx, column, defenderHexes = []) {
   const columns = ctx.rules.combat?.odds_columns || [];
   const index = columns.indexOf(column);
   const result = {};
+  const ruggedDefense = defenderHexes.some((hex) => RulesEngine.hexTags(ctx, hex).includes("hill_or_ridge"));
   for (const die of [1, 2, 3, 4, 5, 6]) {
-    result[String(die)] = index >= 0 ? ctx.rules.combat?.crt?.[String(die)]?.[index] || null : null;
+    const raw = index >= 0 ? ctx.rules.combat?.crt?.[String(die)]?.[index] || null : null;
+    result[String(die)] = ruggedDefense && /^D[123]$/.test(raw || "") ? "No Effect" : raw;
   }
   return result;
 }
@@ -714,8 +717,7 @@ function combatVerdictTool(ctx, args = {}) {
   try {
     const action = {
       attackers: args.attackers || [],
-      defender_hexes: (args.defender_hexes || []).map((hex) => RulesEngine.normalizeHex(hex)),
-      no_retreat_order: !!args.no_retreat_order
+      defender_hexes: (args.defender_hexes || []).map((hex) => RulesEngine.normalizeHex(hex))
     };
     const verdict = RulesEngine.checkCombat(ctx, action);
     if (!verdict.legal) return verdict;
@@ -723,7 +725,7 @@ function combatVerdictTool(ctx, args = {}) {
       ...verdict,
       details: {
         ...(verdict.details || {}),
-        crt_column: crtColumn(ctx, verdict.details?.odds_column)
+        crt_column: crtColumn(ctx, verdict.details?.odds_column, verdict.details?.defender_hexes || [])
       }
     };
   }
@@ -734,8 +736,11 @@ function combatVerdictTool(ctx, args = {}) {
 
 function terrainDefenseBonusFromTags(tags = []) {
   if (tags.includes("alamein_box")) return 3;
-  if (tags.includes("hill_or_ridge") || tags.includes("depression")) return 1;
   return 0;
+}
+
+function terrainDefenseMultiplierFromTags(tags = []) {
+  return tags.includes("hill_or_ridge") ? 2 : 1;
 }
 
 function combatTargetIntel(ctx, action) {
@@ -768,6 +773,8 @@ function combatTargetIntel(ctx, action) {
       friendly_mines: RulesEngine.friendlyMinesAt(ctx, defenderSide, hex).map((mine) => mine.id),
       enemy_mines: RulesEngine.enemyMinesAt(ctx, attackerSide, hex).map((mine) => mine.id),
       terrain_defense_bonus: terrainDefenseBonusFromTags(terrainTags),
+      terrain_defense_multiplier: terrainDefenseMultiplierFromTags(terrainTags),
+      rugged_defense_cancels_retreat: terrainTags.includes("hill_or_ridge"),
       is_primary_objective: hex === alamein,
       retreat_options_estimate: defenders.reduce((sum, defender) => {
         const unit = ctx.state.units[defender.id];
@@ -932,13 +939,13 @@ function combatCandidates(ctx, allUnits) {
   const unitsByHex = RulesEngine.unitsByHex(ctx);
   const seen = new Set();
   return allUnits
-    .filter((unit) => unit.side === side && RulesEngine.isCombatUnit(unit) && unit.hex && unit.state === "fresh" && !unit.attacked_this_turn)
+    .filter((unit) => unit.side === side && RulesEngine.canAttackUnit(unit) && unit.hex && unit.state === "fresh" && !unit.attacked_this_turn)
     .flatMap((unit) => {
       const defenderHexes = RulesEngine.neighbors(unit.hex)
         .filter((hex) => (unitsByHex[hex] || []).some((enemy) => enemy.side !== side && RulesEngine.isCombatUnit(enemy)))
         .sort();
       if (!defenderHexes.length) return [];
-      const action = { type: "combat", attackers: [unit.id], defender_hexes: defenderHexes, no_retreat_order: false };
+      const action = { type: "combat", attackers: [unit.id], defender_hexes: defenderHexes };
       const key = `${action.attackers.join(",")}=>${defenderHexes.join(",")}`;
       if (seen.has(key)) return [];
       seen.add(key);
@@ -950,7 +957,7 @@ function combatCandidates(ctx, allUnits) {
           ...verdict,
           details: {
             ...(verdict.details || {}),
-            crt_column: crtColumn(ctx, verdict.details?.odds_column)
+            crt_column: crtColumn(ctx, verdict.details?.odds_column, action.defender_hexes || [])
           }
         }
       };
@@ -992,7 +999,7 @@ function buildContext(config, options = {}) {
   for (const [unitId, patch] of Object.entries(options.unitPatches || {})) {
     if (state.units?.[unitId]) state.units[unitId] = { ...state.units[unitId], ...patch };
   }
-  const rules = readJson("rules_first_alamein.json");
+  const rules = readJson("rules_el_alamein.json");
   const terrain = readJson("terrain.json");
   RulesEngine.applyStateDefaults(state);
   const ctx = RulesEngine.createContext({ state, rules, terrain });

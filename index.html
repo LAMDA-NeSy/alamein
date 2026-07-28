@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-store">
     <meta http-equiv="Pragma" content="no-cache">
     <title>Alamein Judge Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=20260712-15">
+    <link rel="stylesheet" href="./styles.css?v=20260728-120">
   </head>
   <body>
     <section id="setupScreen" class="setup-screen" aria-label="开局配置">
@@ -33,7 +33,7 @@
           </div>
           <div class="setup-badge">
             <span>Judge Studio</span>
-            <strong id="setupVersionText">v2026.07.12.15</strong>
+            <strong id="setupVersionText">v2026.07.28.120</strong>
           </div>
         </div>
 
@@ -51,18 +51,18 @@
             </div>
             <div class="setup-front-markers" aria-label="交战双方">
               <figure>
-                <img src="./mod_images/dak-insignia.svg?v=20260712-15" alt="德国非洲军团历史编制徽记">
+                <img src="./mod_images/dak-insignia.svg?v=20260712-118" alt="德国非洲军团历史编制徽记">
                 <figcaption>DAK · Axis</figcaption>
               </figure>
               <i aria-hidden="true">VS</i>
               <figure>
-                <img src="./mod_images/eighth-army-insignia.svg?v=20260712-15" alt="英国第八集团军历史编制徽章">
+                <img src="./mod_images/eighth-army-insignia.svg?v=20260712-118" alt="英国第八集团军历史编制徽章">
                 <figcaption>8th Army · Allies</figcaption>
               </figure>
             </div>
           </section>
           <button id="setupModeNewBtn" class="setup-choice" type="button">
-            <span class="setup-choice-icon" aria-hidden="true"><img src="./mod_images/ui-map-2.svg?v=20260712-15" alt=""></span>
+            <span class="setup-choice-icon" aria-hidden="true"><img src="./mod_images/ui-map-2.svg?v=20260712-118" alt=""></span>
             <span class="setup-choice-copy">
               <small>New Campaign</small>
               <strong>开始新游戏</strong>
@@ -70,11 +70,19 @@
             </span>
           </button>
           <button id="setupModeLoadBtn" class="setup-choice" type="button">
-            <span class="setup-choice-icon" aria-hidden="true"><img src="./mod_images/ui-folder-open.svg?v=20260712-15" alt=""></span>
+            <span class="setup-choice-icon" aria-hidden="true"><img src="./mod_images/ui-folder-open.svg?v=20260712-118" alt=""></span>
             <span class="setup-choice-copy">
               <small>Continue</small>
               <strong>加载存档</strong>
               <em id="setupLatestSaveText">检查本地存档...</em>
+            </span>
+          </button>
+          <button id="setupModeArchiveBtn" class="setup-choice setup-archive-choice" type="button">
+            <span class="setup-choice-icon setup-archive-icon" aria-hidden="true"><b>AAR</b></span>
+            <span class="setup-choice-copy">
+              <small>Campaign Archive</small>
+              <strong>战役档案</strong>
+              <em id="setupArchiveCountText">暂无已结束战役</em>
             </span>
           </button>
           <p class="setup-command-quote">
@@ -96,7 +104,7 @@
                   </select>
                 </label>
                 <section id="setupScenarioCard" class="setup-scenario-card"></section>
-                <a id="setupRulesBtn" class="setup-rules-button" href="./rules.html?v=20260712-15" target="_blank" rel="noopener">查看规则介绍</a>
+                <a id="setupRulesBtn" class="setup-rules-button" href="./rules.html?v=20260728-120" target="_blank" rel="noopener">查看规则原文</a>
                 <div class="setup-debug-fields" hidden>
                   <input id="setupTurnInput" type="number" min="1" value="1">
                   <select id="setupPhaseSelect"></select>
@@ -145,6 +153,20 @@
             </section>
           </div>
         </div>
+
+        <div id="setupArchivePanel" class="setup-mode-panel hidden">
+          <section class="setup-archive-shell" aria-label="已结束战役">
+            <header class="setup-archive-head">
+              <div>
+                <span>After Action Records</span>
+                <h2>已结束战役</h2>
+                <p>归档保存最终胜负、结束时间和完整对局日志。</p>
+              </div>
+              <button id="setupArchiveBackBtn" type="button" class="secondary-action">返回主菜单</button>
+            </header>
+            <div id="setupArchiveList" class="setup-archive-list"></div>
+          </section>
+        </div>
       </div>
 
     </section>
@@ -154,17 +176,11 @@
         <div class="topbar-brand">
           <h1 title="Alamein Judge Studio">Alamein</h1>
           <span class="topbar-theater">WESTERN DESERT · HQ</span>
-          <p><span id="appVersionText" class="version-pill">v2026.07.12.15</span></p>
+          <p><span id="appVersionText" class="version-pill">v2026.07.28.120</span></p>
         </div>
         <div class="top-actions">
-          <label class="effects-control" title="视觉效果">
-            <span aria-hidden="true">FX</span>
-            <select id="visualEffectsSelect" aria-label="视觉效果">
-              <option value="full">完整</option>
-              <option value="reduced">精简</option>
-              <option value="off">关闭</option>
-            </select>
-          </label>
+          <button id="returnHomeBtn" class="topbar-home-button" type="button" aria-label="保存并返回首页" title="保存当前对局并返回首页"><span aria-hidden="true">←</span><b>首页</b></button>
+          <a class="topbar-rule-link" href="./rules.html?v=20260728-120" target="_blank" rel="noopener">查看规则原文</a>
           <button id="sidePanelToggleBtn" class="icon-button" type="button" aria-label="收起右侧面板" title="收起右侧面板" aria-pressed="false"><span aria-hidden="true">◨</span></button>
           <button id="gameSettingsBtn" class="icon-button" type="button" aria-label="游戏设置" title="游戏设置"><span aria-hidden="true">⚙</span></button>
         </div>
@@ -173,37 +189,28 @@
 
       <main class="workspace">
         <section class="map-pane" aria-label="地图">
-          <div class="map-toolbar" aria-label="棋盘工具">
-            <div class="map-mode-switch" aria-label="地图主模式">
-              <button type="button" data-map-mode="command">指挥</button>
-              <button type="button" data-map-mode="move">移动</button>
-              <button type="button" data-map-mode="combat">战斗</button>
-              <button type="button" data-map-mode="supply">补给</button>
-            </div>
-            <div class="map-tool-cluster zoom-tools" aria-label="地图缩放">
-              <button id="zoomOutBtn" type="button" aria-label="缩小" title="缩小">-</button>
-              <input id="zoomSlider" type="range" min="35" max="180" value="72" aria-label="缩放比例">
-              <output id="zoomValue" class="zoom-value" for="zoomSlider">72%</output>
-              <button id="zoomInBtn" type="button" aria-label="放大" title="放大">+</button>
-              <button id="fitBtn" class="icon-text-button" type="button" title="适合窗口"><span aria-hidden="true">□</span><b>适合</b></button>
-            </div>
-            <div class="map-tool-cluster board-tools" aria-label="视图和图层">
-              <details class="map-view-menu">
-                <summary title="高级查看"><span aria-hidden="true">◇</span><b>视图</b><output id="viewModeBadge" class="view-mode-badge">指挥</output></summary>
-                <label class="map-view-control">高级查看
-                  <select id="mapViewModeSelect">
-                    <option value="command">指挥</option>
-                    <option value="move">移动</option>
-                    <option value="combat">战斗</option>
-                    <option value="supply">补给</option>
-                    <option value="terrain">地形</option>
-                    <option value="zoc">ZOC</option>
-                    <option value="all">全部</option>
-                  </select>
-                </label>
-              </details>
-              <details class="map-layer-menu">
-                <summary title="地图图层"><span aria-hidden="true">☰</span><b>图层</b><output id="layerCountBadge" class="layer-count-badge">4</output></summary>
+          <div class="map-layer-dock map-control-surface" aria-label="地图图层与高级查看">
+            <select id="mapViewModeSelect" hidden aria-hidden="true" tabindex="-1">
+              <option value="command">指挥</option>
+              <option value="move">移动</option>
+              <option value="combat">战斗</option>
+              <option value="supply">补给</option>
+              <option value="terrain">地形</option>
+              <option value="zoc">ZOC</option>
+              <option value="all">全部</option>
+            </select>
+            <details class="map-layer-menu">
+              <summary title="图层与高级查看" aria-label="图层与高级查看"><span aria-hidden="true">☰</span><output id="layerCountBadge" class="layer-count-badge">4</output></summary>
+              <div class="map-layer-popover">
+                <section class="map-advanced-views" aria-label="高级查看">
+                  <span>高级查看</span>
+                  <div>
+                    <button type="button" data-map-mode="command">默认</button>
+                    <button type="button" data-map-mode="terrain">地形</button>
+                    <button type="button" data-map-mode="zoc">ZOC</button>
+                    <button type="button" data-map-mode="all">全部</button>
+                  </div>
+                </section>
                 <div class="map-layer-toggles" aria-label="地图图层">
                   <label><input id="showUnitsToggle" type="checkbox" checked> 棋子</label>
                   <label><input id="showMarkersToggle" type="checkbox" checked> 标记</label>
@@ -214,10 +221,16 @@
                   <label><input id="showTerrainToggle" type="checkbox"> 地形</label>
                   <label><input id="showHexToggle" type="checkbox"> 坐标</label>
                 </div>
-              </details>
-            </div>
+              </div>
+            </details>
           </div>
-          <div id="mapLegend" class="map-legend hidden" aria-label="地图图例"></div>
+          <div class="map-zoom-dock map-control-surface" aria-label="地图缩放">
+            <button id="zoomOutBtn" type="button" aria-label="缩小" title="缩小">-</button>
+            <output id="zoomValue" class="zoom-value" for="zoomSlider">72%</output>
+            <input id="zoomSlider" type="range" min="35" max="180" value="72" aria-label="缩放比例">
+            <button id="zoomInBtn" type="button" aria-label="放大" title="放大">+</button>
+            <button id="fitBtn" class="icon-text-button" type="button" title="适合窗口" aria-label="适合窗口"><span aria-hidden="true">□</span><b>适合</b></button>
+          </div>
           <div id="mapViewport" class="map-viewport">
             <div id="mapStage" class="map-stage">
               <img id="mapImage" src="./El-Alamein-Map.jpg" alt="El Alamein map" loading="lazy" decoding="async" fetchpriority="low">
@@ -228,7 +241,6 @@
           <div id="phaseCinematicBanner" class="phase-cinematic-banner hidden" aria-hidden="true"></div>
           <div id="mapSelectionHud" class="map-selection-hud hidden" aria-live="polite"></div>
           <div id="mapActionHint" class="map-action-hint hidden" aria-live="polite"></div>
-          <div id="phaseActionDock" class="phase-action-dock" aria-live="polite"></div>
         </section>
 
         <aside class="side-panel">
@@ -243,35 +255,21 @@
             </div>
             <div class="tab-group reference-tabs" aria-label="资料">
               <span>资料</span>
-              <button class="tab" data-tab="roster">编成</button>
-              <button class="tab" data-tab="rulebook">规则</button>
-              <button class="tab" data-tab="ai">AI</button>
               <button class="tab" data-tab="log">日志</button>
             </div>
           </nav>
 
           <section id="tab-state" class="tab-panel active">
             <section id="stateBrief" class="state-brief"></section>
-            <details class="state-stats-drawer">
-              <summary>局面数字</summary>
-              <div class="stats" id="stateStats"></div>
-            </details>
             <section id="stateActionableUnits" class="actionable-units"></section>
-            <section id="selectionSummaryPanel" class="selection-summary"></section>
-            <div class="selection-detail-stack">
-              <section id="selectedUnitPanel" class="selected-unit empty"></section>
-              <section id="selectedHexPanel" class="selected-unit empty"></section>
-            </div>
+            <details id="stateRosterDrawer" class="state-roster-drawer">
+              <summary>双方部队总览</summary>
+              <div class="unit-tools">
+                <input id="unitSearch" placeholder="搜索名称 / 编号 / 坐标 / 阵营">
+              </div>
+              <div id="unitList" class="unit-list"></div>
+            </details>
             <div id="operationHint" class="operation-hint"></div>
-          </section>
-
-          <section id="tab-roster" class="tab-panel">
-            <h2>单位</h2>
-            <div class="unit-tools">
-              <input id="unitSearch" placeholder="搜索 id / 坐标 / 阵营">
-              <button id="addUnitBtn" class="quiet-action">新增单位</button>
-            </div>
-            <div id="unitList" class="unit-list"></div>
           </section>
 
           <section id="tab-judge" class="tab-panel">
@@ -285,16 +283,19 @@
               <section id="moveWorkflowCue" class="workflow-cue"></section>
               <section class="workflow-step move-command-strip">
                 <div class="workflow-step-title"><span>1</span><b>行动</b></div>
+                <select id="moveUnitSelect" class="move-unit-native" aria-hidden="true" tabindex="-1"></select>
                 <div class="move-command-grid">
-                  <label>单位
-                    <select id="moveUnitSelect"></select>
-                  </label>
-                  <label>移动方式
-                    <select id="moveModeSelect">
+                  <div class="move-mode-field">
+                    <span class="move-command-label">移动方式</span>
+                    <button id="moveModeToggleBtn" class="move-mode-toggle" type="button" aria-label="移动方式：普通移动，点击切换" aria-pressed="false">
+                      <span class="normal-mode-option">普通</span>
+                      <span class="road-mode-option">道路</span>
+                    </button>
+                    <select id="moveModeSelect" class="move-mode-native" aria-hidden="true" tabindex="-1">
                       <option value="normal">普通</option>
                       <option value="road">道路模式</option>
                     </select>
-                  </label>
+                  </div>
                   <label class="route-target-field">目标格
                     <span class="route-target-entry">
                       <input id="moveTargetInput" placeholder="例如 3013">
@@ -302,17 +303,19 @@
                     </span>
                   </label>
                 </div>
+                <small id="moveModeHint" class="move-mode-hint">选择单位后检查道路模式。</small>
               </section>
-              <section class="workflow-step move-route-area">
-                <div class="workflow-step-title"><span>2</span><b>路线裁判</b></div>
-                <details class="workflow-manual">
-                  <summary>坐标寻路</summary>
-                  <label>路径/目标坐标，空格或逗号分隔
-                    <input id="movePathInput" placeholder="例如 2307 2407 2508">
-                  </label>
-                </details>
+              <section class="workflow-step move-route-area" hidden aria-hidden="true">
+                <div class="move-route-toolbar">
+                  <div class="workflow-step-title"><span>2</span><b>路线</b></div>
+                  <details class="workflow-manual">
+                    <summary>输入坐标</summary>
+                    <label>路径坐标，使用空格或逗号分隔
+                      <input id="movePathInput" placeholder="例如 2307 2407 2508">
+                    </label>
+                  </details>
+                </div>
                 <div id="routeStatus" class="route-status"></div>
-                <div id="routeOverview" class="route-overview empty"></div>
                 <section id="moveFeedbackShell" class="workflow-feedback empty" aria-live="polite">
                   <div id="moveOutput" class="feedback-output"></div>
                 </section>
@@ -323,7 +326,7 @@
                   <button id="clearRouteBtn" class="action-hidden quiet-action">清空路线</button>
                 </div>
               </section>
-              <details id="moveSpareActions" class="workflow-manual workflow-actions workflow-spare">
+              <details id="moveSpareActions" class="workflow-manual workflow-actions workflow-spare" hidden aria-hidden="true">
                 <summary>备用操作</summary>
                 <div class="button-row">
                   <button id="enterRoadModeBtn" class="action-hidden">进入道路模式</button>
@@ -338,18 +341,40 @@
             <div class="workflow">
               <section id="combatActionableUnits" class="actionable-units"></section>
               <section id="combatWorkflowCue" class="workflow-cue"></section>
+              <section id="latestCombatReport" class="latest-combat-report hidden" aria-live="assertive"></section>
               <section class="workflow-step combat-command-strip">
-                <div class="workflow-step-title"><span>1</span><b>目标</b></div>
                 <div id="combatSelectionSummary" class="combat-selection-summary empty"></div>
+                <section id="clearMineSection" class="mine-command-strip action-hidden" aria-live="polite">
+                  <div class="mine-command-copy">
+                    <div class="mine-command-heading">
+                      <span>雷区行动</span>
+                      <details class="mine-rule-help">
+                        <summary title="查看排雷规则" aria-label="查看排雷规则">i</summary>
+                        <div>
+                          <b>作战单位</b>
+                          <p>必须位于敌方雷区，在战斗阶段掷骰。轴心国 3-6 成功，盟军 2-6 成功。</p>
+                          <b>结果</b>
+                          <p>无论成功或失败，每个单位每回合只能尝试一次；成功后雷区永久移除。</p>
+                          <b>工兵</b>
+                          <p>工兵在初始移动阶段进入敌方雷区时自动清除，不需要掷骰。</p>
+                        </div>
+                      </details>
+                    </div>
+                    <b id="mineClearTitle">清除敌方雷区</b>
+                    <small id="mineClearHint"></small>
+                  </div>
+                  <div class="mine-command-action">
+                    <span id="mineClearOdds"></span>
+                    <button id="clearMineBtn" class="action-hidden primary-action">掷骰排雷</button>
+                  </div>
+                  <input id="engineerSelect" type="hidden" value="">
+                  <input id="mineHexInput" type="hidden" value="">
+                </section>
                 <div id="combatOverview" class="combat-overview empty"></div>
                 <section id="combatFeedbackShell" class="workflow-feedback empty" aria-live="polite">
-                  <div id="combatOutput" class="feedback-output"></div>
+                <div id="combatOutput" class="feedback-output"></div>
                 </section>
                 <div id="combatTargetList" class="combat-target-list"></div>
-                <div class="button-row workflow-step-actions">
-                  <button id="useSelectedCombatBtn" class="action-hidden secondary-action">使用选中单位/目标</button>
-                  <button id="previewCombatBtn" class="action-hidden secondary-action">预览战斗</button>
-                </div>
                 <details class="workflow-manual">
                   <summary>手动战斗</summary>
                   <label>攻击单位，空格或逗号分隔
@@ -359,44 +384,21 @@
                     <input id="combatDefendersInput" placeholder="例如 0304">
                   </label>
                 </details>
-              </section>
-              <section id="combatResolveSection" class="workflow-step combat-resolve-strip action-hidden">
-                <div class="workflow-step-title"><span>2</span><b>骰子与命令</b></div>
-                <div class="combat-resolve-grid">
-                  <label>骰子
-                    <select id="combatResolveDieSelect">
-                      <option value="">预览</option>
-                      <option value="1">1</option>
-                      <option value="2">2</option>
-                      <option value="3">3</option>
-                      <option value="4">4</option>
-                      <option value="5">5</option>
-                      <option value="6">6</option>
-                    </select>
-                  </label>
-                  <label><span>不准撤退</span>
-                    <input id="noRetreatOrderToggle" type="checkbox">
-                  </label>
+                <div id="combatResolveSection" class="combat-resolution-area action-hidden">
+                  <div id="combatCrtPreview" class="combat-crt-preview hidden"></div>
+                  <div id="combatRollReveal" class="combat-roll-reveal hidden" aria-live="assertive"></div>
+                  <div id="combatRetreatPlanner" class="combat-retreat-planner hidden" aria-live="polite"></div>
+                  <input id="combatResolveDieSelect" type="hidden" value="">
+                  <div class="button-row workflow-step-actions">
+                    <button id="toggleCombatTableBtn" class="action-hidden secondary-action" type="button" aria-expanded="false">查看结果表</button>
+                    <button id="combatActionBtn" class="action-hidden primary-action">战斗</button>
+                    <button id="undoActionBtn" class="action-hidden quiet-action">撤销最近动作</button>
+                  </div>
                 </div>
-                <div class="button-row workflow-step-actions">
-                  <button id="randomCombatBtn" class="action-hidden primary-action">随机掷骰结算</button>
-                  <button id="resolveCombatBtn" class="action-hidden secondary-action">按所选骰点结算</button>
-                  <button id="undoActionBtn" class="action-hidden quiet-action">撤销最近动作</button>
-                </div>
-              </section>
-              <section id="clearMineSection" class="workflow-step mine-command-strip action-hidden">
-                <div class="workflow-step-title"><span>+</span><b>工兵清雷</b></div>
-                <div class="panel-grid two">
-                  <label>清雷单位
-                    <select id="engineerSelect"></select>
-                  </label>
-                  <label>雷区坐标
-                    <input id="mineHexInput" placeholder="例如 3208">
-                  </label>
-                </div>
-                <div class="button-row">
-                  <button id="clearMineBtn" class="action-hidden primary-action">清除雷区</button>
-                </div>
+                <details id="combatReportDrawer" class="combat-report-drawer">
+                  <summary>战报记录 <span id="combatReportCount">0</span></summary>
+                  <div id="combatReportList" class="combat-report-list"></div>
+                </details>
               </section>
             </div>
           </section>
@@ -584,24 +586,6 @@
             </details>
           </section>
 
-          <section id="tab-calibration" class="tab-panel">
-            <h2>属性校准</h2>
-            <div class="panel-grid two">
-              <label>状态
-                <select id="calibrationStatusFilter">
-                  <option value="needs_manual_review">待确认</option>
-                  <option value="all">全部</option>
-                  <option value="verified">已确认</option>
-                </select>
-              </label>
-              <label>搜索
-                <input id="calibrationSearch" placeholder="名称 / id / 坐标">
-              </label>
-            </div>
-            <div id="calibrationStats" class="stats"></div>
-            <div id="calibrationList" class="calibration-list"></div>
-          </section>
-
           <section id="tab-ai" class="tab-panel">
             <div class="ai-control-board" aria-label="AI 控制">
               <section class="ai-control-status">
@@ -676,6 +660,20 @@
                     <option value="july">July 18.1</option>
                     <option value="september">September 18.2</option>
                     <option value="october">October 18.3</option>
+                  </select>
+                </label>
+                <label>视觉效果
+                  <select id="visualEffectsSelect" aria-label="视觉效果">
+                    <option value="full">完整</option>
+                    <option value="reduced">精简</option>
+                    <option value="off">关闭</option>
+                  </select>
+                </label>
+                <label>AI 行动速度
+                  <select id="aiPlaybackSpeedSelect" aria-label="AI 行动速度">
+                    <option value="slow">慢速（推荐）</option>
+                    <option value="normal">标准</option>
+                    <option value="fast">快速</option>
                   </select>
                 </label>
               </div>
@@ -757,6 +755,38 @@
               <label>阶段（调试）
                 <select id="phaseSelect"></select>
               </label>
+              <label>战斗骰点（调试）
+                <select id="combatDebugDieSelect">
+                  <option value="">自动掷骰</option>
+                  <option value="1">固定为 1</option>
+                  <option value="2">固定为 2</option>
+                  <option value="3">固定为 3</option>
+                  <option value="4">固定为 4</option>
+                  <option value="5">固定为 5</option>
+                  <option value="6">固定为 6</option>
+                </select>
+              </label>
+            </details>
+            <details id="unitDebugDrawer" class="workflow-manual settings-advanced">
+              <summary>高级单位数据</summary>
+              <div class="unit-debug-toolbar">
+                <button id="addUnitBtn" class="quiet-action">新增单位</button>
+                <span>仅用于场景制作和数据校准</span>
+              </div>
+              <div class="panel-grid two">
+                <label>校准状态
+                  <select id="calibrationStatusFilter">
+                    <option value="needs_manual_review">待确认</option>
+                    <option value="all">全部</option>
+                    <option value="verified">已确认</option>
+                  </select>
+                </label>
+                <label>搜索单位
+                  <input id="calibrationSearch" placeholder="名称 / 编号 / 坐标">
+                </label>
+              </div>
+              <div id="calibrationStats" class="stats"></div>
+              <div id="calibrationList" class="calibration-list"></div>
             </details>
             <details class="workflow-manual settings-advanced">
               <summary>高级地图校准</summary>
@@ -786,12 +816,15 @@
         <h2 id="afterActionTitle">战役结束</h2>
         <p id="afterActionReason"></p>
         <div id="afterActionFacts" class="after-action-facts"></div>
-        <button id="closeAfterActionBtn" type="button" class="primary-action">返回战区</button>
+        <div class="after-action-actions">
+          <button id="afterActionViewLogBtn" type="button" class="primary-action">查看对局日志</button>
+          <button id="afterActionHomeBtn" type="button" class="secondary-action">返回首页</button>
+        </div>
       </div>
     </section>
 
-    <script src="./ai_config.js?v=20260712-15"></script>
-    <script src="./rule_engine.js?v=20260712-15"></script>
-    <script src="./app.js?v=20260712-15"></script>
+    <script src="./ai_config.js?v=20260728-120"></script>
+    <script src="./rule_engine.js?v=20260728-120"></script>
+    <script src="./app.js?v=20260728-120"></script>
   </body>
 </html>

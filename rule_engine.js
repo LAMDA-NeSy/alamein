@@ -1,5 +1,5 @@
 /*
- * First Alamein rule engine for the Web Studio.
+ * El Alamein rule engine for the Web Studio.
  *
  * This file is intentionally dependency-free and usable from both the browser
  * and Node-based tests. It owns the rule decisions; app.js owns rendering,
@@ -38,7 +38,6 @@
     stacking: {
       allied_max_units_per_hex: 3,
       axis_max_units_per_hex: 4,
-      max_divisions_per_hex: 2,
       one_side_per_hex: true
     },
     movement: {
@@ -69,12 +68,14 @@
   const SCENARIO_META = {
     july: {
       first_player: "axis",
+      starting_turn: 1,
       final_turn: 7,
       starting_vp: 25,
       needs_review: false
     },
     september: {
       first_player: "axis",
+      starting_turn: 1,
       final_turn: 7,
       starting_vp: 35,
       skip_phases: [{ turn: 1, phase: "allies_initial_movement", next: "allies_combat" }],
@@ -82,6 +83,7 @@
     },
     october: {
       first_player: "allies",
+      starting_turn: 1,
       final_turn: 15,
       starting_vp: -20,
       needs_review: true,
@@ -176,6 +178,38 @@
     return SCENARIO_META[scenario]?.starting_vp ?? fallback;
   }
 
+  function coastlineHexes(terrain) {
+    const coastline = terrain?.notes?.coastline || terrain?.notes?.coastal_road;
+    if (!Array.isArray(coastline)) return new Set();
+    const result = new Set();
+    for (const rawHex of coastline) {
+      try { result.add(normalizeHex(rawHex)); }
+      catch {
+        // Ignore incomplete terrain-review placeholders.
+      }
+    }
+    return result;
+  }
+
+  function coastalSeaHexes(terrain) {
+    const coastline = coastlineHexes(terrain);
+    const firstLandRowByColumn = new Map();
+    for (const hex of coastline) {
+      const col = Number(hex.slice(0, 2));
+      const row = Number(hex.slice(2, 4));
+      firstLandRowByColumn.set(col, Math.min(firstLandRowByColumn.get(col) ?? row, row));
+    }
+    const result = new Set();
+    for (const [col, firstLandRow] of firstLandRowByColumn) {
+      const bounds = COLUMN_ROW_BOUNDS[col];
+      if (!bounds) continue;
+      for (let row = bounds[0]; row < firstLandRow; row += 1) {
+        result.add(`${String(col).padStart(2, "0")}${String(row).padStart(2, "0")}`);
+      }
+    }
+    return result;
+  }
+
   function createContext(input) {
     const state = input.state;
     const rules = { ...DEFAULT_RULES, ...(input.rules || {}) };
@@ -186,10 +220,14 @@
     rules.combat = { ...DEFAULT_RULES.combat, ...(input.rules?.combat || {}) };
     const terrain = input.terrain || { hexes: {}, edges: {} };
     const roadPath = state?.scenario_meta?.road_path || input.roadPath || terrain.notes?.coastal_road || DEFAULT_ROAD_PATH;
+    const normalizedRoadPath = roadPath.map((hex) => {
+      try { return normalizeHex(hex); }
+      catch { return null; }
+    }).filter(Boolean);
     const roadEdges = new Set();
-    for (let i = 1; i < roadPath.length; i += 1) {
+    for (let i = 1; i < normalizedRoadPath.length; i += 1) {
       try {
-        roadEdges.add(normalizeEdge(roadPath[i - 1], roadPath[i]));
+        roadEdges.add(normalizeEdge(normalizedRoadPath[i - 1], normalizedRoadPath[i]));
       }
       catch {
         // Keep data-review placeholders from breaking the engine.
@@ -199,10 +237,9 @@
       state,
       rules,
       terrain,
-      roadPath: roadPath.map((hex) => {
-        try { return normalizeHex(hex); }
-        catch { return null; }
-      }).filter(Boolean),
+      roadPath: normalizedRoadPath,
+      coastlineHexes: coastlineHexes(terrain),
+      allSeaHexes: coastalSeaHexes(terrain),
       roadEdges
     };
   }
@@ -226,7 +263,7 @@
   }
 
   function isCombatUnit(unit) {
-    return isMapCounter(unit) && isPlayableSide(unit.side) && (unit.kind || "ground") === "ground" && !unit.eliminated;
+    return isMapCounter(unit) && isPlayableSide(unit.side) && ((unit.kind || "ground") === "ground" || isEngineer(unit)) && !unit.eliminated;
   }
 
   function canAttackUnit(unit) {
@@ -241,6 +278,10 @@
 
   function isMineUnit(unit) {
     return isMapCounter(unit) && unit.kind === "mine" && !unit.eliminated && unit.hex && !unit.cleared;
+  }
+
+  function isStackingUnit(unit) {
+    return isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit);
   }
 
   function isMechanized(ctx, unit) {
@@ -311,8 +352,12 @@
   }
 
   function hexTags(ctx, hex) {
-    const tags = ctx.terrain.hexes?.[normalizeHex(hex)] || [];
-    return Array.isArray(tags) ? tags : [tags];
+    const normalized = normalizeHex(hex);
+    const tags = ctx.terrain.hexes?.[normalized] || [];
+    const list = Array.isArray(tags) ? [...tags] : [tags];
+    if (ctx.coastlineHexes?.has(normalized) && !list.includes("coastline")) list.push("coastline");
+    if (ctx.allSeaHexes?.has(normalized) && !list.includes("sea") && !list.includes("all_sea")) list.push("all_sea");
+    return list;
   }
 
   function hexDirection(origin, target) {
@@ -332,7 +377,7 @@
 
   function roadModeSpaceIssue(ctx, unit, hex, facing, sourceState = ctx.state) {
     const testUnit = { ...unit, hex: normalizeHex(hex), road_mode: true, road_facing: facing, facing };
-    const grouped = unitsByHex(ctx, unitsArray(ctx, sourceState));
+    const grouped = unitsByHex(ctx, unitsArray(ctx, sourceState).filter(isStackingUnit));
     for (const space of roadModeSpaceHexes(testUnit)) {
       const occupants = (grouped[space] || []).filter((item) => item.id !== unit.id);
       if (occupants.length) return `道路模式前/后方 ${space} 必须保持空置`;
@@ -344,7 +389,7 @@
   }
 
   function zocHexes(unit) {
-    if (!isCombatUnit(unit)) return [];
+    if (!isCombatUnit(unit) || isEngineer(unit)) return [];
     return unit.road_mode ? roadModeZocHexes(unit) : neighbors(unit.hex);
   }
 
@@ -361,7 +406,7 @@
   }
 
   function occupiedByFriendly(ctx, side) {
-    return unitsByHex(ctx, unitsArray(ctx).filter((unit) => unit.side === side && !unit.eliminated && isMapCounter(unit)));
+    return unitsByHex(ctx, unitsArray(ctx).filter((unit) => unit.side === side && !unit.eliminated && isStackingUnit(unit)));
   }
 
   function terrainKeyForMove(ctx, unit, target) {
@@ -392,6 +437,36 @@
     const value = table?.[key]?.[mechanized ? "mechanized" : "non_mechanized"];
     if (value == null) return { cost: Infinity, reason: `${target} 是禁止进入地形` };
     return { cost: Number(value || ctx.rules.movement.default_hex_cost || 1), terrain: tags.includes("road") ? "clear_road" : key, road: tags.includes("road") };
+  }
+
+  function movementCostSummary(steps = []) {
+    const terrainLabels = {
+      clear: "清晰地形",
+      clear_road: "普通道路",
+      hill_or_ridge: "山脊",
+      depression: "洼地",
+      enemy_minefield: "敌方雷区",
+      road_mode: "道路移动"
+    };
+    const formatStep = (step) => {
+      const cost = `${Number(step.cost || 0)} MP`;
+      if (step.terrain === "leave_stack") return `离开 ${step.from} 堆叠 ${cost}`;
+      if (step.terrain === "enter_stack") return `进入 ${step.to} 堆叠 ${cost}`;
+      if (step.terrain === "enter_road_mode") return `进入道路模式 ${cost}`;
+      if (step.terrain === "leave_road_mode") return `退出道路模式 ${cost}`;
+      return `${step.from} → ${step.to} ${terrainLabels[step.terrain] || step.terrain || "移动"} ${cost}`;
+    };
+    if (steps.length <= 8) return steps.map(formatStep);
+    const special = steps.filter((step) => ["leave_stack", "enter_stack", "enter_road_mode", "leave_road_mode"].includes(step.terrain)).map(formatStep);
+    const grouped = new Map();
+    for (const step of steps.filter((item) => !["leave_stack", "enter_stack", "enter_road_mode", "leave_road_mode"].includes(item.terrain))) {
+      const label = terrainLabels[step.terrain] || step.terrain || "移动";
+      const current = grouped.get(label) || { count: 0, cost: 0 };
+      current.count += 1;
+      current.cost += Number(step.cost || 0);
+      grouped.set(label, current);
+    }
+    return [...special, ...[...grouped].map(([label, value]) => `${label} ${value.count} 格，共 ${value.cost} MP`)];
   }
 
   function effectiveMovement(ctx, unit) {
@@ -439,7 +514,7 @@
     const checkedHexes = options.hexes ? new Set(options.hexes.map(normalizeHex)) : null;
     const allCheckedUnits = Object.entries(sourceState.units || {})
         .map(([id, unit]) => ({ ...unit, id }))
-        .filter((unit) => isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit));
+        .filter(isStackingUnit);
     const grouped = unitsByHex(ctx, allCheckedUnits);
     const issues = [];
     for (const [hex, units] of Object.entries(grouped)) {
@@ -453,8 +528,6 @@
           : Number(ctx.rules.stacking.allied_max_units_per_hex || 3);
         if (counted.length > maxUnits) issues.push(`${hex}: ${side} ${counted.length} 个单位，超过 ${maxUnits}`);
       }
-      const divisions = units.filter((unit) => unit.size === "division" && !isEngineer(unit)).length;
-      if (divisions > Number(ctx.rules.stacking.max_divisions_per_hex || 2)) issues.push(`${hex}: ${divisions} 个师，超过 ${ctx.rules.stacking.max_divisions_per_hex || 2}`);
       if (units.some((unit) => unit.road_mode) && units.length > 1) issues.push(`${hex}: 道路模式单位不能堆叠`);
     }
     const roadUnits = allCheckedUnits.filter((unit) => unit.road_mode && unit.hex && !unit.eliminated);
@@ -472,6 +545,72 @@
       }
     }
     return { legal: issues.length === 0, reason: issues.length ? issues.join("\n") : "堆叠合法" };
+  }
+
+  function stackingLimitForSide(ctx, side) {
+    return side === "axis"
+      ? Number(ctx.rules.stacking.axis_max_units_per_hex || 4)
+      : Number(ctx.rules.stacking.allied_max_units_per_hex || 3);
+  }
+
+  function countedStackingUnitsAt(ctx, side, hex, sourceState = ctx.state) {
+    const target = normalizeHex(hex);
+    return unitsArray(ctx, sourceState)
+      .filter((unit) => isStackingUnit(unit)
+        && unit.side === side
+        && unit.hex
+        && normalizeHex(unit.hex) === target
+        && !isEngineer(unit));
+  }
+
+  function hexExceedsStackingLimit(ctx, side, hex, sourceState = ctx.state) {
+    return countedStackingUnitsAt(ctx, side, hex, sourceState).length > stackingLimitForSide(ctx, side);
+  }
+
+  function temporaryOverstackGroups(ctx, side = null) {
+    const markedHexes = new Set(unitsArray(ctx)
+      .filter((unit) => (!side || unit.side === side) && unit.temporary_overstack && unit.hex && !unit.eliminated)
+      .map((unit) => normalizeHex(unit.hex)));
+    const groups = [];
+    for (const hex of markedHexes) {
+      const units = unitsArray(ctx).filter((unit) => isStackingUnit(unit) && unit.hex && normalizeHex(unit.hex) === hex && !unit.eliminated);
+      const groupSide = units.find((unit) => isPlayableSide(unit.side))?.side;
+      if (!groupSide || (side && groupSide !== side)) continue;
+      const counted = units.filter((unit) => unit.side === groupSide && !isEngineer(unit));
+      const limit = stackingLimitForSide(ctx, groupSide);
+      if (counted.length <= limit) continue;
+      groups.push({
+        hex,
+        side: groupSide,
+        limit,
+        excess: counted.length - limit,
+        unit_ids: units.filter((unit) => unit.side === groupSide).map((unit) => unit.id),
+        removable_unit_ids: counted.map((unit) => unit.id)
+      });
+    }
+    return groups.sort((a, b) => a.hex.localeCompare(b.hex));
+  }
+
+  function markTemporaryOverstackAt(ctx, hex) {
+    const target = normalizeHex(hex);
+    const group = unitsArray(ctx).filter((unit) => isStackingUnit(unit) && unit.hex && normalizeHex(unit.hex) === target && !unit.eliminated);
+    const side = group.find((unit) => isPlayableSide(unit.side))?.side;
+    if (!side || !hexExceedsStackingLimit(ctx, side, target)) return [];
+    const marked = [];
+    for (const unit of group.filter((item) => item.side === side)) {
+      ctx.state.units[unit.id].temporary_overstack = true;
+      marked.push(unit.id);
+    }
+    return marked;
+  }
+
+  function clearTemporaryOverstackAt(ctx, hex) {
+    const target = normalizeHex(hex);
+    for (const unit of unitsArray(ctx)) {
+      if (unit.hex && normalizeHex(unit.hex) === target && ctx.state.units[unit.id]) {
+        ctx.state.units[unit.id].temporary_overstack = false;
+      }
+    }
   }
 
   function canMoveInCurrentPhase(ctx, unit) {
@@ -525,9 +664,7 @@
 
   function checkScenarioMoveRestriction(ctx, unit, path) {
     if (ctx.state.scenario === "october" && unit.side === "axis" && Number(ctx.state.turn || 1) <= 10) {
-      const startCol = Number(path[0].slice(0, 2));
-      const movedWest = path.some((hex) => Number(hex.slice(0, 2)) < startCol);
-      if (movedWest && path.some((hex) => Number(hex.slice(0, 2)) < 18)) {
+      if (path.some((hex) => Number(hex.slice(0, 2)) < 18)) {
         return { legal: false, reason: "October 特殊规则：第 10 回合结束前 Axis 不能向西越过撤退线" };
       }
     }
@@ -541,9 +678,7 @@
   }
 
   function temporaryOverstackHexes(ctx, side) {
-    return new Set(unitsArray(ctx)
-      .filter((unit) => unit.side === side && unit.temporary_overstack && unit.hex && !unit.eliminated)
-      .map((unit) => normalizeHex(unit.hex)));
+    return new Set(temporaryOverstackGroups(ctx, side).map((group) => group.hex));
   }
 
   function checkMove(ctx, unitId, rawPath, options = {}) {
@@ -563,7 +698,7 @@
     if (normalizeHex(fullUnit.hex) !== path[0]) return { legal: false, reason: `路径起点是 ${path[0]}，但单位在 ${fullUnit.hex}` };
     if (mustRepairOverstack && !overstackHexes.has(path[0])) return { legal: false, reason: "必须先移动临时超堆叠 hex 中的单位以恢复合法堆叠" };
     if (!mayLeaveEnemyZoc(ctx, fullUnit, path[0])) return { legal: false, reason: "单个单位不能自愿离开敌方 ZOC，必须有友军留守" };
-    if (enemyMinesAt(ctx, fullUnit.side, path[0]).length && !fullUnit.mine_cleared_entry && !isEngineer(fullUnit)) {
+    if (enemyMinesAt(ctx, fullUnit.side, path[0]).length && !isEngineer(fullUnit)) {
       return { legal: false, reason: `${path[0]} 是敌方雷区，非工兵不能自愿离开，必须先清雷` };
     }
     const scenarioRule = checkScenarioMoveRestriction(ctx, fullUnit, path);
@@ -622,16 +757,39 @@
       if (targetZoc.size && i !== path.length - 1) return { legal: false, reason: `${unitId} 进入敌 ZOC ${target} 后必须停止` };
     }
 
-    if (spent > allowance) return { legal: false, reason: `移动力 ${allowance}，路径消耗 ${spent}`, details: { spent, allowance } };
+    if (spent > allowance) {
+      const costs = movementCostSummary(steps);
+      return {
+        legal: false,
+        reason: `移动力 ${allowance} MP，不足以完成路线；共需要 ${spent} MP${costs.length ? `：${costs.join(" + ")}` : ""}`,
+        details: { spent, allowance, steps, costs }
+      };
+    }
     const projected = clone(ctx.state);
     projected.units[unitId].hex = path[path.length - 1];
     projected.units[unitId].road_mode = options.mode === "road";
     projected.units[unitId].road_facing = path.length > 1 ? hexDirection(path[path.length - 2], path[path.length - 1]) : projected.units[unitId].road_facing;
     projected.units[unitId].facing = projected.units[unitId].road_facing;
     projected.units[unitId].temporary_overstack = false;
-    const stacking = checkStacking(ctx, projected, { hexes: [path[0], path[path.length - 1]] });
-    if (!stacking.legal) return stacking;
-    return { legal: true, reason: "移动合法", details: { spent, allowance, destination: path[path.length - 1], mode: options.mode || "normal", steps, repaired_temporary_overstack: mustRepairOverstack && overstackHexes.has(path[0]) } };
+    const repairingOrigin = mustRepairOverstack && overstackHexes.has(path[0]);
+    const destinationStacking = checkStacking(ctx, projected, { hexes: [path[path.length - 1]] });
+    if (!destinationStacking.legal) return destinationStacking;
+    const originStacking = checkStacking(ctx, projected, { hexes: [path[0]] });
+    if (!originStacking.legal && !repairingOrigin) return originStacking;
+    const repairComplete = repairingOrigin && !hexExceedsStackingLimit(ctx, fullUnit.side, path[0], projected);
+    return {
+      legal: true,
+      reason: repairComplete ? "移动合法，临时超堆叠已恢复" : repairingOrigin ? "移动合法，必须继续优先恢复临时超堆叠" : "移动合法",
+      details: {
+        spent,
+        allowance,
+        destination: path[path.length - 1],
+        mode: options.mode || "normal",
+        steps,
+        repaired_temporary_overstack: repairComplete,
+        progressed_temporary_overstack: repairingOrigin && !repairComplete
+      }
+    };
   }
 
   function checkLeaveRoadMode(ctx, unitId) {
@@ -715,16 +873,94 @@
     return result;
   }
 
+  function diagnoseUnreachableMove(ctx, unitId, targetHex, options = {}) {
+    const unit = ctx.state.units?.[unitId];
+    if (!unit?.hex) return { legal: false, reason: `找不到单位 ${unitId} 或单位不在地图上` };
+    let target;
+    try { target = normalizeHex(targetHex); }
+    catch (error) { return { legal: false, reason: error.message }; }
+    const start = normalizeHex(unit.hex);
+    if (start === target) return { legal: false, reason: `${unitId} 已经位于 ${target}` };
+
+    const direct = checkMove(ctx, unitId, [start, target], options);
+    if (neighbors(start).includes(target) || !String(direct.reason || "").includes("不是相邻格")) {
+      return {
+        ...direct,
+        legal: false,
+        reason: `${start} → ${target} 不能移动：${direct.reason || "裁判拒绝这一步"}`,
+        details: { ...(direct.details || {}), start, target, blocked_step: [start, target] }
+      };
+    }
+
+    const enemyAtTarget = occupiedByEnemy(ctx, unit.side)[target] || [];
+    if (enemyAtTarget.length) {
+      return {
+        legal: false,
+        reason: `${target} 有敌军 ${enemyAtTarget.map((item) => item.name || item.id).join("、")}，移动不能进入敌军占据格；应在战斗阶段发起攻击`,
+        details: { start, target, category: "enemy_occupied", units: enemyAtTarget.map((item) => item.id) }
+      };
+    }
+
+    const projected = clone(ctx.state);
+    projected.units[unitId].hex = target;
+    projected.units[unitId].temporary_overstack = false;
+    const targetStacking = checkStacking(ctx, projected, { hexes: [target] });
+    if (!targetStacking.legal) {
+      return {
+        legal: false,
+        reason: `${target} 不能作为终点：${targetStacking.reason}`,
+        details: { start, target, category: "stacking" }
+      };
+    }
+
+    const reachable = reachableHexes(ctx, unitId, options);
+    const approaches = neighbors(target)
+      .map((hex) => ({ hex, route: reachable.get(hex) }))
+      .filter((item) => item.route)
+      .sort((a, b) => Number(a.route.cost || 0) - Number(b.route.cost || 0));
+    for (const approach of approaches) {
+      const path = [...approach.route.path, target];
+      const verdict = checkMove(ctx, unitId, path, options);
+      if (!verdict.legal) {
+        return {
+          legal: false,
+          reason: `最接近目标的合法路线可到 ${approach.hex}，但 ${approach.hex} → ${target} 被阻止：${verdict.reason}`,
+          details: { ...(verdict.details || {}), start, target, approach: approach.hex, path, blocked_step: [approach.hex, target] }
+        };
+      }
+    }
+
+    const firstStepFailures = neighbors(start)
+      .map((hex) => ({ hex, verdict: checkMove(ctx, unitId, [start, hex], options) }))
+      .filter((item) => !item.verdict.legal);
+    const reasons = [...new Set(firstStepFailures.map((item) => item.verdict.reason).filter(Boolean))];
+    if (firstStepFailures.length === neighbors(start).length && reasons.length) {
+      return {
+        legal: false,
+        reason: `${start} 无法走出第一步：${reasons.slice(0, 3).join("；")}`,
+        details: { start, target, category: "origin_blocked", reasons }
+      };
+    }
+
+    const allowance = effectiveMovement(ctx, { ...unit, id: unitId });
+    return {
+      legal: false,
+      reason: `${start} → ${target} 在 ${allowance} MP 内没有合法路线；途中受到地形费用、ZOC 停止或堆叠限制`,
+      details: { start, target, allowance, category: "no_complete_route" }
+    };
+  }
+
   function supplyBlockedHexes(ctx, side) {
     const blocked = new Set();
-    const friendlyHexes = new Set(unitsArray(ctx).filter((unit) => unit.side === side && !unit.eliminated && isMapCounter(unit)).map((unit) => normalizeHex(unit.hex)));
-    for (const enemy of enemyUnits(ctx, side)) {
+    const friendlyHexes = new Set(unitsArray(ctx).filter((unit) => unit.side === side && unit.hex && !unit.eliminated && isMapCounter(unit)).map((unit) => normalizeHex(unit.hex)));
+    for (const enemy of enemyUnits(ctx, side).filter((unit) => unit.hex)) {
       blocked.add(normalizeHex(enemy.hex));
       for (const hx of zocHexes(enemy)) {
         if (!friendlyHexes.has(hx)) blocked.add(hx);
       }
     }
-    for (const mine of mineUnits(ctx).filter((mine) => mine.side === oppositeSide(side))) blocked.add(normalizeHex(mine.hex));
+    for (const mine of mineUnits(ctx).filter((mine) => mine.side === oppositeSide(side) && mine.hex)) blocked.add(normalizeHex(mine.hex));
+    for (const hex of ctx.allSeaHexes || []) blocked.add(hex);
     for (const [hex, tagsRaw] of Object.entries(ctx.terrain.hexes || {})) {
       const tags = Array.isArray(tagsRaw) ? tagsRaw : [tagsRaw];
       if (tags.includes("depression") || tags.includes("sea") || tags.includes("all_sea")) blocked.add(normalizeHex(hex));
@@ -743,10 +979,13 @@
   }
 
   function roadMarkerHex(ctx, side) {
-    const marker = ctx.state.road_supply_markers?.[side];
-    if (marker) return normalizeHex(marker);
-    const markerUnit = unitsArray(ctx).find((unit) => unit.side === side && /supply.vanguard|vanguard/i.test(`${unit.name || ""} ${unit.image || ""}`) && unit.hex);
-    return markerUnit ? normalizeHex(markerUnit.hex) : null;
+    const markerUnits = unitsArray(ctx).filter((unit) => unit.side === side && /supply.vanguard|vanguard/i.test(`${unit.name || ""} ${unit.image || ""}`));
+    if (markerUnits.length) {
+      const markerUnit = markerUnits.find((unit) => isMapCounter(unit) && !unit.eliminated && unit.hex);
+      return markerUnit ? normalizeHex(markerUnit.hex) : null;
+    }
+    const legacyMarker = ctx.state.road_supply_markers?.[side];
+    return legacyMarker && onMap(legacyMarker) ? normalizeHex(legacyMarker) : null;
   }
 
   function activeRoadSegment(ctx, side) {
@@ -760,7 +999,7 @@
     const blocked = supplyBlockedHexes(ctx, side);
     const segment = new Set();
     for (const hex of range) {
-      if (blocked.has(hex) && hex !== marker) break;
+      if (blocked.has(hex)) break;
       segment.add(hex);
     }
     return segment;
@@ -768,10 +1007,10 @@
 
   function supplyDistancesFromSources(ctx, side, sources) {
     const blocked = supplyBlockedHexes(ctx, side);
+    const usableSources = new Set([...sources].filter((source) => source && onMap(source) && !blocked.has(normalizeHex(source))));
     const distances = new Map();
     const queue = [];
-    for (const source of sources) {
-      if (!source || !onMap(source)) continue;
+    for (const source of usableSources) {
       distances.set(normalizeHex(source), 0);
       queue.push(normalizeHex(source));
     }
@@ -780,7 +1019,7 @@
       const distance = distances.get(hex);
       for (const nb of neighbors(hex)) {
         if (distances.has(nb)) continue;
-        if (blocked.has(nb) && !sources.has(nb)) continue;
+        if (blocked.has(nb) && !usableSources.has(nb)) continue;
         distances.set(nb, distance + 1);
         queue.push(nb);
       }
@@ -797,7 +1036,7 @@
     while (changed) {
       changed = false;
       const distances = supplyDistancesFromSources(ctx, side, sources);
-      for (const unit of unitsArray(ctx).filter((item) => item.side === side && isSupplyUnit(item))) {
+      for (const unit of unitsArray(ctx).filter((item) => item.side === side && item.hex && isSupplyUnit(item))) {
         const hx = normalizeHex(unit.hex);
         if (!sources.has(hx) && distances.has(hx) && distances.get(hx) <= 4) {
           sources.add(hx);
@@ -823,6 +1062,7 @@
     const raw = ctx.state.units?.[unitId];
     if (!raw) return "unknown";
     if (raw.eliminated) return "eliminated";
+    if (raw.off_map || !raw.hex) return "off_map";
     const unit = { ...raw, id: unitId };
     if (ctx.state.scenario === "july" && unit.side === "allies" && hexTags(ctx, unit.hex).includes("alamein_box")) return "supplied";
     const net = network || buildSupplyNetwork(ctx, unit.side);
@@ -848,7 +1088,7 @@
   function checkSupply(ctx, side = ctx.state.active_side) {
     const result = {};
     const network = buildSupplyNetwork(ctx, side);
-    for (const unit of unitsArray(ctx).filter((item) => item.side === side && (isCombatUnit(item) || isSupplyUnit(item) || isEngineer(item)))) {
+    for (const unit of unitsArray(ctx).filter((item) => item.side === side && item.hex && !item.off_map && (isCombatUnit(item) || isSupplyUnit(item) || isEngineer(item)))) {
       result[unit.id] = supplyState(ctx, unit.id, network);
     }
     return result;
@@ -891,7 +1131,7 @@
   function adjacentCombats(ctx, side = ctx.state.active_side) {
     const enemyByHex = unitsByHex(ctx, enemyUnits(ctx, side));
     const pairs = [];
-    for (const unit of friendlyUnits(ctx, side)) {
+    for (const unit of friendlyUnits(ctx, side).filter(canAttackUnit)) {
       for (const nb of neighbors(unit.hex)) {
         if (enemyByHex[nb]) pairs.push({ attacker: unit.id, attacker_hex: normalizeHex(unit.hex), defender_hex: nb, defenders: enemyByHex[nb].map((item) => item.id) });
       }
@@ -961,7 +1201,7 @@
     if (attackers.some((unit) => !canAttackUnit(unit))) return { legal: false, reason: "只有可攻击的作战单位可以攻击，括号战力单位不能攻击" };
     if (attackers.some((unit) => unit.state !== "fresh" || unit.attacked_this_turn || unit.attacked_this_phase)) return { legal: false, reason: "已行动或已攻击单位不能再次攻击" };
     if (attackers.some((unit) => supplyState(ctx, unit.id) === "isolated")) return { legal: false, reason: "孤立单位不能攻击" };
-    if (attackers.some((unit) => enemyMinesAt(ctx, unit.side, unit.hex).length && !unit.mine_cleared_entry)) return { legal: false, reason: "位于未清除敌方雷区中的单位不能攻击" };
+    if (attackers.some((unit) => enemyMinesAt(ctx, unit.side, unit.hex).length)) return { legal: false, reason: "位于未清除敌方雷区中的单位不能攻击" };
     if (attackers.some((unit) => unit.just_cleared_mine_hex && normalizeHex(unit.hex) === normalizeHex(unit.just_cleared_mine_hex))) return { legal: false, reason: "本玩家回合刚清除雷区的单位不能从该 hex 攻击" };
     if (attackers.some((unit) => !defenderHexes.some((hex) => neighbors(unit.hex).includes(hex)))) {
       return { legal: false, reason: "每个攻击单位必须邻接至少一个本次攻击的防御 hex" };
@@ -1045,10 +1285,34 @@
     return [sourceDistance, terrainRank, friendlies];
   }
 
-  function bestRetreatHex(ctx, unit, current, enemySide) {
-    return neighbors(current)
+  function retreatWouldOverstack(ctx, unit, hex) {
+    if (isEngineer(unit)) return false;
+    const existing = countedStackingUnitsAt(ctx, unit.side, hex).filter((item) => item.id !== unit.id).length;
+    return existing + 1 > stackingLimitForSide(ctx, unit.side);
+  }
+
+  function retreatOptions(ctx, unitOrId, currentHex = null) {
+    const id = typeof unitOrId === "string" ? unitOrId : unitOrId?.id;
+    const raw = typeof unitOrId === "string" ? ctx.state.units?.[unitOrId] : unitOrId;
+    if (!raw || !id) return [];
+    const current = normalizeHex(currentHex || raw.hex);
+    const unit = { ...raw, id, hex: current };
+    const ranked = neighbors(current)
       .filter((hex) => legalRetreatHex(ctx, unit, hex))
-      .sort((a, b) => compareTuples(retreatPriorityTuple(ctx, unit, a), retreatPriorityTuple(ctx, unit, b)))[0] || null;
+      .map((hex) => ({ hex, priority: retreatPriorityTuple(ctx, unit, hex) }))
+      .sort((a, b) => compareTuples(a.priority, b.priority) || a.hex.localeCompare(b.hex));
+    if (!ranked.length) return [];
+    const best = ranked[0].priority;
+    const priorityOptions = ranked.filter((option) => compareTuples(option.priority, best) === 0);
+    const withinLimit = priorityOptions.filter((option) => !retreatWouldOverstack(ctx, unit, option.hex));
+    if (withinLimit.length) return withinLimit;
+    return priorityOptions.length === 1
+      ? priorityOptions.map((option) => ({ ...option, temporary_overstack: true }))
+      : [];
+  }
+
+  function bestRetreatHex(ctx, unit, current, enemySide) {
+    return retreatOptions(ctx, unit, current)[0]?.hex || null;
   }
 
   function hexDistance(a, b) {
@@ -1057,13 +1321,99 @@
     return Math.abs(ac - bc) + Math.abs(ar - br);
   }
 
-  function retreatUnits(ctx, unitIds, count, enemySide) {
+  function planRetreats(ctx, unitIds, count, retreatPaths = {}) {
+    const simulation = createContext({ state: clone(ctx.state), rules: ctx.rules, terrain: ctx.terrain, roadPath: ctx.roadPath });
+    const paths = {};
+    const destinations = {};
+    const eliminated = [];
+    for (const id of unitIds) {
+      const unit = simulation.state.units?.[id];
+      if (!unit || unit.eliminated) continue;
+      const requested = Array.isArray(retreatPaths?.[id]) ? retreatPaths[id] : [];
+      if (requested.length > count) return { legal: false, complete: false, reason: `${id} 撤退路线超过 ${count} 格` };
+      paths[id] = [];
+      let current = normalizeHex(unit.hex);
+      let blocked = false;
+      for (let step = 0; step < count; step += 1) {
+        const options = retreatOptions(simulation, { ...unit, id, hex: current }, current);
+        if (!options.length) {
+          unit.eliminated = true;
+          unit.eliminated_reason = "blocked_retreat";
+          eliminated.push(id);
+          blocked = true;
+          break;
+        }
+        if (requested[step] == null) {
+          return {
+            legal: true,
+            complete: false,
+            reason: `${id} 需要选择第 ${step + 1} 格撤退位置`,
+            paths,
+            destinations,
+            eliminated,
+            pending: { unit: id, from: current, step: step + 1, total: count, options }
+          };
+        }
+        let chosen;
+        try { chosen = normalizeHex(requested[step]); }
+        catch (error) { return { legal: false, complete: false, reason: error.message, paths, destinations, eliminated }; }
+        if (!options.some((option) => option.hex === chosen)) {
+          return {
+            legal: false,
+            complete: false,
+            reason: `${chosen} 不符合 ${id} 第 ${step + 1} 格撤退优先级`,
+            paths,
+            destinations,
+            eliminated,
+            pending: { unit: id, from: current, step: step + 1, total: count, options }
+          };
+        }
+        paths[id].push(chosen);
+        current = chosen;
+        unit.hex = current;
+      }
+      if (blocked) continue;
+      unit.hex = current;
+      destinations[id] = current;
+    }
+    return { legal: true, complete: true, reason: "撤退路线已完成", paths, destinations, eliminated };
+  }
+
+  function autoPlanRetreats(ctx, unitIds, count) {
+    const paths = {};
+    const maxChoices = Math.max(1, unitIds.length * Math.max(1, Number(count) || 0));
+    for (let choice = 0; choice <= maxChoices; choice += 1) {
+      const plan = planRetreats(ctx, unitIds, count, paths);
+      if (!plan.legal || plan.complete) return plan;
+      const pending = plan.pending;
+      const destination = pending?.options?.[0]?.hex;
+      if (!pending?.unit || !destination) return { ...plan, legal: false, reason: plan.reason || "AI 无法完成撤退规划" };
+      paths[pending.unit] ||= [];
+      paths[pending.unit][pending.step - 1] = destination;
+    }
+    return { legal: false, complete: false, reason: "AI 撤退规划超过最大步骤", paths };
+  }
+
+  function retreatUnits(ctx, unitIds, count, enemySide, planned = null) {
     const eliminated = [];
     const retreated = [];
     const overstacked = [];
     for (const id of unitIds) {
       const unit = ctx.state.units[id];
       if (!unit || unit.eliminated) continue;
+      if (planned?.eliminated?.includes(id)) {
+        unit.eliminated = true;
+        unit.eliminated_reason = "blocked_retreat";
+        eliminated.push(id);
+        continue;
+      }
+      if (planned?.destinations?.[id]) {
+        unit.hex = normalizeHex(planned.destinations[id]);
+        const marked = markTemporaryOverstackAt(ctx, unit.hex);
+        if (marked.length) overstacked.push(...marked);
+        retreated.push(id);
+        continue;
+      }
       let current = normalizeHex(unit.hex);
       let failed = false;
       for (let step = 0; step < count; step += 1) {
@@ -1081,15 +1431,46 @@
       }
       else {
         unit.hex = current;
-        const stack = checkStacking(ctx, ctx.state, { hexes: [current] });
-        if (!stack.legal) {
-          unit.temporary_overstack = true;
-          overstacked.push(id);
-        }
+        const marked = markTemporaryOverstackAt(ctx, current);
+        if (marked.length) overstacked.push(...marked);
         retreated.push(id);
       }
     }
-    return { eliminated, retreated, overstacked };
+    return { eliminated, retreated, overstacked: [...new Set(overstacked)] };
+  }
+
+  function overstackRepairOptions(ctx, hex) {
+    const target = normalizeHex(hex);
+    const group = temporaryOverstackGroups(ctx).find((item) => item.hex === target);
+    if (!group || phaseKind(ctx.state.phase) !== "initial_movement" || ctx.state.active_side !== group.side) return [];
+    const options = [];
+    for (const id of group.unit_ids) {
+      const unit = ctx.state.units?.[id];
+      if (!unit || !canMoveInCurrentPhase(ctx, { ...unit, id }) || (unit.state || "fresh") !== "fresh") continue;
+      for (const destination of neighbors(target)) {
+        const verdict = checkMove(ctx, id, [target, destination], { mode: "normal" });
+        if (verdict.legal) options.push({ unit: id, destination, verdict });
+      }
+    }
+    return options;
+  }
+
+  function eliminateTemporaryOverstackUnit(ctx, unitId) {
+    const unit = ctx.state.units?.[unitId];
+    if (!unit || unit.eliminated || !unit.hex) return { legal: false, reason: `找不到可移除单位 ${unitId}` };
+    const group = temporaryOverstackGroups(ctx, unit.side).find((item) => item.hex === normalizeHex(unit.hex));
+    if (!group) return { legal: false, reason: `${unitId} 不在需要恢复的临时超堆叠中` };
+    if (!group.removable_unit_ids.includes(unitId)) return { legal: false, reason: "工兵不计入堆叠上限，不能作为超限单位移除" };
+    if (overstackRepairOptions(ctx, group.hex).length) return { legal: false, reason: "该堆叠仍可通过移动恢复，不能选择消灭单位" };
+    eliminateUnits(ctx, [unitId], "unresolved_temporary_overstack");
+    const stillOverstacked = hexExceedsStackingLimit(ctx, group.side, group.hex);
+    if (stillOverstacked) markTemporaryOverstackAt(ctx, group.hex);
+    else clearTemporaryOverstackAt(ctx, group.hex);
+    return {
+      legal: true,
+      reason: stillOverstacked ? `${unitId} 已移除；该格仍超限，必须继续选择超限单位` : `${unitId} 已移除，临时超堆叠已恢复`,
+      details: { eliminated: unitId, hex: group.hex, repair_complete: !stillOverstacked }
+    };
   }
 
   function eliminateUnits(ctx, unitIds, reason) {
@@ -1121,6 +1502,8 @@
 
   function advanceAfterCombat(ctx, unitIds, targetHex, options = {}) {
     const target = normalizeHex(targetHex);
+    const allowedTargets = (options.allowedTargets || []).map(normalizeHex);
+    if (allowedTargets.length && !allowedTargets.includes(target)) return null;
     if (!options.allowRugged && (hexTags(ctx, target).includes("hill_or_ridge") || hexTags(ctx, target).includes("depression"))) return null;
     if (!options.allowEnemyMine) {
       const side = ctx.state.units[unitIds.find((id) => ctx.state.units[id])]?.side;
@@ -1128,6 +1511,14 @@
     }
     const first = unitIds.find((id) => ctx.state.units[id] && !ctx.state.units[id].eliminated && neighbors(ctx.state.units[id].hex).includes(target));
     if (!first) return null;
+    const origin = normalizeHex(ctx.state.units[first].hex);
+    const projected = clone(ctx.state);
+    projected.units[first].hex = target;
+    projected.units[first].road_mode = false;
+    projected.units[first].road_facing = null;
+    projected.units[first].facing = null;
+    projected.units[first].temporary_overstack = false;
+    if (!checkStacking(ctx, projected, { hexes: [origin, target] }).legal) return null;
     ctx.state.units[first].hex = target;
     ctx.state.units[first].road_mode = false;
     ctx.state.units[first].road_facing = null;
@@ -1167,6 +1558,25 @@
     const outcome = verdict.details.outcome;
     const attackerIds = verdict.details.attackers;
     const defenderIds = verdict.details.defenders;
+    const retreatIds = /^A[123]$/.test(outcome) ? attackerIds : /^D[123]$/.test(outcome) ? defenderIds : [];
+    const retreatCount = retreatIds.length ? Number(outcome.slice(1)) : 0;
+    let explicitRetreatPlan = null;
+    if (retreatCount && action.retreat_paths != null) {
+      const requestedOrder = action.retreat_order == null ? retreatIds : action.retreat_order;
+      const validOrder = Array.isArray(requestedOrder)
+        && requestedOrder.length === retreatIds.length
+        && new Set(requestedOrder).size === retreatIds.length
+        && requestedOrder.every((id) => retreatIds.includes(id));
+      if (!validOrder) return { legal: false, reason: "撤退处理顺序必须且只能包含所有撤退单位" };
+      explicitRetreatPlan = planRetreats(ctx, requestedOrder, retreatCount, action.retreat_paths);
+      if (!explicitRetreatPlan.legal || !explicitRetreatPlan.complete) {
+        return {
+          legal: false,
+          reason: explicitRetreatPlan.reason || "撤退路线未完成",
+          details: { ...verdict.details, retreat_plan: explicitRetreatPlan }
+        };
+      }
+    }
     const attackerStartHexes = [...new Set(attackerIds.map((id) => ctx.state.units[id]?.hex).filter(Boolean).map(normalizeHex))];
     for (const id of attackerIds) {
       ctx.state.units[id].attacked_this_turn = true;
@@ -1183,24 +1593,24 @@
     }
     const effects = { outcome, eliminated: [], retreated: [], advanced: null, defender_advanced: null, exchange: null };
     if (/^A[123]$/.test(outcome)) {
-      effects.retreated = retreatUnits(ctx, attackerIds, Number(outcome.slice(1)), oppositeSide(ctx.state.active_side));
-      effects.defender_advanced = advanceAfterCombatChoice(ctx, defenderIds, attackerStartHexes[0], action, "defender", { allowRugged: true, allowEnemyMine: true });
+      effects.retreated = retreatUnits(ctx, attackerIds, Number(outcome.slice(1)), oppositeSide(ctx.state.active_side), explicitRetreatPlan);
+      effects.defender_advanced = advanceAfterCombatChoice(ctx, defenderIds, attackerStartHexes[0], action, "defender", { allowRugged: true, allowEnemyMine: true, allowedTargets: attackerStartHexes });
     }
     else if (/^D[123]$/.test(outcome)) {
-      effects.retreated = retreatUnits(ctx, defenderIds, Number(outcome.slice(1)), ctx.state.active_side);
-      effects.advanced = advanceAfterCombatChoice(ctx, attackerIds, verdict.details.defender_hexes[0], action, "attacker");
+      effects.retreated = retreatUnits(ctx, defenderIds, Number(outcome.slice(1)), ctx.state.active_side, explicitRetreatPlan);
+      effects.advanced = advanceAfterCombatChoice(ctx, attackerIds, verdict.details.defender_hexes[0], action, "attacker", { allowedTargets: verdict.details.defender_hexes });
     }
     else if (outcome === "Ae") {
       effects.eliminated = eliminateUnits(ctx, attackerIds, "combat");
-      effects.defender_advanced = advanceAfterCombatChoice(ctx, defenderIds, attackerStartHexes[0], action, "defender", { allowRugged: true, allowEnemyMine: true });
+      effects.defender_advanced = advanceAfterCombatChoice(ctx, defenderIds, attackerStartHexes[0], action, "defender", { allowRugged: true, allowEnemyMine: true, allowedTargets: attackerStartHexes });
     }
     else if (outcome === "De") {
       effects.eliminated = eliminateUnits(ctx, defenderIds, "combat");
-      effects.advanced = advanceAfterCombatChoice(ctx, attackerIds, verdict.details.defender_hexes[0], action, "attacker");
+      effects.advanced = advanceAfterCombatChoice(ctx, attackerIds, verdict.details.defender_hexes[0], action, "attacker", { allowedTargets: verdict.details.defender_hexes });
     }
     else if (outcome === "Ex") {
       effects.exchange = exchangeLosses(ctx, attackerIds, defenderIds);
-      effects.advanced = advanceAfterCombatChoice(ctx, attackerIds.filter((id) => !ctx.state.units[id].eliminated), verdict.details.defender_hexes[0], action, "attacker");
+      effects.advanced = advanceAfterCombatChoice(ctx, attackerIds.filter((id) => !ctx.state.units[id].eliminated), verdict.details.defender_hexes[0], action, "attacker", { allowedTargets: verdict.details.defender_hexes });
     }
     return { legal: true, reason: `战斗已结算：${outcome}`, details: { ...verdict.details, effects } };
   }
@@ -1242,7 +1652,17 @@
     unit.mine_cleared_this_turn = true;
     unit.cleared_mine_this_turn = true;
     unit.just_cleared_mine_hex = hex;
-    return { legal: true, reason: `已清除 ${hex} 敌方雷区`, details: { unit: unitId, mine_hex: hex, removed: mines.map((mine) => mine.id) } };
+    return {
+      legal: true,
+      reason: `已清除 ${hex} 敌方雷区`,
+      details: {
+        unit: unitId,
+        mine_hex: hex,
+        die: isEngineer(full) ? null : Number(die),
+        cleared: true,
+        removed: mines.map((mine) => mine.id)
+      }
+    };
   }
 
   function calculateVictoryPoints(ctx) {
@@ -1332,16 +1752,21 @@
   }
 
   function applyStateDefaults(state) {
-    state.rules_version ||= "first-alamein-standard-v1";
+    if (!state.rules_version || state.rules_version === "first-alamein-standard-v1") {
+      state.rules_version = "el-alamein-cn-translation-v1";
+    }
     state.scenario_meta = { ...(SCENARIO_META[state.scenario] || {}), ...(state.scenario_meta || {}), standard_scenario_only: true };
     if (state.scenario === "october" && (!state.phase || state.phase === "axis_initial_movement")) {
       state.phase = "allies_initial_movement";
       state.active_side = "allies";
     }
     state.road_supply_markers ||= {};
+    const markerContext = createContext({ state, rules: DEFAULT_RULES, terrain: {} });
     for (const side of ["axis", "allies"]) {
-      const marker = roadMarkerHex(createContext({ state, rules: DEFAULT_RULES, terrain: {} }), side);
-      if (marker) state.road_supply_markers[side] ||= marker;
+      const hasMarkerCounter = unitsArray(markerContext).some((unit) => unit.side === side && /supply.vanguard|vanguard/i.test(`${unit.name || ""} ${unit.image || ""}`));
+      const marker = roadMarkerHex(markerContext, side);
+      if (marker) state.road_supply_markers[side] = marker;
+      else if (hasMarkerCounter) delete state.road_supply_markers[side];
     }
     for (const [id, unit] of Object.entries(state.units || {})) {
       unit.supply_state ||= "supplied";
@@ -1353,6 +1778,7 @@
       unit.mine_cleared_this_turn = !!(unit.mine_cleared_this_turn || unit.cleared_mine_this_turn);
       unit.cleared_mine_this_turn = unit.mine_cleared_this_turn;
       unit.engineer_assisted_this_turn = !!unit.engineer_assisted_this_turn;
+      delete unit.mine_cleared_entry;
       if (state.scenario === "july" && unit.side === "allies" && unit.hex) unit.box_restricted ??= false;
       if (id) unit.id = id;
     }
@@ -1406,12 +1832,17 @@
     effectiveDefense,
     canAttackUnit,
     checkStacking,
+    stackingLimitForSide,
+    temporaryOverstackGroups,
+    overstackRepairOptions,
+    eliminateTemporaryOverstackUnit,
     canMoveInCurrentPhase,
     checkMove,
     checkLeaveRoadMode,
     leaveRoadMode,
     findLegalPath,
     reachableHexes,
+    diagnoseUnreachableMove,
     supplyBlockedHexes,
     buildSupplyNetwork,
     supplyState,
@@ -1423,6 +1854,9 @@
     resolveCombat,
     clearMine,
     legalRetreatHex,
+    retreatOptions,
+    planRetreats,
+    autoPlanRetreats,
     calculateVictoryPoints,
     victoryLevel,
     checkVictory,

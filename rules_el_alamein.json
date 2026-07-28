@@ -1,6 +1,10 @@
 {
+  "source": {
+    "authoritative_rules": "docs/el_alamein_rules_cn_translation.md",
+    "role": "runtime_projection_only"
+  },
   "game": {
-    "title": "First Alamein",
+    "title": "El Alamein",
     "axis_supply_sources": ["0101", "0501"],
     "allies_supply_sources": ["3711", "4934", "1211", "0407"],
     "axis_reinforcement_hex": "0101",
@@ -21,8 +25,6 @@
   "stacking": {
     "allied_max_units_per_hex": 3,
     "axis_max_units_per_hex": 4,
-    "max_units_per_hex": 4,
-    "max_divisions_per_hex": 2,
     "one_side_per_hex": true
   },
   "movement": {
@@ -61,11 +63,6 @@
       "4": ["Ae", "Ae", "A3", "A2", "A2", "A1", "D2", "D2", "Ex", "Ex"],
       "5": ["Ae", "Ae", "A3", "A2", "A2", "A2", "D2", "D2", "D3", "Ex"],
       "6": ["Ae", "Ae", "A3", "A3", "A3", "A2", "D1", "D1", "D3", "Ex"]
-    },
-    "no_retreat_order": {
-      "r1_becomes": "S",
-      "r2_becomes": "DE",
-      "halves_terrain_bonus": true
     },
     "special_de_to_r2_units": ["RCCEGPPE", "7th Armoured Desert Rats"]
   },

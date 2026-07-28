@@ -28,7 +28,7 @@ function clone(value) {
 }
 
 function makeReplay(scenarioName, options = {}) {
-  const rules = readJson("rules_first_alamein.json", Rules.DEFAULT_RULES) || Rules.DEFAULT_RULES;
+  const rules = readJson("rules_el_alamein.json", Rules.DEFAULT_RULES) || Rules.DEFAULT_RULES;
   const terrain = readJson("terrain.json", { hexes: {}, edges: {} }) || { hexes: {}, edges: {} };
   const state = readJson(SCENARIO_FILES[scenarioName] || SCENARIO_FILES.july);
   if (!state) throw new Error(`Unknown scenario ${scenarioName}`);
@@ -215,8 +215,11 @@ function makeReplay(scenarioName, options = {}) {
 
   function terrainDefenseBonusFromTags(tags = []) {
     if (tags.includes("alamein_box")) return 3;
-    if (tags.includes("hill_or_ridge") || tags.includes("depression")) return 1;
     return 0;
+  }
+
+  function terrainDefenseMultiplierFromTags(tags = []) {
+    return tags.includes("hill_or_ridge") ? 2 : 1;
   }
 
   function combatTargetIntel(action) {
@@ -245,6 +248,8 @@ function makeReplay(scenarioName, options = {}) {
         friendly_mines: Rules.friendlyMinesAt(ctx(), defenderSide, hex).map((mine) => mine.id),
         enemy_mines: enemyMinesAt(attackerSide, hex).map((mine) => mine.id),
         terrain_defense_bonus: terrainDefenseBonusFromTags(tags),
+        terrain_defense_multiplier: terrainDefenseMultiplierFromTags(tags),
+        rugged_defense_cancels_retreat: tags.includes("hill_or_ridge"),
         is_primary_objective: hex === alamein,
         retreat_options_estimate: defenders.reduce((sum, defender) => {
           const unit = state.units[defender.id];
@@ -270,12 +275,16 @@ function makeReplay(scenarioName, options = {}) {
       + Math.max(0, attackerStrength - defenderStrength) * 1.5;
   }
 
-  function crtColumn(column) {
+  function crtColumn(column, defenderHexes = []) {
     const columns = rules.combat?.odds_columns || Rules.DEFAULT_RULES.combat?.odds_columns || ["1-4", "1-3", "1-2", "1-1", "2-1", "3-1", "4-1", "5-1", "6-1", "7-1"];
     const index = columns.indexOf(column);
     if (index < 0) return {};
     const result = {};
-    for (let roll = 1; roll <= 6; roll += 1) result[String(roll)] = rules.combat?.crt?.[String(roll)]?.[index] || null;
+    const ruggedDefense = defenderHexes.some((hex) => hexTags(hex).includes("hill_or_ridge"));
+    for (let roll = 1; roll <= 6; roll += 1) {
+      const raw = rules.combat?.crt?.[String(roll)]?.[index] || null;
+      result[String(roll)] = ruggedDefense && /^D[123]$/.test(String(raw)) ? "No Effect" : raw;
+    }
     return result;
   }
 
@@ -289,7 +298,7 @@ function makeReplay(scenarioName, options = {}) {
         ...verdict.details,
         die: null,
         outcome: null,
-        crt_column: crtColumn(verdict.details.odds_column)
+        crt_column: crtColumn(verdict.details.odds_column, action.defender_hexes || [])
       }
     };
   }
@@ -553,7 +562,7 @@ function makeReplay(scenarioName, options = {}) {
     return friendlyUnits(state.active_side).filter((unit) => {
       if (unit.state !== "fresh" || unit.attacked_this_turn || unit.attacked_this_phase) return false;
       if (aiScoreSupplyState(unit.id) === "isolated") return false;
-      if (enemyMinesAt(unit.side, unit.hex).length && !unit.mine_cleared_entry) return false;
+      if (enemyMinesAt(unit.side, unit.hex).length) return false;
       return true;
     });
   }
@@ -593,7 +602,7 @@ function makeReplay(scenarioName, options = {}) {
         const key = `${attackerIds.sort().join(",")}=>${defenderHexes.sort().join(",")}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        const action = { type: "combat", attackers: attackerIds, defender_hexes: defenderHexes, no_retreat_order: false };
+        const action = { type: "combat", attackers: attackerIds, defender_hexes: defenderHexes };
         const verdict = publicCombatVerdict(action);
         if (verdict.legal) {
           actions.push({ ...action, verdict });
@@ -749,7 +758,7 @@ function makeReplay(scenarioName, options = {}) {
     if (action.type === "exit_west") return { type: "exit_west", unit: action.unit };
     if (action.type === "move_intent") return { type: "move_intent", unit: action.unit, destination: action.destination || action.target || action.hex, mode: action.mode || "auto" };
     if (action.type === "move") return { type: "move", unit: action.unit, path: (action.path || []).map(normalizeHex), mode: action.mode || "normal" };
-    if (action.type === "combat") return { type: "combat", attackers: action.attackers || [], defender_hexes: (action.defender_hexes || []).map(normalizeHex), no_retreat_order: !!action.no_retreat_order };
+    if (action.type === "combat") return { type: "combat", attackers: action.attackers || [], defender_hexes: (action.defender_hexes || []).map(normalizeHex) };
     return { type: "pass", reason: action.reason || raw?.reason || "pass" };
   }
 
@@ -820,11 +829,14 @@ function makeReplay(scenarioName, options = {}) {
     if (action.type === "pass") return validation;
     if (action.type === "exit_west") {
       const unit = state.units[action.unit];
+      unit.exit_hex = normalizeHex(unit.hex);
       unit.exited_edge = "west";
       unit.exit_edge = "west";
+      unit.exited = "west";
       unit.exited_turn = Number(state.turn || 1);
       unit.exit_turn = Number(state.turn || 1);
       unit.off_map = true;
+      unit.hex = null;
       unit.state = "spent";
       return { legal: true, reason: "exit west", action, verdict: validation };
     }
@@ -970,7 +982,11 @@ function makeReplay(scenarioName, options = {}) {
     }
     const axisUnits = Object.entries(state.units || {})
       .map(([id, unit]) => ({ id, ...unit }))
-      .filter((unit) => unit.side === "axis" && (isCombatUnit(unit) || isSupplyUnit(unit)));
+      .filter((unit) => {
+        if (unit.side !== "axis") return false;
+        const supply = unit.kind === "supply" && !/vanguard/i.test(`${unit.name || ""} ${unit.image || ""}`) && Number(unit.movement || 0) > 0;
+        return (unit.kind || "ground") === "ground" || supply;
+      });
     const exited = axisUnits
       .filter((unit) => unit.off_map && unit.exited_edge === "west")
       .map((unit) => ({

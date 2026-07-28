@@ -32,7 +32,7 @@ const DEFAULT_RULES = {
     "allies_supply_movement",
     "end_game_turn"
   ],
-  stacking: { allied_max_units_per_hex: 3, axis_max_units_per_hex: 4, max_divisions_per_hex: 2, one_side_per_hex: true },
+  stacking: { allied_max_units_per_hex: 3, axis_max_units_per_hex: 4, one_side_per_hex: true },
   movement: {
     default_hex_cost: 1,
     mechanized_threshold: 6,
@@ -57,7 +57,7 @@ const DEFAULT_RULES = {
 };
 
 const FALLBACK_STATE = {
-  turn: 7,
+  turn: 1,
   phase: "axis_initial_movement",
   active_side: "axis",
   control: { "3711": "allies" },
@@ -96,13 +96,33 @@ const SETUP_SCENE_INTEL = {
   }
 };
 
-const APP_VERSION = "v2026.07.12.15";
-const ASSET_VERSION = "20260712-15";
+const APP_VERSION = "v2026.07.28.120";
+const ASSET_VERSION = "20260728-120";
 const SAVE_SLOTS_STORAGE_KEY = "alamein_judge_studio.save_slots.v1";
 const AI_PROFILES_STORAGE_KEY = "alamein_judge_studio.ai_profiles.v1";
 const SIDE_PANEL_COLLAPSED_KEY = "alamein_judge_studio.side_panel_collapsed.v1";
 const VISUAL_EFFECTS_STORAGE_KEY = "alamein_judge_studio.visual_effects.v1";
+const AI_PLAYBACK_SPEED_STORAGE_KEY = "alamein_judge_studio.ai_playback_speed.v1";
 const MAX_SAVE_SLOTS = 12;
+const MAX_ARCHIVED_GAMES = 24;
+
+const COUNTER_PRINTED_STATS = {
+  "allied-engineers.png": { attack: 1, movement: 4, parenthesizedAttack: true },
+  "axis-engineers.png": { attack: 1, movement: 4, parenthesizedAttack: true },
+  "62-It-mech.png": { attack: 1, movement: 6 },
+  "186-Para-Rgt.png": { attack: 2, movement: 6 },
+  "187-Para-Rgt.png": { attack: 2, movement: 6 },
+  "89-It-inf.png": { attack: 1, movement: 3 },
+  "87-It-inf.png": { attack: 1, movement: 3 },
+  "Ram-pzg.png": { attack: 2, movement: 10 },
+  "346-pzg.png": { attack: 2, movement: 10 },
+  "2-10-pzg.png": { attack: 2, movement: 10 },
+  "200-pzg.png": { attack: 2, movement: 10 },
+  "115-panzer.png": { attack: 4, movement: 10 },
+  "5-panzer-b.png": { attack: 4, movement: 10 },
+  "61-It-mech.png": { attack: 1, movement: 6 },
+  "GGFF-Mech.png": { attack: 2, movement: 6 }
+};
 
 const DEFAULT_COUNTER_IMAGES = {
   axis: {
@@ -136,10 +156,20 @@ let state = structuredClone(FALLBACK_STATE);
 let aiSuggestion = null;
 let selectedUnitId = null;
 let selectedHexId = null;
+let mapSelectionHudCollapsed = false;
 let movePathDraft = [];
+let moveRouteFailure = null;
 let actionLog = [];
 let highlightedSupplyPath = [];
 let selectedCombatDefenderHex = null;
+let pendingCombatRoll = null;
+let pendingRetreatSelection = null;
+let retreatMapFeedback = null;
+let retreatMapFeedbackTimer = 0;
+let aiCombatPlayback = null;
+let aiRetreatResolutionTimer = 0;
+let aiRunGeneration = 0;
+let combatCrtPreviewOpen = false;
 let aiAutoRunning = false;
 let suppressAiActionRender = false;
 let pendingPhaseEndKey = null;
@@ -148,6 +178,18 @@ let gameUiReady = false;
 let saveSlotsCache = null;
 let gameMapPreloadScheduled = false;
 let visualEffectsMode = "full";
+let aiPlaybackSpeed = "slow";
+let mapHexCentersCache = null;
+let reachableHexCache = new Map();
+let uiSupplyStateCache = new Map();
+let roadModeAvailabilityCache = new Map();
+let pendingMapRenderFrame = 0;
+let pendingMapRenderTimer = 0;
+let movementWorker = null;
+let movementRequestId = 0;
+let uiStateRevision = 0;
+const pendingMovementRequests = new Map();
+const pendingReachableRequests = new Map();
 let aiScoreSupplyCache = null;
 let aiVictoryImpactCache = null;
 let aiSupplyScorePhaseCache = null;
@@ -293,7 +335,7 @@ function isMapCounter(unit) {
 }
 
 function isCombatUnit(unit) {
-  return isMapCounter(unit) && isPlayableSide(unit.side) && (unit.kind || "ground") === "ground" && !unit.eliminated;
+  return isMapCounter(unit) && isPlayableSide(unit.side) && ((unit.kind || "ground") === "ground" || isEngineer(unit)) && !unit.eliminated;
 }
 
 function isSupplyUnit(unit) {
@@ -302,12 +344,20 @@ function isSupplyUnit(unit) {
 }
 
 function isEngineer(unit) {
-  const text = `${unit.name || ""} ${unit.piece_type || ""}`.toLowerCase();
+  const text = `${unit.name || ""} ${unit.piece_type || ""} ${unit.kind || ""}`.toLowerCase();
   return text.includes("eng") || text.includes("engineer");
+}
+
+function canAttackUnit(unit) {
+  return RulesEngine.canAttackUnit(unit);
 }
 
 function isMechanized(unit) {
   return RulesEngine.isMechanized(rulesContext(), unit);
+}
+
+function isStackingUnit(unit) {
+  return isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit);
 }
 
 function defaultCounterImage(unit) {
@@ -324,7 +374,9 @@ function defaultCounterImage(unit) {
 }
 
 function counterImageFor(unit) {
-  return unit.image || defaultCounterImage(unit);
+  const path = unit.image || defaultCounterImage(unit);
+  if (!path || /^(?:data:|blob:)/.test(path)) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}v=${ASSET_VERSION}`;
 }
 
 function unitTypeGroup(unit) {
@@ -332,15 +384,59 @@ function unitTypeGroup(unit) {
   if (unit.kind === "mine") return { key: "mine", label: "雷区", order: 90 };
   if (isSupplyUnit(unit) || unit.kind === "supply") return { key: "supply", label: "补给", order: 80 };
   if (isEngineer(unit)) return { key: "engineer", label: "工程兵", order: 50 };
-  if (text.includes("armor") || text.includes("tank") || text.includes("armoured")) return { key: "armor", label: "装甲", order: 10 };
-  if (text.includes("recon")) return { key: "recon", label: "侦察", order: 20 };
-  if (text.includes("mechanized") || text.includes("mech")) return { key: "mechanized", label: "机械化", order: 30 };
   if (text.includes("para")) return { key: "paratroop", label: "伞兵", order: 42 };
   if (text.includes("airborne")) return { key: "airborne", label: "空降步兵", order: 43 };
-  if (text.includes("inf") || text.includes("infantry")) return { key: "infantry", label: "步兵", order: 40 };
   if (text.includes("anti-air") || text.includes("aa")) return { key: "anti_air", label: "防空", order: 60 };
+  if (text.includes("armor") || text.includes("tank") || text.includes("armoured")) return { key: "armor", label: "装甲", order: 10 };
+  if (text.includes("recon")) return { key: "recon", label: "侦察", order: 20 };
+  if (text.includes("inf") || text.includes("infantry")) return { key: "infantry", label: "步兵", order: 40 };
+  if (isMechanized(unit)) return { key: "mechanized", label: "机械化", order: 30 };
   if (isCombatUnit(unit)) return { key: "combat_unknown", label: isMechanized(unit) ? "机械化作战单位" : "非机械化作战单位", order: isMechanized(unit) ? 35 : 45 };
   return { key: "marker", label: "标记", order: 99 };
+}
+
+function unitRoleDescription(unit) {
+  const type = unitTypeGroup(unit);
+  const text = `${unit.name || ""} ${unit.image || ""}`.toLowerCase();
+  if (unit.kind === "supply" && text.includes("vanguard")) {
+    return { label: "补给前锋", detail: "决定道路补给段边界，不作为普通单位行动" };
+  }
+  if (isSupplyUnit(unit) || unit.kind === "supply") {
+    return { label: "补给单位", detail: "只在补给移动阶段行动，用于接续和延伸友军补给线" };
+  }
+  if (isEngineer(unit)) {
+    return { label: "工程兵", detail: "可协助突破雷区，并在战斗阶段尝试清除敌方雷区" };
+  }
+  if (type.key === "mine") {
+    return { label: "雷区标记", detail: "阻碍敌军移动和补给，并增强友军防御" };
+  }
+  if (type.key === "armor") {
+    return { label: "装甲单位", detail: "按机械化规则行动；未攻击时可参加机械化移动" };
+  }
+  if (type.key === "recon") {
+    return { label: "侦察单位", detail: "按机械化作战单位规则移动和战斗" };
+  }
+  if (type.key === "mechanized") {
+    return { label: "机械化单位", detail: "未攻击时可在机械化移动阶段再次行动" };
+  }
+  if (type.key === "paratroop") {
+    return { label: "伞兵单位", detail: "按非机械化作战单位规则移动和战斗" };
+  }
+  if (type.key === "airborne") {
+    return { label: "空降步兵", detail: "按非机械化作战单位规则移动和战斗" };
+  }
+  if (type.key === "anti_air") {
+    return { label: "防空单位", detail: "按非机械化作战单位规则移动和战斗" };
+  }
+  if (type.key === "infantry") {
+    return { label: "步兵单位", detail: "按非机械化规则移动，并可建立 ZOC、参加战斗" };
+  }
+  if (isCombatUnit(unit)) {
+    return isMechanized(unit)
+      ? { label: "机械化作战单位", detail: "未攻击时可参加机械化移动" }
+      : { label: "非机械化作战单位", detail: "在初始移动阶段移动，并可参加战斗" };
+  }
+  return { label: type.label, detail: "用于记录地图或裁判状态" };
 }
 
 function unitSizeLabel(size = "") {
@@ -420,7 +516,7 @@ function roadModeZocHexes(unit) {
 }
 
 function zocHexes(unit) {
-  if (!isCombatUnit(unit)) return [];
+  if (!isCombatUnit(unit) || isEngineer(unit)) return [];
   return unit.road_mode ? roadModeZocHexes(unit) : neighbors(unit.hex);
 }
 
@@ -443,6 +539,7 @@ function mapAreaForAi(hex) {
   const tags = hexTags(hx);
   const areas = [];
   if (tags.includes("alamein_box")) areas.push("Alamein box");
+  if (tags.includes("coastline")) areas.push("coastal hex");
   if (tags.includes("hill_or_ridge")) areas.push("ridge line");
   if (tags.includes("depression")) areas.push("depression");
   if (tags.includes("minefield") || minesAt(hx).length) areas.push("minefield belt");
@@ -510,6 +607,13 @@ function checkStacking(sourceState = state, options = {}) {
   return RulesEngine.checkStacking(rulesContext(sourceState), sourceState, options);
 }
 
+function temporaryOverstackRepair() {
+  if (phaseKind() !== "initial_movement") return null;
+  const group = RulesEngine.temporaryOverstackGroups(rulesContext(), state.active_side)[0];
+  if (!group) return null;
+  return { ...group, options: RulesEngine.overstackRepairOptions(rulesContext(), group.hex) };
+}
+
 function phaseSide(phase = state.phase) {
   return RulesEngine.phaseSide(phase) || state.active_side;
 }
@@ -530,8 +634,97 @@ function findLegalPath(unitId, targetHex, options = {}) {
   return RulesEngine.findLegalPath(rulesContext(), unitId, targetHex, options);
 }
 
+function reachableHexCacheKey(unitId, options = {}) {
+  const unit = state.units?.[unitId];
+  return [uiStateRevision, unitId, options.mode || "normal", options.maxHexes || 240, state.turn, state.phase, unit?.hex || "", unit?.state || ""].join("|");
+}
+
 function reachableHexes(unitId, options = {}) {
-  return RulesEngine.reachableHexes(rulesContext(), unitId, options);
+  const key = reachableHexCacheKey(unitId, options);
+  if (!reachableHexCache.has(key)) reachableHexCache.set(key, RulesEngine.reachableHexes(rulesContext(), unitId, options));
+  return reachableHexCache.get(key);
+}
+
+function cachedReachableHexes(unitId, options = {}) {
+  return reachableHexCache.get(reachableHexCacheKey(unitId, options)) || null;
+}
+
+function ensureMovementWorker() {
+  if (movementWorker || typeof Worker !== "function") return movementWorker;
+  movementWorker = new Worker(`./movement_worker.js?v=${ASSET_VERSION}`);
+  movementWorker.addEventListener("message", (event) => {
+    const response = event.data || {};
+    const pending = pendingMovementRequests.get(response.id);
+    if (!pending) return;
+    pendingMovementRequests.delete(response.id);
+    if (response.revision !== uiStateRevision) {
+      pending.reject(new Error("stale movement request"));
+      return;
+    }
+    if (response.error) pending.reject(new Error(response.error));
+    else pending.resolve(response.result);
+  });
+  movementWorker.addEventListener("error", () => cancelPendingMovementWork("movement worker unavailable"));
+  return movementWorker;
+}
+
+function cancelPendingMovementWork(reason = "movement request cancelled") {
+  movementWorker?.terminate();
+  movementWorker = null;
+  for (const pending of pendingMovementRequests.values()) pending.reject(new Error(reason));
+  pendingMovementRequests.clear();
+  pendingReachableRequests.clear();
+}
+
+function runMovementWorker(type, unitId, options = {}, targetHex = "") {
+  const worker = ensureMovementWorker();
+  if (!worker) return Promise.reject(new Error("movement worker unavailable"));
+  const id = ++movementRequestId;
+  const revision = uiStateRevision;
+  return new Promise((resolve, reject) => {
+    pendingMovementRequests.set(id, { resolve, reject });
+    worker.postMessage({ id, type, revision, state, rules, terrain, unitId, targetHex, options });
+  });
+}
+
+function requestReachableHexes(unitId, options = {}) {
+  const key = reachableHexCacheKey(unitId, options);
+  const cached = reachableHexCache.get(key);
+  if (cached) return Promise.resolve(cached);
+  if (pendingReachableRequests.has(key)) return pendingReachableRequests.get(key);
+  const request = runMovementWorker("reachable", unitId, options)
+    .then((entries) => {
+      const result = new Map(entries || []);
+      reachableHexCache.set(key, result);
+      return result;
+    })
+    .finally(() => pendingReachableRequests.delete(key));
+  pendingReachableRequests.set(key, request);
+  return request;
+}
+
+function requestLegalPath(unitId, targetHex, options = {}) {
+  const cached = cachedReachableHexes(unitId, options)?.get(normalizeHex(targetHex))?.path;
+  if (cached) return Promise.resolve(cached);
+  return runMovementWorker("path", unitId, options, targetHex);
+}
+
+function requestMoveDiagnosis(unitId, targetHex, options = {}) {
+  return runMovementWorker("diagnose", unitId, options, targetHex)
+    .catch(() => RulesEngine.diagnoseUnreachableMove(rulesContext(), unitId, targetHex, options));
+}
+
+function uiSupplyState(unitId) {
+  if (!uiSupplyStateCache.has(unitId)) uiSupplyStateCache.set(unitId, supplyState(unitId));
+  return uiSupplyStateCache.get(unitId);
+}
+
+function resetUiComputationCaches() {
+  cancelPendingMovementWork("game state changed");
+  uiStateRevision += 1;
+  reachableHexCache.clear();
+  uiSupplyStateCache.clear();
+  roadModeAvailabilityCache.clear();
 }
 
 function hexDistance(a, b) {
@@ -617,28 +810,6 @@ function buildSupplyNetwork(side) {
   return RulesEngine.buildSupplyNetwork(rulesContext(), side);
 }
 
-function supplyDistancesFromSources(side, sources) {
-  const blocked = supplyBlockedHexes(side);
-  const distances = new Map();
-  const queue = [];
-  for (const source of sources) {
-    if (!onMap(source)) continue;
-    distances.set(source, 0);
-    queue.push(source);
-  }
-  while (queue.length) {
-    const hex = queue.shift();
-    const distance = distances.get(hex);
-    for (const nb of neighbors(hex)) {
-      if (distances.has(nb)) continue;
-      if (blocked.has(nb) && !sources.has(nb)) continue;
-      distances.set(nb, distance + 1);
-      queue.push(nb);
-    }
-  }
-  return distances;
-}
-
 function traceSupplyPath(unitId) {
   return RulesEngine.traceSupplyPath(rulesContext(), unitId);
 }
@@ -674,9 +845,30 @@ function parseCombatAction() {
   return {
     attackers: parsePathInput(el("combatAttackersInput")?.value || ""),
     defender_hexes: parsePathInput(el("combatDefendersInput")?.value || "").map(normalizeHex),
-    die: el("combatResolveDieSelect")?.value ? Number(el("combatResolveDieSelect").value) : null,
-    no_retreat_order: !!el("noRetreatOrderToggle")?.checked
+    die: el("combatResolveDieSelect")?.value ? Number(el("combatResolveDieSelect").value) : null
   };
+}
+
+function selectedCombatAttackerIds() {
+  try {
+    return [...new Set(parsePathInput(el("combatAttackersInput")?.value || ""))]
+      .filter((id) => !!state.units?.[id]);
+  }
+  catch {
+    return [];
+  }
+}
+
+function setSelectedCombatAttackers(ids = []) {
+  const input = el("combatAttackersInput");
+  if (input) input.value = [...new Set(ids.filter((id) => !!state.units?.[id]))].join(" ");
+}
+
+function clearCombatSelection() {
+  clearPendingCombatRoll();
+  setSelectedCombatAttackers([]);
+  selectedCombatDefenderHex = null;
+  if (el("combatDefendersInput")) el("combatDefendersInput").value = "";
 }
 
 function checkCombat(action) {
@@ -686,7 +878,6 @@ function checkCombat(action) {
 function terrainDefenseBonus(hex) {
   const tags = hexTags(hex);
   if (tags.includes("alamein_box")) return 3;
-  if (tags.includes("hill_or_ridge") || tags.includes("depression")) return 1;
   return 0;
 }
 
@@ -702,16 +893,36 @@ function requiredDefenderHexes(attackers) {
   return required;
 }
 
-function resolveCombat(action) {
+function resolveCombat(action, options = {}) {
   const verdict = checkCombat(action);
   if (!verdict.legal) return verdict;
   if (!action.die) return { legal: false, reason: "结算战斗需要选择骰子" };
-  pushHistory("combat");
+  if (!options.skipHistory) pushHistory("combat");
   const result = RulesEngine.resolveCombat(rulesContext(), action);
   if (result.legal) {
+    const reportVerdict = {
+      ...result.details,
+      battle_terrain: (result.details.defender_hexes || []).map((hex) => ({
+        hex,
+        terrain: terrainSummaryLabel([...new Set([
+          ...hexTags(hex),
+          ...(minesAt(hex).some((mine) => !mine.cleared) ? ["minefield"] : [])
+        ])])
+      }))
+    };
     state.combat_log ||= [];
-    state.combat_log.push({ turn: state.turn, phase: state.phase, action, verdict: result.details });
-    logEvent("combat", `战斗 ${result.details.attackers.join(", ")} -> ${result.details.defender_hexes.join(", ")}：${result.details.outcome}`, { action, verdict: result.details });
+    state.combat_log.push({
+      id: `combat-${Date.now()}-${state.combat_log.length + 1}`,
+      time: new Date().toISOString(),
+      turn: state.turn,
+      phase: state.phase,
+      side: state.active_side,
+      action: structuredClone(action),
+      verdict: reportVerdict
+    });
+    clearCombatSelection();
+    selectedUnitId = null;
+    logEvent("combat", `战斗 ${reportVerdict.attackers.join(", ")} -> ${reportVerdict.defender_hexes.join(", ")}：${reportVerdict.outcome}`, { action, verdict: reportVerdict });
     renderStateAfterAction();
   }
   return result;
@@ -805,6 +1016,15 @@ function victoryStatusSummary() {
   };
 }
 
+function gameTurnSpan(sourceState = state, victory = {}) {
+  const loggedTurns = (sourceState?.game_log || [])
+    .map((entry) => Number(entry.turn || 0))
+    .filter((turn) => Number.isInteger(turn) && turn > 0);
+  const start = Number(sourceState?.started_turn || (loggedTurns.length ? Math.min(...loggedTurns) : sourceState?.scenario_meta?.starting_turn) || 1);
+  const end = Number(victory.final_turn || sourceState?.turn || scenarioFinalTurn(sourceState?.scenario));
+  return { start, end, count: Math.max(1, end - start + 1) };
+}
+
 function isVictoryCombatUnit(unit) {
   return isMapCounter(unit) && unit.side === "allies" && (unit.kind || "ground") === "ground";
 }
@@ -831,11 +1051,29 @@ function checkVictory() {
 
 function stopAiAtFinalVictory(log = []) {
   if (!isFinalVictoryCheck()) return false;
-  const victory = checkVictory();
+  return finalizeCompletedGame(checkVictory());
+}
+
+function finalizeCompletedGame(victory = checkVictory()) {
+  if (!victory?.final) return false;
+  const alreadyCompleted = !!state.game_completed;
+  state.game_completed = true;
+  state.completed_at ||= new Date().toISOString();
+  state.final_victory = structuredClone(victory);
   state.ai_autoplay = false;
   syncAiAutoControls();
-  logEvent("victory", `最终结算：${victory.reason}`, victory);
-  renderStateAfterAction();
+  if (!alreadyCompleted && !(state.game_log || []).some((entry) => entry.type === "victory")) {
+    logEvent("victory", `最终结算：${victory.reason}`, victory);
+  }
+  persistCurrentGameSlot({
+    id: activeSaveSlotId || `slot-${Date.now()}`,
+    name: activeSaveSlotId ? undefined : `${scenarioShortName(state.scenario)} 战役档案`,
+    archived: true,
+    render: false
+  });
+  renderSaveSlots({ renderGameUi: false });
+  renderSetupArchive();
+  if (alreadyCompleted) showAfterActionReport(victory);
   return victory;
 }
 
@@ -918,11 +1156,14 @@ function switchTab(name, options = {}) {
   document.querySelector(`.tab[data-tab="${name}"]`)?.classList.add("active");
   el(`tab-${name}`)?.classList.add("active");
   const modeByTab = { move: "move", combat: "combat", judge: "all", state: "command" };
-  if (modeByTab[name] && el("mapViewModeSelect")) setMapViewMode(modeByTab[name]);
+  const nextMapMode = modeByTab[name];
+  const mapModeChanged = !!(nextMapMode && el("mapViewModeSelect")?.value !== nextMapMode);
+  if (mapModeChanged) setMapViewMode(nextMapMode);
   syncPhaseRecommendedTab();
-  renderOperationHint();
-  renderActionControls();
-  renderMap();
+  if (mapModeChanged) {
+    renderOperationHint();
+    renderMap();
+  }
 }
 
 function selectedUnit() {
@@ -970,7 +1211,7 @@ function syncMapModeButtons() {
   }
 }
 
-function activateMoveForSelectedUnit() {
+function activateMoveForSelectedUnit(options = {}) {
   const unit = selectedUnit();
   if (!selectedUnitId || !unit || !canMoveUnitNow({ id: selectedUnitId, ...unit })) return;
   setMapViewMode("move");
@@ -980,40 +1221,98 @@ function activateMoveForSelectedUnit() {
   if (moveSelect) moveSelect.value = selectedUnitId;
   switchTab("move", { expandPanel: true });
   renderRouteStatus();
-  focusMapOnHex(unit.hex);
+  focusMapOnHex(unit.hex, { behavior: options.focusBehavior || "smooth" });
 }
 
-function activateCombatForSelectedUnit() {
+function activateCombatForSelectedUnit(options = {}) {
   const unit = selectedUnit();
   if (!selectedUnitId || !unit || !canCombatUnitNow({ id: selectedUnitId, ...unit })) return;
+  clearPendingCombatRoll();
   setMapViewMode("combat");
   const input = el("combatAttackersInput");
   if (input) input.value = selectedUnitId;
-  const target = adjacentCombats(unit.side).find((pair) => pair.attacker === selectedUnitId);
-  if (target) {
-    selectedCombatDefenderHex = target.defender_hex;
-    const defenderInput = el("combatDefendersInput");
-    if (defenderInput) defenderInput.value = target.defender_hex;
-  }
+  selectedCombatDefenderHex = null;
+  if (el("combatDefendersInput")) el("combatDefendersInput").value = "";
   switchTab("combat", { expandPanel: true });
-  setOutput("combatOutput", checkCombat(parseCombatAction()));
+  setOutput("combatOutput", "");
+  renderActionControls();
   renderMap();
-  focusMapOnHex(unit.hex);
+  focusMapOnHex(unit.hex, { behavior: options.focusBehavior || "smooth" });
 }
 
 function selectCombatTarget(defenderHex, attackerId = selectedUnitId) {
-  if (!attackerId || !state.units?.[attackerId]) return;
-  selectedUnitId = attackerId;
-  selectedCombatDefenderHex = normalizeHex(defenderHex);
+  let targetHex;
+  try { targetHex = normalizeHex(defenderHex); }
+  catch { return; }
+  if (selectedCombatDefenderHex === targetHex) {
+    clearPendingCombatRoll();
+    selectedCombatDefenderHex = null;
+    if (el("combatDefendersInput")) el("combatDefendersInput").value = "";
+    setOutput("combatOutput", "");
+    renderActionControls();
+    renderMapSelectionHud();
+    renderMap();
+    return;
+  }
+  const currentAttackers = selectedCombatAttackerIds();
+  const candidateIds = [...new Set([
+    ...currentAttackers,
+    ...(attackerId && state.units?.[attackerId] ? [attackerId] : [])
+  ])];
+  const pairs = adjacentCombats(state.active_side);
+  const eligibleAttackers = candidateIds.filter((id) => {
+    const unit = state.units?.[id] ? { id, ...state.units[id] } : null;
+    return canCombatUnitNow(unit) && pairs.some((pair) => pair.attacker === id && pair.defender_hex === targetHex);
+  });
+  if (!eligibleAttackers.length) {
+    setOutput("combatOutput", { legal: false, reason: `${targetHex} 不与当前选择的攻击单位相邻` });
+    renderActionControls();
+    return;
+  }
+  clearPendingCombatRoll();
+  const removedAttackers = currentAttackers.filter((id) => !eligibleAttackers.includes(id));
+  selectedUnitId = eligibleAttackers.includes(attackerId) ? attackerId : eligibleAttackers.at(-1);
+  selectedCombatDefenderHex = targetHex;
   const attackerInput = el("combatAttackersInput");
   const defenderInput = el("combatDefendersInput");
-  if (attackerInput) attackerInput.value = attackerId;
+  if (attackerInput) attackerInput.value = eligibleAttackers.join(" ");
   if (defenderInput) defenderInput.value = selectedCombatDefenderHex;
   setMapViewMode("combat");
   switchTab("combat", { expandPanel: true });
-  setOutput("combatOutput", checkCombat(parseCombatAction()));
+  const verdict = checkCombat(parseCombatAction());
+  if (removedAttackers.length) {
+    verdict.details = {
+      ...(verdict.details || {}),
+      selection_note: `已移除 ${removedAttackers.map((id) => state.units?.[id]?.name || id).join("、")}：这些单位不与 ${targetHex} 相邻`
+    };
+  }
+  setOutput("combatOutput", verdict);
   renderActionControls();
   renderMap();
+}
+
+function toggleCombatAttacker(unitId) {
+  const unit = unitId && state.units?.[unitId] ? { id: unitId, ...state.units[unitId] } : null;
+  if (!canCombatUnitNow(unit)) return;
+  clearPendingCombatRoll();
+  const attackers = selectedCombatAttackerIds().filter((id) => canCombatUnitNow({ id, ...state.units[id] }));
+  const included = attackers.includes(unitId);
+  const next = included ? attackers.filter((id) => id !== unitId) : [...attackers, unitId];
+  setSelectedCombatAttackers(next);
+  selectedUnitId = next.length ? (included ? next.at(-1) : unitId) : null;
+  selectedHexId = null;
+  selectedCombatDefenderHex = null;
+  if (el("combatDefendersInput")) el("combatDefendersInput").value = "";
+  setMapViewMode("combat");
+  switchTab("combat", { expandPanel: true });
+  const action = parseCombatAction();
+  setOutput("combatOutput", action.attackers.length && action.defender_hexes.length ? checkCombat(action) : "");
+  renderSelectedUnit();
+  renderMapSelectionHud();
+  renderActionableUnits();
+  renderActionControls();
+  renderMap();
+  if (!included && unit.hex) focusMapOnHex(unit.hex, { behavior: "auto" });
 }
 
 function activateSupplyForSelectedUnit() {
@@ -1033,6 +1332,8 @@ function isMovableUnit(unit) {
 
 function selectUnit(unitId, options = {}) {
   if (!state.units?.[unitId]) return;
+  const unitChanged = selectedUnitId !== unitId;
+  if (selectedUnitId && unitChanged) cancelPendingMovementWork("selected unit changed");
   selectedUnitId = unitId;
   selectedHexId = null;
   const unit = state.units[unitId];
@@ -1042,22 +1343,28 @@ function selectUnit(unitId, options = {}) {
     syncMoveDraftToUnit(unitId);
     const select = el("moveUnitSelect");
     if (select) select.value = unitId;
+    if (unitChanged && el("moveModeSelect")) el("moveModeSelect").value = unit.road_mode ? "road" : "normal";
   }
   highlightedSupplyPath = switchedTab || viewMode === "supply" || viewMode === "all"
     ? traceSupplyPath(unitId)
     : [];
   if (switchedTab) switchTab("state");
+  document.querySelectorAll(".unit-marker.selected").forEach((node) => node.classList.remove("selected"));
+  document.querySelector(`.unit-marker[data-unit-id="${unitId}"]`)?.classList.add("selected");
+  document.querySelectorAll(".unit-card.selected").forEach((node) => node.classList.remove("selected"));
+  document.querySelector(`.unit-card[data-unit-id="${CSS.escape(unitId)}"]`)?.classList.add("selected");
   renderSelectedUnit();
   renderSelectedHex();
   renderMapSelectionHud();
   renderOperationHint();
-  renderActionableUnits();
+  syncActionableUnitSelection();
   renderActionControls();
+  renderSideCommandBar({ skipWarnings: true });
   const moveSelect = el("moveUnitSelect");
   if (moveSelect && [...moveSelect.options].some((option) => option.value === unitId)) moveSelect.value = unitId;
-  renderCombatControls();
+  if (phaseKind() === "combat" || el("tab-combat")?.classList.contains("active")) renderCombatControls();
   if (el("tab-move")?.classList.contains("active")) renderRouteStatus();
-  if (!switchedTab) renderMap();
+  if (!switchedTab) scheduleMapRender();
 }
 
 function selectHex(hex) {
@@ -1081,7 +1388,15 @@ function pushHistory(type) {
   if (actionLog.length > 20) actionLog.shift();
 }
 
+function undoActionBlocked() {
+  return !!(aiAutoRunning || pendingCombatRoll || aiRetreatResolutionTimer || (state.ai_autoplay && currentPhaseIsAiControlled()));
+}
+
 function undoLastAction() {
+  if (undoActionBlocked()) {
+    setOutput("combatOutput", { legal: false, reason: "AI 正在行动或战斗结果尚未执行，暂时不能撤销" });
+    return;
+  }
   const last = actionLog.pop();
   if (!last) {
     setOutput("combatOutput", "没有可撤销动作");
@@ -1099,14 +1414,31 @@ function clearMine(engineerId, rawHex) {
   const unit = state.units[engineerId];
   if (!unit) return { legal: false, reason: "请选择清雷单位" };
   pushHistory("clear_mine");
-  const die = el("combatResolveDieSelect")?.value ? Number(el("combatResolveDieSelect").value) : null;
+  const die = isEngineer({ id: engineerId, ...unit }) ? null : rollCombatDie();
   const result = RulesEngine.clearMine(rulesContext(), engineerId, rawHex, die);
   if (!result.legal) {
     actionLog.pop();
     return result;
   }
   const cleared = result.details?.cleared !== false;
-  logEvent("clear_mine", cleared ? `${engineerId} 清除 ${normalizeHex(rawHex)} 敌方雷区` : `${engineerId} 清雷失败：${normalizeHex(rawHex)}`, result.details);
+  result.details = {
+    ...(result.details || {}),
+    mine_hex: normalizeHex(rawHex),
+    mine_side: enemySide(unit.side),
+    unit_name: unit.name || engineerId,
+    die: isEngineer({ id: engineerId, ...unit }) ? null : die,
+    success_range: isEngineer({ id: engineerId, ...unit }) ? "自动清除" : unit.side === "axis" ? "3-6" : "2-6",
+    cleared
+  };
+  if (selectedUnitId === engineerId) clearCombatSelection();
+  const rollSummary = result.details.die == null ? "自动清除" : `掷出 ${result.details.die}`;
+  logEvent(
+    "clear_mine",
+    cleared
+      ? `${result.details.unit_name} ${rollSummary}，清除 ${normalizeHex(rawHex)} 敌方雷区`
+      : `${result.details.unit_name} ${rollSummary}，${normalizeHex(rawHex)} 排雷失败`,
+    result.details
+  );
   renderState();
   return result;
 }
@@ -1124,6 +1456,12 @@ function routeVerdict() {
   const unitId = currentMoveUnitId();
   if (!unitId || movePathDraft.length < 2) return null;
   return checkMove(unitId, movePathDraft, moveOptions());
+}
+
+function executableMoveForUnit(unitId) {
+  if (!unitId || currentMoveUnitId() !== unitId || movePathDraft.length < 2) return null;
+  const verdict = routeVerdict();
+  return verdict?.legal ? verdict : null;
 }
 
 function autoJudgeReport() {
@@ -1256,10 +1594,6 @@ function renderAutoJudge() {
       </section>
     `;
   }
-  const move = el("moveOutput");
-  if (!move) return;
-  const verdict = routeVerdict();
-  setOutput("moveOutput", verdict || "");
   renderActionControls();
 }
 
@@ -1267,52 +1601,40 @@ function renderRouteStatus() {
   const target = el("routeStatus");
   if (!target) return;
   renderRouteStepList();
-  renderRouteOverview();
+  const feedback = el("moveOutput");
+  if (feedback) {
+    feedback.innerHTML = "";
+    syncWorkflowFeedback(feedback, "");
+  }
   const unit = currentMoveUnit();
   if (!unit || !isMovableUnit(unit)) {
     target.className = "route-status empty";
-    target.textContent = "";
+    target.innerHTML = "";
     renderActionControls();
-    return;
-  }
-  if (movePathDraft.length < 2) {
-    target.className = "route-status muted";
-    target.textContent = `${unit.name || unit.id}: 点击地图相邻格画路线`;
-    renderActionControls();
-    return;
-  }
-  const verdict = routeVerdict();
-  target.className = `route-status ${verdict?.legal ? "ok" : "bad"}`;
-  target.textContent = verdict?.details
-    ? `${verdict.reason}：${verdict.details.spent}/${verdict.details.allowance} MP，${verdict.details.mode === "road" ? "道路模式" : "普通移动"}`
-    : verdict ? verdict.reason : "";
-  renderAutoJudge();
-}
-
-function renderRouteOverview() {
-  const panel = el("routeOverview");
-  if (!panel) return;
-  const unit = currentMoveUnit();
-  if (!unit || !isMovableUnit(unit)) {
-    panel.className = "route-overview empty";
-    panel.innerHTML = "";
     return;
   }
   const start = normalizeHex(unit.hex || movePathDraft[0] || "");
-  const end = movePathDraft.length > 1 ? movePathDraft.at(-1) : "";
+  if (movePathDraft.length < 2) {
+    target.className = "route-status muted";
+    target.innerHTML = `
+      <span>待路线</span>
+      <strong>起点 ${escapeHtml(start || "-")}</strong>
+      <small>点击地图选择目标</small>
+    `;
+    renderActionControls();
+    return;
+  }
   const verdict = routeVerdict();
-  const legal = !!verdict?.legal;
-  const bad = verdict?.legal === false;
-  const spent = verdict?.details ? `${verdict.details.spent}/${verdict.details.allowance}` : "未规划";
-  const mode = verdict?.details?.mode === "road" ? "道路" : (el("moveModeSelect")?.value === "road" ? "道路" : "普通");
-  const result = legal ? "可执行" : bad ? "不可执行" : "待规划";
-  panel.className = `route-overview ${legal ? "ok" : bad ? "bad" : "muted"}`;
-  panel.innerHTML = `
-    <div><span>起点</span><b>${escapeHtml(start || "-")}</b></div>
-    <div><span>终点</span><b>${escapeHtml(end || "点击地图")}</b></div>
-    <div><span>MP</span><b>${escapeHtml(spent)}</b><small>${escapeHtml(mode)}</small></div>
-    <div><span>裁判</span><b>${escapeHtml(result)}</b></div>
+  const end = movePathDraft.at(-1) || "";
+  const mode = verdict?.details?.mode === "road" ? "道路" : "普通";
+  const cost = verdict?.details ? `${verdict.details.spent}/${verdict.details.allowance} MP` : "等待裁判";
+  target.className = `route-status ${verdict?.legal ? "ok" : "bad"}`;
+  target.innerHTML = `
+    <span>${verdict?.legal ? "可执行" : "受阻"}</span>
+    <strong>${verdict?.legal ? `${escapeHtml(start)} → ${escapeHtml(end)}` : escapeHtml(verdict?.reason || "路线不合法")}</strong>
+    <small>${escapeHtml(cost)} · ${escapeHtml(mode)}</small>
   `;
+  renderActionControls();
 }
 
 function renderRouteStepList() {
@@ -1325,22 +1647,12 @@ function renderRouteStepList() {
     return;
   }
   const verdict = routeVerdict();
-  const status = verdict?.details
-    ? `${verdict.details.spent}/${verdict.details.allowance} MP`
-    : movePathDraft.length > 1
-    ? (verdict?.reason || "等待裁判")
-    : "起点";
-  const label = movePathDraft.length > 1 ? `${movePathDraft.length} 个路线点` : "路线起点";
   panel.className = `route-step-list ${verdict?.legal === false ? "bad" : verdict?.legal ? "ok" : ""}`;
   panel.innerHTML = `
-    <div class="route-step-head">
-      <span>${escapeHtml(label)}</span>
-      <b>${escapeHtml(status)}</b>
-    </div>
-    <div class="route-step-track">
-      ${movePathDraft.map((hex, index) => `
+    <div class="route-step-track" aria-label="已规划路线">
+      ${movePathDraft.map((hex, index) => `${index ? '<span class="route-step-arrow" aria-hidden="true">›</span>' : ''}
         <button class="route-step ${index === 0 ? "start" : ""} ${index === movePathDraft.length - 1 ? "end" : ""}" type="button" data-route-index="${escapeHtml(index)}">
-          <small>${escapeHtml(index === 0 ? "起" : index === movePathDraft.length - 1 ? "终" : String(index))}</small>
+          ${index === 0 || index === movePathDraft.length - 1 ? `<small>${escapeHtml(index === 0 ? "起" : "终")}</small>` : ""}
           <b>${escapeHtml(hex)}</b>
         </button>
       `).join("")}
@@ -1361,7 +1673,7 @@ function handleRouteStepListClick(event) {
 }
 
 function unitDisplayRows(unit) {
-  const supply = unit.id && isPlayableSide(unit.side) ? supplyStateLabel(supplyState(unit.id)) : "";
+  const supply = unit.id && isPlayableSide(unit.side) ? supplyStateLabel(uiSupplyState(unit.id)) : "";
   return [
     ["编号", unit.id],
     ["名称", unit.name || ""],
@@ -1384,10 +1696,29 @@ function unitDisplayRows(unit) {
 function unitStackSummary(unit) {
   const type = unitTypeGroup(unit).label;
   const values = [];
-  if (isCombatUnit(unit)) values.push(`A${unit.attack ?? 0}`, `D${unit.defense ?? unit.attack ?? 0}`);
-  if (isMovableUnit(unit)) values.push(`MP${unit.movement ?? 0}`);
-  if (isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))) values.push(supplyStateLabel(supplyState(unit.id)));
+  if (isCombatUnit(unit)) values.push(`战斗力 ${unit.attack ?? 0}`);
+  if (isMovableUnit(unit)) values.push(`移动力 ${unit.movement ?? 0}`);
+  if (isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))) values.push(supplyStateLabel(uiSupplyState(unit.id)));
   return `${sideDisplayName(unit.side)} · ${type}${values.length ? ` · ${values.join(" · ")}` : ""}`;
+}
+
+function movementOriginBlockReason(unit) {
+  if (!unit?.id || !unit.hex || !canMoveUnitNow(unit)) return "";
+  const origin = normalizeHex(unit.hex);
+  const friendlyStayBehind = (unitsByHex()[origin] || []).some((candidate) => (
+    candidate.id !== unit.id &&
+    candidate.side === unit.side &&
+    !candidate.eliminated &&
+    isStackingUnit(candidate)
+  ));
+  if (enemyZocSources(unit.side, origin).size && !friendlyStayBehind) {
+    return `${origin} 位于敌方 ZOC；单独一支单位不能主动离开，必须有友军留守，或先在战斗阶段击退相邻敌军。`;
+  }
+  if (enemyMinesAt(unit.side, origin).length && !isEngineer(unit)) {
+    return `${origin} 是未清除的敌方雷区；非工兵单位必须先清雷才能主动离开。`;
+  }
+  if (effectiveMovement(unit) <= 0) return "该单位当前没有可用移动力。";
+  return "";
 }
 
 function createStackUnitButton(unit, compact = false) {
@@ -1418,6 +1749,8 @@ function unitActionHint(unit) {
   const kind = phaseKind();
   if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) {
     if (canMoveUnitNow(unit)) {
+      const blockReason = movementOriginBlockReason(unit);
+      if (blockReason) return { label: "移动受阻", detail: blockReason, tone: "blocked" };
       const roadText = unit.road_mode ? "道路模式中，移动会受道路朝向限制。" : canEnterRoadModeNow(unit) ? "可进入道路模式。" : "普通移动。";
       return { label: "可以移动", detail: `点击“移动”，再在地图上点相邻格绘制路线。${roadText}`, tone: "ready" };
     }
@@ -1438,7 +1771,7 @@ function unitActionFacts(unit) {
   const facts = [];
   const kind = phaseKind();
   if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind) && canMoveUnitNow(unit)) {
-    facts.push(["可达", `${reachableHexes(unit.id, moveOptions()).size} 格`]);
+    facts.push(["移动力", `${unit.movement ?? 0} MP`]);
     facts.push(["道路", unit.road_mode ? "道路模式" : canEnterRoadModeNow(unit) ? "可进入" : "普通"]);
   }
   if (kind === "combat" && isCombatUnit(unit)) {
@@ -1447,7 +1780,7 @@ function unitActionFacts(unit) {
     if (targets[0]) facts.push(["最近", targets[0].defender_hex]);
   }
   if (isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))) {
-    facts.push(["补给", supplyStateLabel(supplyState(unit.id))]);
+    facts.push(["补给", supplyStateLabel(uiSupplyState(unit.id))]);
   }
   if (unit.road_mode) facts.push(["朝向", unit.road_facing || "道路"]);
   if (unit.state && unit.state !== "fresh") facts.push(["状态", unitStateLabel(unit.state)]);
@@ -1471,6 +1804,7 @@ function renderSelectionSummary() {
   const hex = selectedHexId ? normalizeHex(selectedHexId) : "";
   if (unit) {
     const hint = unitActionHint(unit);
+    const canExecuteMove = !!executableMoveForUnit(unit.id);
     panel.className = `selection-summary compact ${unit.side || ""}`;
     panel.innerHTML = `
       <div>
@@ -1479,7 +1813,7 @@ function renderSelectionSummary() {
         <small>${escapeHtml(sideDisplayName(unit.side))} · ${escapeHtml(unit.hex || "未部署")} · ${escapeHtml(hint.label)}</small>
       </div>
       <div class="selection-summary-actions">
-        ${canMoveUnitNow(unit) ? `<button type="button" class="primary-action" data-selection-command="move">移动</button>` : ""}
+        ${canMoveUnitNow(unit) ? `<button type="button" class="primary-action" data-selection-command="${canExecuteMove ? "apply-move" : "move"}">${canExecuteMove ? "执行移动" : "移动"}</button>` : ""}
         ${canCombatUnitNow(unit) ? `<button type="button" class="primary-action" data-selection-command="combat">战斗</button>` : ""}
         ${(isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit)) && isPlayableSide(unit.side) ? `<button type="button" class="secondary-action" data-selection-command="supply">补给线</button>` : ""}
         <button type="button" class="quiet-action" data-selection-command="clear">清除</button>
@@ -1552,7 +1886,7 @@ function renderSelectedUnit() {
   const chips = document.createElement("div");
   chips.className = "unit-stat-chips";
   const supplyChip = isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit)
-    ? supplyStateLabel(supplyState(unit.id))
+    ? supplyStateLabel(uiSupplyState(unit.id))
     : "标记";
   chips.innerHTML = `
     <span>战力 <b>${unit.attack ?? 0}</b></span>
@@ -1574,11 +1908,15 @@ function renderSelectedUnit() {
   const actions = document.createElement("div");
   actions.className = "selected-unit-actions";
   if (canMoveUnitNow(unit)) {
+    const canExecuteMove = !!executableMoveForUnit(unit.id);
     const moveButton = document.createElement("button");
     moveButton.type = "button";
-    moveButton.textContent = "移动";
+    moveButton.textContent = canExecuteMove ? "执行移动" : "移动";
     moveButton.className = "primary-action";
-    moveButton.addEventListener("click", () => activateMoveForSelectedUnit());
+    moveButton.addEventListener("click", () => {
+      if (executableMoveForUnit(unit.id)) executeCurrentMove();
+      else activateMoveForSelectedUnit();
+    });
     actions.append(moveButton);
   }
   if (canCombatUnitNow(unit)) {
@@ -1695,8 +2033,9 @@ function handleSelectionSummaryClick(event) {
   const button = event.target.closest?.("button[data-selection-command]");
   if (!button) return;
   const command = button.dataset.selectionCommand;
-  if (command === "move") activateMoveForSelectedUnit();
-  else if (command === "combat") activateCombatForSelectedUnit();
+  if (command === "move") activateMoveForSelectedUnit({ focusBehavior: "auto" });
+  else if (command === "apply-move") executeCurrentMove();
+  else if (command === "combat") activateCombatForSelectedUnit({ focusBehavior: "auto" });
   else if (command === "supply") activateSupplyForSelectedUnit();
   else if (command === "center") {
     const targetHex = selectedUnitId && state.units?.[selectedUnitId]?.hex ? state.units[selectedUnitId].hex : selectedHexId;
@@ -1724,75 +2063,132 @@ function renderMapSelectionHud() {
   if (!hud) return;
   hud.innerHTML = "";
   const unit = selectedUnitId ? unitsArray().find((item) => item.id === selectedUnitId) : null;
+  if (!unit) mapSelectionHudCollapsed = false;
   if (unit) {
-    const hint = unitActionHint(unit);
+    if (mapSelectionHudCollapsed) {
+      hud.className = `map-selection-hud map-unit-hud-collapsed ${unit.side || ""}`;
+      const expand = document.createElement("button");
+      expand.type = "button";
+      expand.className = "map-hud-expand";
+      expand.title = `展开 ${unit.name || unit.id} 的棋子信息`;
+      expand.setAttribute("aria-label", expand.title);
+      expand.innerHTML = `<img src="${escapeHtml(counterImageFor(unit))}" alt=""><span aria-hidden="true">›</span>`;
+      expand.addEventListener("click", () => {
+        mapSelectionHudCollapsed = false;
+        renderMapSelectionHud();
+      });
+      hud.append(expand);
+      return;
+    }
     hud.className = `map-selection-hud ${unit.side || ""}`;
+    const identity = document.createElement("div");
+    identity.className = "map-hud-unit";
+    const image = document.createElement("img");
+    image.className = "map-hud-counter";
+    image.src = counterImageFor(unit);
+    image.alt = "";
+    const identityText = document.createElement("div");
     const title = document.createElement("div");
     title.className = "map-hud-title";
-    title.innerHTML = `<b>${escapeHtml(unit.name || unit.id)}</b><span>${escapeHtml(sideDisplayName(unit.side))} ${escapeHtml(unit.hex || "")}</span>`;
-    const next = document.createElement("div");
-    next.className = `map-hud-next ${hint.tone}`;
-    next.innerHTML = `<b>${escapeHtml(hint.label)}</b><span>${escapeHtml(hint.detail)}</span>`;
+    title.innerHTML = `<b>${escapeHtml(unit.name || unit.id)}</b><span>${escapeHtml(sideDisplayName(unit.side))} · ${escapeHtml(unit.hex || "未部署")}</span>`;
+    const role = unitRoleDescription(unit);
+    const roleDescription = document.createElement("div");
+    roleDescription.className = "map-hud-role";
+    roleDescription.title = `${role.label}：${role.detail}`;
+    roleDescription.innerHTML = `<b>${escapeHtml(role.label)}</b><span>${escapeHtml(role.detail)}</span>`;
+    identityText.append(title, roleDescription);
+    identity.append(image, identityText);
+    const blockReason = movementOriginBlockReason(unit);
+    if (blockReason) {
+      roleDescription.classList.add("blocked");
+      roleDescription.title = blockReason;
+      roleDescription.innerHTML = `<b>移动受阻</b><span>${escapeHtml(blockReason)}</span>`;
+    }
     const chips = document.createElement("div");
     chips.className = "map-hud-chips";
-    const supplyChip = isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit) ? supplyStateLabel(supplyState(unit.id)) : "标记";
+    const supplyChip = isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit) ? supplyStateLabel(uiSupplyState(unit.id)) : "标记";
     chips.innerHTML = `
-      <span>A ${escapeHtml(unit.attack ?? 0)}</span>
-      <span>D ${escapeHtml(unit.defense ?? unit.attack ?? 0)}</span>
-      <span>MP ${escapeHtml(unit.movement ?? 0)}</span>
+      ${isCombatUnit(unit) ? `<span><b>战斗力</b> ${escapeHtml(unit.attack ?? 0)}</span>` : ""}
+      ${isMovableUnit(unit) ? `<span><b>移动力</b> ${escapeHtml(unit.movement ?? 0)} MP</span>` : ""}
       <span>${escapeHtml(supplyChip)}</span>
     `;
-    const factRail = document.createElement("div");
-    factRail.innerHTML = renderUnitActionFacts(unit, "map-hud-facts");
+    const sameHexUnits = unit.hex ? (unitsByHex()[normalizeHex(unit.hex)] || []) : [];
+    const peers = document.createElement("div");
+    peers.className = "map-hud-peers";
+    if (sameHexUnits.length > 1) {
+      const peerLabel = document.createElement("label");
+      peerLabel.innerHTML = `<span>同格 ${escapeHtml(sameHexUnits.length)}</span>`;
+      const peerSelect = document.createElement("select");
+      sameHexUnits.forEach((peer) => {
+        const option = document.createElement("option");
+        option.value = peer.id;
+        option.textContent = peer.name || peer.id;
+        option.selected = peer.id === selectedUnitId;
+        peerSelect.append(option);
+      });
+      peerSelect.addEventListener("change", () => selectUnit(peerSelect.value, { showStateTab: false }));
+      peerLabel.append(peerSelect);
+      peers.append(peerLabel);
+    }
     const actions = document.createElement("div");
     actions.className = "map-hud-actions";
-    if (canMoveUnitNow(unit)) actions.append(hudButton("移动", activateMoveForSelectedUnit, "primary-action"));
+    if (canMoveUnitNow(unit)) {
+      const canExecuteMove = !!executableMoveForUnit(unit.id);
+      actions.append(hudButton(
+        canExecuteMove ? "执行移动" : "移动",
+        canExecuteMove ? executeCurrentMove : activateMoveForSelectedUnit,
+        "primary-action"
+      ));
+    }
     if (canCombatUnitNow(unit)) actions.append(hudButton("战斗", activateCombatForSelectedUnit, "primary-action"));
     if ((isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit)) && isPlayableSide(unit.side)) {
       actions.append(hudButton("补给线", activateSupplyForSelectedUnit, "secondary-action"));
     }
-    actions.append(hudButton("居中", () => focusMapOnHex(unit.hex), "quiet-action"));
+    actions.append(hudButton("‹", () => {
+      mapSelectionHudCollapsed = true;
+      renderMapSelectionHud();
+    }, "quiet-action", "收起棋子信息"));
     actions.append(hudButton("×", () => {
       selectedUnitId = null;
+      mapSelectionHudCollapsed = false;
       renderState();
     }, "quiet-action", "关闭"));
-    hud.append(title, next, chips);
-    if (factRail.firstElementChild) hud.append(factRail.firstElementChild);
+    hud.append(identity, chips);
+    if (sameHexUnits.length > 1) hud.append(peers);
     hud.append(actions);
     return;
   }
   if (selectedHexId) {
     const units = unitsByHex()[selectedHexId] || [];
     const tags = hexTags(selectedHexId);
-    hud.className = "map-selection-hud";
+    const mines = minesAt(selectedHexId);
+    const zocSides = [];
+    if (enemyZocSources("allies", selectedHexId).size) zocSides.push("轴心国 ZOC");
+    if (enemyZocSources("axis", selectedHexId).size) zocSides.push("盟军 ZOC");
+    hud.className = "map-selection-hud map-hex-hud";
     const title = document.createElement("div");
     title.className = "map-hud-title";
     title.innerHTML = `<b>坐标 ${escapeHtml(selectedHexId)}</b><span>${escapeHtml(terrainSummaryLabel(tags))}</span>`;
     const summary = document.createElement("div");
     summary.className = "map-hud-summary";
-    summary.textContent = units.length ? units.map((item) => `${sideDisplayName(item.side)} ${item.name || item.id}`).join("; ") : "无单位";
-    const stack = document.createElement("div");
-    stack.className = `map-hud-stack ${units.length ? "" : "empty"}`;
-    if (units.length) units.slice(0, 4).forEach((item) => stack.append(createStackUnitButton(item, true)));
-    if (units.length > 4) {
-      const more = document.createElement("span");
-      more.textContent = `还有 ${units.length - 4} 个`;
-      stack.append(more);
-    }
+    summary.textContent = [
+      units.length ? `${units.length} 个单位` : "无单位",
+      mines.length ? `${mines.length} 个雷区` : "无雷区",
+      zocSides.join(" / ") || "无 ZOC"
+    ].join(" · ");
     const actions = document.createElement("div");
     actions.className = "map-hud-actions";
-    actions.append(hudButton("居中", () => focusMapOnHex(selectedHexId), "quiet-action"));
     actions.append(hudButton("×", () => {
       selectedHexId = null;
       renderState();
     }, "quiet-action", "关闭"));
-    hud.append(title, summary, stack, actions);
+    hud.append(title, summary, actions);
     return;
   }
   hud.className = "map-selection-hud hidden";
 }
 
-function renderMapActionHint() {
+function renderMapActionHint(reachableOverride = null, reachableLoading = false) {
   const target = el("mapActionHint");
   if (!target) return;
   const viewMode = el("mapViewModeSelect")?.value || "command";
@@ -1808,22 +2204,36 @@ function renderMapActionHint() {
   }
   else if (viewMode === "move" && unit && canMoveUnitNow(unit)) {
     const route = routeVerdict();
-    const reachable = reachableHexes(selectedUnitId, moveOptions()).size;
-    tone = route?.legal === false ? "bad" : "move";
-    title = route?.legal ? "路线可执行" : movePathDraft.length > 1 ? "检查路线" : "选择目的地";
-    detail = route?.legal
+    const routeFailure = moveRouteFailure
+      && moveRouteFailure.unitId === selectedUnitId
+      && moveRouteFailure.target === el("moveTargetInput")?.value
+      ? moveRouteFailure.verdict
+      : null;
+    const blockReason = movementOriginBlockReason(unit);
+    const reachable = reachableOverride instanceof Map
+      ? reachableOverride.size
+      : reachableHexes(selectedUnitId, moveOptions()).size;
+    tone = route?.legal === false || blockReason || routeFailure ? "bad" : "move";
+    title = blockReason ? "移动受阻" : routeFailure ? "目标格不可达" : route?.legal ? "路线可执行" : movePathDraft.length > 1 ? "检查路线" : "选择目的地";
+    detail = blockReason
+      ? blockReason
+      : routeFailure
+      ? routeFailure.reason
+      : reachableLoading && !route
+      ? "正在后台计算可达范围，界面仍可继续操作。"
+      : route?.legal
       ? `${unit.name || unit.id}：${route.details?.spent ?? "?"}/${route.details?.allowance ?? "?"} MP，点击执行移动。`
       : movePathDraft.length > 1
       ? (route?.reason || "路线等待裁判。")
       : `绿色格可点击，当前约 ${Math.max(0, reachable - 1)} 个可达格。`;
   }
   else if (viewMode === "combat" && unit && kind === "combat" && isCombatUnit(unit) && unit.side === state.active_side) {
-    const targets = adjacentCombats(unit.side).filter((pair) => pair.attacker === unit.id);
+    const targets = combatTargetOptionsForSelectedUnit();
     tone = targets.length ? "combat" : "idle";
     title = targets.length ? "选择攻击目标" : "没有相邻目标";
     detail = targets.length
-      ? `红色格可攻击。${selectedCombatDefenderHex ? `已选择 ${selectedCombatDefenderHex}，可预览或结算。` : `当前有 ${targets.length} 个目标格。`}`
-      : "战斗阶段需要相邻敌方作战单位。";
+      ? `红色格可攻击。${selectedCombatDefenderHex ? `已选择 ${selectedCombatDefenderHex}，可预览或结算。` : `已选单位附近有 ${targets.length} 个目标格，点击敌方棋子即可攻击。`}`
+      : "当前选择的单位附近没有敌方目标。";
   }
   else if (viewMode === "supply" && unit && highlightedSupplyPath.length) {
     tone = "supply";
@@ -1842,45 +2252,6 @@ function renderMapActionHint() {
   }
   target.className = `map-action-hint ${tone}`;
   target.innerHTML = `<b>${escapeHtml(title)}</b><span>${escapeHtml(detail)}</span>`;
-}
-
-function mapLegendItems(viewMode = el("mapViewModeSelect")?.value || "command") {
-  if (viewMode === "move") {
-    return [
-      ["unit", "可行动"],
-      ["reach", "可达"],
-      ["cost", "MP"],
-      ["route", "路线"]
-    ];
-  }
-  if (viewMode === "combat") {
-    return [
-      ["unit", "可攻击"],
-      ["target", "目标"],
-      ["odds", "赔率"],
-      ["blocked", "受阻"]
-    ];
-  }
-  if (viewMode === "supply") return [["supply", "补给线"], ["unit", "选中单位"]];
-  if (viewMode === "zoc") return [["axis", "Axis ZOC"], ["allies", "Allies ZOC"], ["contested", "争夺"]];
-  if (viewMode === "terrain") return [["terrain", "地形"], ["mine", "雷区"], ["hex", "坐标"]];
-  if (viewMode === "all") return [["unit", "可行动"], ["reach", "可达"], ["target", "目标"], ["supply", "补给"], ["mine", "雷区"]];
-  return [["axis", "Axis 棋子"], ["allies", "Allies 棋子"]];
-}
-
-function renderMapLegend() {
-  const target = el("mapLegend");
-  if (!target) return;
-  const items = mapLegendItems();
-  if (!items.length) {
-    target.className = "map-legend hidden";
-    target.innerHTML = "";
-    return;
-  }
-  target.className = "map-legend";
-  target.innerHTML = items.map(([key, label]) => `
-    <span class="${escapeHtml(key)}"><i></i>${escapeHtml(label)}</span>
-  `).join("");
 }
 
 function dockButton(label, command, options = {}) {
@@ -1978,7 +2349,7 @@ function closeMapToolMenus(except = null) {
 function clearInteractionFocus() {
   selectedUnitId = null;
   selectedHexId = null;
-  selectedCombatDefenderHex = null;
+  clearCombatSelection();
   highlightedSupplyPath = [];
   movePathDraft = [];
   syncMovePathInput();
@@ -1992,6 +2363,7 @@ function renderPhaseActionDock() {
   const sideDisplay = state.phase === "end_game_turn" ? "End Turn" : (side === "axis" ? "Axis" : "Allies");
   const kind = phaseKind();
   const aiControlled = currentPhaseIsAiControlled();
+  const pendingAiCombat = !!pendingCombatRoll?.ai && pendingCombatRollIsCurrent();
   const buttons = [];
   const notes = [];
   const progress = phaseProgressMeta();
@@ -2000,12 +2372,42 @@ function renderPhaseActionDock() {
   let focus = guide.action;
   let dockMode = kind || "state";
 
-  if (state.phase === "end_game_turn") {
+  if (state.game_completed) {
+    dockMode = "end";
+    focus = "战役已结束并归档";
+    notes.push(state.final_victory?.reason || "最终胜负与日志已保存");
+    buttons.push(dockButton("查看日志", "open-log", { primary: true }));
+    buttons.push(dockButton("返回首页", "return-home"));
+  }
+  else if (state.phase === "end_game_turn") {
     dockMode = "end";
     focus = confirmEnd ? "再次确认进入下一回合" : "回合结束结算";
     notes.push(confirmEnd ? "会处理补给、孤立、胜负并推进回合" : "检查补给、孤立和胜负");
     buttons.push(dockOpenPanelButton("打开裁判"));
     buttons.push(dockButton(confirmEnd ? "确认进入下一回合" : "进入下一回合", "end-phase", { primary: true, warning: confirmEnd }));
+  }
+  else if (pendingAiCombat) {
+    const pending = pendingRetreatSelection?.plan?.pending;
+    const unit = pending?.unit ? state.units?.[pending.unit] : null;
+    const retreatRequirement = pendingCombatRetreatRequirement();
+    const details = pendingCombatRoll?.verdict?.details || {};
+    dockMode = "combat";
+    if (pendingRetreatNeedsChoice()) {
+      focus = `${unit?.name || pending?.unit || "己方单位"} 等待撤退`;
+      notes.push(`从 ${pending?.from || unit?.hex || "当前格"} 选择完整的 ${pendingRetreatSelection?.count || "-"} 格路线`);
+      buttons.push(dockButton("打开撤退选择", "open-phase-panel", { primary: true }));
+    }
+    else if (retreatRequirement && !pendingRetreatIsAiControlled()) {
+      focus = "撤退路线已确定";
+      notes.push("执行后写入战报，AI 将继续行动");
+      buttons.push(dockButton("执行战斗结果", "combat-action", { primary: true }));
+    }
+    else {
+      focus = `AI 战斗结果：${details.outcome || "待执行"}`;
+      notes.push(`骰点 ${details.die || "-"} · 赔率 ${details.odds_column || "-"} · ${combatOutcomeExplanation(details.outcome)}`);
+      buttons.push(dockButton("查看战斗", "open-phase-panel", { primary: true }));
+    }
+    buttons.push(dockButton("暂停 AI", "pause-ai"));
   }
   else if (aiControlled) {
     dockMode = "ai";
@@ -2014,6 +2416,26 @@ function renderPhaseActionDock() {
     buttons.push(dockButton(state.ai_autoplay ? "暂停 AI" : "恢复 AI", state.ai_autoplay ? "pause-ai" : "resume-ai", { primary: true }));
     buttons.push(dockButton("打开 AI 设置", "open-ai-panel"));
     buttons.push(dockButton(phaseEndButtonLabel("结束阶段"), "end-phase", { quiet: !confirmEnd, warning: confirmEnd }));
+  }
+  else if (kind === "initial_movement" && temporaryOverstackRepair()) {
+    const repair = temporaryOverstackRepair();
+    const selectedCanBeRemoved = repair.removable_unit_ids.includes(selectedUnitId);
+    dockMode = "move";
+    focus = `${repair.hex} 必须先恢复合法堆叠`;
+    notes.push(`${repair.side === "axis" ? "Axis" : "Allies"} 超出 ${repair.excess} 个单位`);
+    if (repair.options.length) {
+      notes.push("该堆叠仍可通过移动恢复");
+      buttons.push(dockButton("选择可移出单位", "focus-overstack", { primary: true }));
+      buttons.push(dockOpenPanelButton("打开移动"));
+    }
+    else if (selectedCanBeRemoved) {
+      notes.push("已无合法拆堆路线，可由玩家选择超限单位移除");
+      buttons.push(dockButton("移除所选超限单位", "eliminate-overstack", { primary: true, warning: true }));
+    }
+    else {
+      notes.push("已无合法拆堆路线，请先选择一个计入上限的单位");
+      buttons.push(dockButton("选择超限单位", "focus-overstack", { primary: true }));
+    }
   }
   else if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) {
     dockMode = "move";
@@ -2026,7 +2448,7 @@ function renderPhaseActionDock() {
       focus = "选择当前方可移动单位";
       notes.push(actionableCount ? `${actionableCount} 个单位可移动` : "没有可移动单位");
       if (actionableCount) buttons.push(dockButton("选择推荐单位", "focus-first-actionable", { primary: true }));
-      buttons.push(dockOpenPanelButton("打开移动", { primary: !actionableCount }));
+      buttons.push(dockOpenPanelButton("打开移动", { primary: !actionableCount, disabled: !actionableCount }));
     }
     else if (!hasRoute) {
       focus = `${unit.name || unit.id} 准备移动`;
@@ -2061,13 +2483,16 @@ function renderPhaseActionDock() {
       notes.push(canCombatUnitNow(selected) ? "可使用当前选中单位" : actionableCount ? `${actionableCount} 个单位可攻击` : "没有可攻击单位");
       if (canCombatUnitNow(selected)) buttons.push(dockButton("使用选中", "use-selected-combat", { primary: true }));
       else if (actionableCount) buttons.push(dockButton("选择推荐单位", "focus-first-actionable", { primary: true }));
-      buttons.push(dockOpenPanelButton("打开战斗", { primary: !canCombatUnitNow(selected) && !actionableCount }));
+      buttons.push(dockOpenPanelButton("打开战斗", { primary: !canCombatUnitNow(selected) && !actionableCount, disabled: !actionableCount }));
     }
     else {
-      focus = verdict?.legal ? "战斗可结算" : "战斗不可执行";
+      const awaitingResult = !!pendingCombatRoll && pendingCombatRollIsCurrent();
+      const choosingRetreat = awaitingResult && pendingRetreatNeedsChoice();
+      focus = verdict?.legal ? (choosingRetreat ? "选择撤退位置" : awaitingResult ? "战斗结果待执行" : "战斗准备完毕") : "战斗不可执行";
       notes.push(`${attackers.length} 个攻击单位 · ${defenders.join(", ")}`);
-      if (verdict) buttons.push(dockButton("预览", "preview-combat"));
-      if (verdict?.legal) buttons.push(dockButton("掷骰结算", "roll-combat", { primary: true }));
+      if (verdict?.legal) {
+        buttons.push(dockButton(choosingRetreat ? "选择撤退格" : awaitingResult ? "执行战斗结果" : "战斗", choosingRetreat ? "open-phase-panel" : "combat-action", { primary: true }));
+      }
       buttons.push(dockOpenPanelButton("打开战斗"));
     }
     buttons.push(dockButton(phaseEndButtonLabel("跳过战斗"), "end-phase", { quiet: !confirmEnd, warning: confirmEnd }));
@@ -2076,7 +2501,7 @@ function renderPhaseActionDock() {
     buttons.push(dockOpenPanelButton(`打开${guide.tabLabel}`, { primary: true }));
     buttons.push(dockButton(phaseEndButtonLabel("结束阶段"), "end-phase", { quiet: !confirmEnd, warning: confirmEnd }));
   }
-  if (actionLog.length) buttons.push(dockButton("撤销最近", "undo-action", { quiet: true }));
+  if (actionLog.length && !state.game_completed) buttons.push(dockButton("撤销最近", "undo-action", { quiet: true }));
 
   dock.className = `phase-action-dock ${side} ${dockMode}`;
   dock.innerHTML = `
@@ -2102,8 +2527,9 @@ function renderOperationHint() {
   const unit = selectedUnitId ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
   let text = `${phaseShortLabel(state.phase)}：`;
   if (viewMode === "move") {
+    const blockReason = unit ? movementOriginBlockReason(unit) : "";
     text += unit && isMovableUnit(unit)
-      ? `已选择 ${unit.name || unit.id}，点击地图目标格或输入坐标自动寻路。`
+      ? blockReason || `已选择 ${unit.name || unit.id}，点击地图目标格或输入坐标自动寻路。`
       : "选择一个当前方可移动单位，再点击地图目标格。";
   }
   else if (viewMode === "combat") {
@@ -2153,6 +2579,7 @@ function focusActionableUnit(unit) {
   else if (phaseKind() === "combat") {
     setMapViewMode("combat");
     if (el("combatAttackersInput")) el("combatAttackersInput").value = unit.id;
+    selectedCombatDefenderHex = null;
     if (el("combatDefendersInput")) el("combatDefendersInput").value = "";
     switchTab("combat", { expandPanel: true });
   }
@@ -2177,6 +2604,7 @@ function cycleActionableUnit(direction = 1) {
 function phaseDirective() {
   const kind = phaseKind();
   const guide = phaseGuide(state.phase);
+  const commonFacts = [`第 ${state.turn || 1} 回合`];
   const confirmEnd = phaseEndConfirmationPending();
   const endLabel = phaseEndButtonLabel(state.phase === "end_game_turn" ? "进入下一回合" : kind === "combat" ? "跳过战斗" : "结束阶段");
   const base = {
@@ -2186,8 +2614,23 @@ function phaseDirective() {
     detail: guide.detail,
     primaryCommand: "open-phase-panel",
     primaryLabel: `打开${guide.tabLabel}`,
-    endLabel
+    endCommand: "end-phase",
+    endLabel,
+    facts: commonFacts
   };
+  if (state.game_completed) {
+    return {
+      ...base,
+      tone: "end",
+      title: "战役已结束并归档",
+      detail: state.final_victory?.reason || "最终胜负和对局日志已保存。",
+      primaryCommand: "open-log",
+      primaryLabel: "查看日志",
+      endCommand: "return-home",
+      endLabel: "返回首页",
+      facts: [...commonFacts, `${state.final_victory?.victory_points ?? state.victory_points ?? 0} VP`]
+    };
+  }
   if (state.phase === "end_game_turn") {
     return {
       ...base,
@@ -2196,7 +2639,8 @@ function phaseDirective() {
       detail: confirmEnd ? "将更新补给、孤立、胜负并推进回合。" : "检查补给、孤立和胜负后进入下一回合。",
       primaryCommand: "open-phase-panel",
       primaryLabel: "打开裁判",
-      endLabel: confirmEnd ? "确认进入下一回合" : "进入下一回合"
+      endLabel: confirmEnd ? "确认进入下一回合" : "进入下一回合",
+      facts: [...commonFacts, "回合结算"]
     };
   }
   if (currentPhaseIsAiControlled()) {
@@ -2206,7 +2650,8 @@ function phaseDirective() {
       title: state.ai_autoplay ? "AI 正在自动执行当前阶段" : "AI 已配置但暂停",
       detail: playerControllerLabel(playerController(state.active_side)),
       primaryCommand: state.ai_autoplay ? "pause-ai" : "resume-ai",
-      primaryLabel: state.ai_autoplay ? "暂停 AI" : "恢复 AI"
+      primaryLabel: state.ai_autoplay ? "暂停 AI" : "恢复 AI",
+      facts: [...commonFacts, playerControllerLabel(playerController(state.active_side))]
     };
   }
   if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) {
@@ -2221,9 +2666,17 @@ function phaseDirective() {
         title: actionableCount ? "先选择一个可移动单位" : "本阶段没有可移动单位",
         detail: actionableCount ? `${actionableCount} 个单位可行动，选中后在地图上画路线。` : "可以直接结束阶段。",
         primaryCommand: actionableCount ? "focus-first-actionable" : "open-phase-panel",
-        primaryLabel: actionableCount ? "选择推荐单位" : "打开移动"
+        primaryLabel: actionableCount ? "选择推荐单位" : "打开移动",
+        primaryDisabled: !actionableCount,
+        facts: [...commonFacts, `${actionableCount} 可移动`]
       };
     }
+    const unitFacts = [
+      unit.hex ? `坐标 ${unit.hex}` : "未部署",
+      isCombatUnit(unit) ? `战力 ${unit.attack ?? 0}` : "",
+      `移动 ${unit.movement ?? 0}`,
+      `${actionableCount} 可移动`
+    ].filter(Boolean);
     if (!hasRoute) {
       return {
         ...base,
@@ -2231,16 +2684,24 @@ function phaseDirective() {
         title: `给 ${unit.name || unit.id} 规划路线`,
         detail: "点击地图相邻格绘制路线，或输入目标格自动寻路。",
         primaryCommand: "open-phase-panel",
-        primaryLabel: "打开移动"
+        primaryLabel: "打开移动",
+        facts: [...commonFacts, ...unitFacts]
       };
     }
+    const routeMode = route?.details?.mode === "road" ? "道路模式" : "普通移动";
+    const routeFacts = [
+      `${movePathDraft[0] || unit.hex || "-"} → ${movePathDraft.at(-1) || "-"}`,
+      route?.details ? `${route.details.spent}/${route.details.allowance} MP` : "等待裁判",
+      routeMode
+    ];
     return {
       ...base,
       tone: route?.legal ? "move" : "bad",
       title: route?.legal ? "路线合法，可以执行移动" : "路线不合法，需要调整",
       detail: route?.details ? `${unit.name || unit.id} · ${route.details.spent}/${route.details.allowance} MP` : (route?.reason || "等待裁判结果"),
       primaryCommand: route?.legal ? "apply-move" : "open-phase-panel",
-      primaryLabel: route?.legal ? "执行移动" : "查看移动"
+      primaryLabel: route?.legal ? "执行移动" : "查看移动",
+      facts: [...commonFacts, ...routeFacts]
     };
   }
   if (kind === "combat") {
@@ -2251,45 +2712,71 @@ function phaseDirective() {
     const defenders = action.defender_hexes || [];
     const verdict = safeCombatVerdict();
     const actionableCount = actionableUnitsForCurrentPhase().length;
+    const selected = selectedUnitId && state.units?.[selectedUnitId] ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
     if (!attackers.length || !defenders.length) {
       return {
         ...base,
         tone: "combat",
         title: actionableCount ? "先选择攻击单位和目标格" : "没有可攻击单位",
-        detail: actionableCount ? `${actionableCount} 个单位可攻击，选择后预览战斗。` : "战斗是自愿的，可以跳过。",
+        detail: actionableCount ? `${actionableCount} 个单位可攻击，选择后自动显示战力与赔率。` : "战斗是自愿的，可以跳过。",
         primaryCommand: actionableCount ? "focus-first-actionable" : "open-phase-panel",
-        primaryLabel: actionableCount ? "选择推荐单位" : "打开战斗"
+        primaryLabel: actionableCount ? "选择推荐单位" : "打开战斗",
+        primaryDisabled: !actionableCount,
+        facts: [
+          ...commonFacts,
+          `${actionableCount} 可攻击`,
+          selected?.hex ? `坐标 ${selected.hex}` : "",
+          selected && isCombatUnit(selected) ? `战力 ${selected.attack ?? 0}` : ""
+        ].filter(Boolean)
       };
     }
+    const awaitingResult = !!pendingCombatRoll && pendingCombatRollIsCurrent();
+    const choosingRetreat = awaitingResult && pendingRetreatNeedsChoice();
     return {
       ...base,
       tone: verdict?.legal ? "combat" : "bad",
-      title: verdict?.legal ? "战斗合法，可以掷骰结算" : "战斗不合法，需要调整",
+      title: verdict?.legal ? (choosingRetreat ? "选择撤退位置" : awaitingResult ? "骰点与结果已确定" : "战斗准备完毕") : "战斗不合法，需要调整",
       detail: verdict?.legal ? `${attackers.length} 个攻击单位 · ${defenders.join(", ")}` : (verdict?.reason || "等待裁判结果"),
-      primaryCommand: verdict?.legal ? "roll-combat" : "open-phase-panel",
-      primaryLabel: verdict?.legal ? "掷骰结算" : "查看战斗"
+      primaryCommand: verdict?.legal ? (choosingRetreat ? "open-phase-panel" : "combat-action") : "open-phase-panel",
+      primaryLabel: verdict?.legal ? (choosingRetreat ? "选择撤退格" : awaitingResult ? "执行战斗结果" : "战斗") : "查看战斗",
+      facts: [
+        ...commonFacts,
+        `${attackers.length} 个攻击单位`,
+        `目标 ${defenders.join(", ")}`,
+        verdict?.details?.odds_column ? `赔率 ${verdict.details.odds_column}` : ""
+      ].filter(Boolean)
     };
   }
   return base;
 }
 
 function renderPhaseDirective(item = phaseDirective(), meta = {}) {
+  const compactPrimaryLabels = {
+    "打开移动": "移动",
+    "打开战斗": "战斗",
+    "打开裁判": "裁判",
+    "选择推荐单位": "选择单位",
+    "查看移动": "调整路线",
+    "查看战斗": "调整战斗"
+  };
+  const compactEndLabels = {
+    "结束阶段": "结束",
+    "跳过战斗": "跳过"
+  };
+  const primaryLabel = compactPrimaryLabels[item.primaryLabel] || item.primaryLabel;
+  const endLabel = compactEndLabels[item.endLabel] || item.endLabel;
+  const facts = [...new Set((item.facts || []).filter(Boolean))].slice(0, 7);
   return `
     <div class="phase-directive ${escapeHtml(item.tone)}">
-      <div>
-        <span>${escapeHtml(meta.label || item.label)}</span>
+      <div class="phase-directive-copy">
+        <span>${escapeHtml(meta.label || item.label)}${meta.status ? ` · ${escapeHtml(meta.status)}` : ""}</span>
         <b>${escapeHtml(item.title)}</b>
         <small>${escapeHtml(item.detail)}</small>
+        ${facts.length ? `<div class="phase-directive-facts">${facts.map((fact) => `<i>${escapeHtml(fact)}</i>`).join("")}</div>` : ""}
       </div>
-      ${meta.next ? `
-        <div class="phase-directive-meta">
-          <span>${escapeHtml(meta.status || "")}</span>
-          <b>${escapeHtml(meta.next)}</b>
-        </div>
-      ` : ""}
       <div class="phase-directive-actions">
-        <button type="button" class="primary-action" data-command="${escapeHtml(item.primaryCommand)}">${escapeHtml(item.primaryLabel)}</button>
-        <button type="button" class="secondary-action" data-command="end-phase">${escapeHtml(item.endLabel)}</button>
+        <button type="button" class="primary-action" data-command="${escapeHtml(item.primaryCommand)}"${item.primaryDisabled ? ' disabled aria-disabled="true"' : ""}>${escapeHtml(primaryLabel)}</button>
+        <button type="button" class="secondary-action" data-command="${escapeHtml(item.endCommand || "end-phase")}">${escapeHtml(endLabel)}</button>
       </div>
     </div>
   `;
@@ -2304,7 +2791,7 @@ function actionableUnitContext() {
     return { title: "本阶段可移动", detail: "点一个单位后，在地图上点击目的地或画路线。", empty: "当前阶段没有可移动单位。", command: "move", commandLabel: "移动" };
   }
   if (kind === "combat") {
-    return { title: "本阶段可攻击", detail: "点攻击单位，再点红色目标格预览并结算。", empty: "当前没有可攻击目标的单位，可以跳过战斗。", command: "combat", commandLabel: "战斗" };
+    return { title: "选择攻击单位（可多选）", detail: "点击敌方目标后，系统会保留所有相邻单位并合计战斗力。", empty: "当前没有可攻击目标的单位，可以跳过战斗。", command: "combat", commandLabel: "战斗" };
   }
   return { title: "本阶段可行动", detail: "选择棋子或地图格查看裁判信息。", empty: "当前阶段没有可列出的单位。", command: "select", commandLabel: "选择" };
 }
@@ -2312,9 +2799,17 @@ function actionableUnitContext() {
 function renderActionableUnitsPanel(panelId, options = {}) {
   const panel = el(panelId);
   if (!panel) return;
-  const context = actionableUnitContext();
+  const phaseContext = actionableUnitContext();
+  const context = options.focusOnly
+    ? {
+        ...phaseContext,
+        detail: "点击棋子，地图会定位并高亮显示。",
+        command: "focus",
+        commandLabel: "定位"
+      }
+    : phaseContext;
   const units = sortedActionableUnits();
-  const shown = units.slice(0, options.limit || 8);
+  const shown = options.showAll ? units : units.slice(0, options.limit || 8);
   const more = Math.max(0, units.length - shown.length);
   panel.className = `actionable-units ${state.active_side || ""} ${units.length ? "" : "empty"}`;
   panel.innerHTML = `
@@ -2330,7 +2825,7 @@ function renderActionableUnitsPanel(panelId, options = {}) {
       <div class="actionable-list">
         ${shown.map((unit) => actionableUnitCard(unit, context)).join("")}
       </div>
-      ${more ? `<button class="actionable-more" type="button" data-actionable-command="open-roster">还有 ${escapeHtml(more)} 个，打开编成</button>` : ""}
+      ${more ? `<button class="actionable-more" type="button" data-actionable-command="open-roster">另有 ${escapeHtml(more)} 个，查看双方部队总览</button>` : ""}
     ` : `<p>${escapeHtml(context.empty)}</p>`}
   `;
 }
@@ -2338,9 +2833,18 @@ function renderActionableUnitsPanel(panelId, options = {}) {
 function actionableUnitChips(unit, context) {
   const chips = [];
   const kind = phaseKind();
-  chips.push(unit.hex || "未部署");
+  if (context.command === "focus") {
+    if (isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))) {
+      chips.push(supplyStateLabel(uiSupplyState(unit.id)));
+    }
+    chips.push(unitStateLabel(unit.state || "fresh"));
+    if (unit.road_mode) chips.push("道路模式");
+    if (isMechanized(unit)) chips.push("机械化");
+    if (unit.attacked_this_phase || unit.attacked_this_turn) chips.push("已攻击");
+    if (unit.defended_this_phase) chips.push("已防御");
+    return [...new Set(chips.filter(Boolean))].slice(0, 4);
+  }
   if (["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) {
-    chips.push(`${unit.movement ?? 0} MP`);
     if (unit.road_mode) chips.push("道路模式");
     else if (canEnterRoadModeNow(unit)) chips.push("可入道路");
     if (isMechanized(unit)) chips.push("机械化");
@@ -2348,46 +2852,65 @@ function actionableUnitChips(unit, context) {
   else if (kind === "combat") {
     const targets = adjacentCombats(unit.side).filter((pair) => pair.attacker === unit.id);
     chips.push(`${targets.length} 目标`);
-    chips.push(`A${unit.attack ?? 0}`);
+    if (isMechanized(unit)) chips.push("机械化");
   }
-  if (isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))) chips.push(supplyStateLabel(supplyState(unit.id)));
-  if (unit.state && unit.state !== "fresh") chips.push(unitStateLabel(unit.state));
+  if (isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))) chips.push(supplyStateLabel(uiSupplyState(unit.id)));
+  chips.push(unitStateLabel(unit.state || "fresh"));
   if (unit.attacked_this_phase || unit.attacked_this_turn) chips.push("已攻击");
   if (unit.defended_this_phase) chips.push("已防御");
   return chips.filter(Boolean).slice(0, context.command === "combat" ? 4 : 4);
 }
 
+function actionableChipTone(chip = "") {
+  if (chip === "有补给" || chip === "待命") return "ok";
+  if (/无补给|孤立/.test(chip)) return "bad";
+  if (/部分补给|已行动|已攻击|已防御/.test(chip)) return "warn";
+  return "neutral";
+}
+
 function actionableUnitCard(unit, context) {
-  const selected = unit.id === selectedUnitId ? " selected" : "";
+  const selected = (context.command === "combat" ? selectedCombatAttackerIds().includes(unit.id) : unit.id === selectedUnitId) ? " selected" : "";
+  const focusCard = context.command === "focus";
+  const phaseCard = !focusCard;
   const type = unitTypeGroup(unit).label;
   const chips = actionableUnitChips(unit, context);
-  const stats = [];
-  if (isCombatUnit(unit)) {
-    stats.push(`A${unit.attack ?? 0}`);
-    stats.push(`D${unit.defense ?? unit.attack ?? 0}`);
-  }
-  if (isMovableUnit(unit)) stats.push(`MP${unit.movement ?? 0}`);
+  const counter = `<span class="actionable-unit-counter ${escapeHtml(unit.side || "neutral")}"><img src="${escapeHtml(counterImageFor(unit))}" alt="" loading="lazy" decoding="async"></span>`;
+  const statMarkup = `
+      ${isCombatUnit(unit) ? `<i><small>战斗力</small><b>${escapeHtml(unit.attack ?? 0)}</b></i>` : ""}
+      ${isMovableUnit(unit) ? `<i><small>移动</small><b>${escapeHtml(unit.movement ?? 0)}</b></i>` : ""}
+    `;
   return `
-    <button class="actionable-unit${selected}" type="button" data-unit-id="${escapeHtml(unit.id)}" data-actionable-command="${escapeHtml(context.command)}">
-      <span class="actionable-unit-command">${escapeHtml(context.commandLabel)}</span>
+    <button class="actionable-unit${focusCard ? " focus-card" : ""}${phaseCard ? " phase-card" : ""}${selected}" type="button" data-unit-id="${escapeHtml(unit.id)}" data-actionable-command="${escapeHtml(context.command)}">
+      ${counter}
       <span class="actionable-unit-main">
         <b>${escapeHtml(unit.name || unit.id)}</b>
-        <small>${escapeHtml(unit.hex || "未部署")} · ${escapeHtml(type)}</small>
+        <small>${escapeHtml(type)} · ${escapeHtml(unit.hex || "未部署")}</small>
         <span class="actionable-unit-chips">
-          ${chips.map((chip) => `<i>${escapeHtml(chip)}</i>`).join("")}
+          ${chips.map((chip) => `<i class="${actionableChipTone(chip)}">${escapeHtml(chip)}</i>`).join("")}
         </span>
       </span>
       <span class="actionable-unit-stats">
-        ${stats.slice(0, 3).map((stat) => `<i>${escapeHtml(stat)}</i>`).join("")}
+        ${statMarkup}
       </span>
     </button>
   `;
 }
 
 function renderActionableUnits() {
-  renderActionableUnitsPanel("stateActionableUnits", { limit: 6 });
-  renderActionableUnitsPanel("moveActionableUnits", { limit: 4 });
-  renderActionableUnitsPanel("combatActionableUnits", { limit: 4 });
+  renderActionableUnitsPanel("stateActionableUnits", { focusOnly: true, showAll: true });
+  renderActionableUnitsPanel("moveActionableUnits", { showAll: true });
+  renderActionableUnitsPanel("combatActionableUnits", { showAll: true });
+}
+
+function syncActionableUnitSelection() {
+  const combatAttackers = new Set(selectedCombatAttackerIds());
+  document.querySelectorAll(".actionable-unit[data-unit-id]").forEach((button) => {
+    const selected = button.dataset.actionableCommand === "combat"
+      ? combatAttackers.has(button.dataset.unitId)
+      : button.dataset.unitId === selectedUnitId;
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
 }
 
 function workflowCueHtml({ tone = "idle", step = "", title = "", detail = "", facts = [] } = {}) {
@@ -2412,9 +2935,6 @@ function renderMoveWorkflowCue() {
   }
   const unit = currentMoveUnit();
   const actionableCount = actionableUnitsForCurrentPhase().length;
-  const route = routeVerdict();
-  const hasRoute = movePathDraft.length > 1;
-  const hasTarget = !!el("moveTargetInput")?.value.trim();
   target.className = "workflow-cue";
   if (!unit || !canMoveUnitNow(unit)) {
     target.innerHTML = workflowCueHtml({
@@ -2426,33 +2946,8 @@ function renderMoveWorkflowCue() {
     });
     return;
   }
-  if (!hasRoute) {
-    target.innerHTML = workflowCueHtml({
-      tone: "move",
-      step: "待路线",
-      title: `${unit.name || unit.id}`,
-      detail: hasTarget ? "可以点“自动路线”，也可以直接在地图上点击目标格。" : "在地图上点击相邻格绘制路线；要输入坐标时展开“坐标寻路”。",
-      facts: [unit.hex || "未部署", `${unit.movement ?? 0} MP`, el("moveModeSelect")?.value === "road" ? "道路模式" : "普通移动"]
-    });
-    return;
-  }
-  if (route?.legal) {
-    target.innerHTML = workflowCueHtml({
-      tone: "ready",
-      step: "可执行",
-      title: `移动到 ${movePathDraft.at(-1) || ""}`,
-      detail: "点击底部行动卡的“执行移动”。执行后单位会变为已行动。",
-      facts: [`${route.details?.spent ?? "?"}/${route.details?.allowance ?? "?"} MP`, movePathDraft.at(-1) || ""]
-    });
-    return;
-  }
-  target.innerHTML = workflowCueHtml({
-    tone: "bad",
-    step: "路线受阻",
-    title: route?.reason || "路线当前不合法",
-    detail: route?.reason || "裁判没有接受这条路线，请撤销一步或清空路线重画。",
-    facts: [movePathDraft.join(" -> ")]
-  });
+  target.className = "workflow-cue hidden";
+  target.innerHTML = "";
 }
 
 function renderCombatWorkflowCue() {
@@ -2472,6 +2967,20 @@ function renderCombatWorkflowCue() {
   const actionableCount = actionableUnitsForCurrentPhase().length;
   const verdict = safeCombatVerdict();
   target.className = "workflow-cue";
+  const mineClear = combatMineClearCandidate();
+  if (mineClear) {
+    const attempted = !!(mineClear.mine_cleared_this_turn || mineClear.cleared_mine_this_turn);
+    target.innerHTML = workflowCueHtml({
+      tone: attempted ? "bad" : "ready",
+      step: "雷区行动",
+      title: `${mineClear.name || mineClear.id} · ${mineClear.hex}`,
+      detail: attempted
+        ? "该单位本回合已经尝试排雷，不能再次尝试。"
+        : `${mineClear.side === "axis" ? "轴心国掷出 3-6 清除雷区" : "盟军掷出 2-6 清除雷区"}；本次尝试会消耗本回合排雷机会。`,
+      facts: [attempted ? "本回合已尝试" : "可掷骰排雷", mineClear.hex]
+    });
+    return;
+  }
   if (!attackers.length) {
     target.innerHTML = workflowCueHtml({
       tone: actionableCount ? "ready" : "idle",
@@ -2483,12 +2992,12 @@ function renderCombatWorkflowCue() {
     return;
   }
   if (!defenders.length) {
-    const targets = selected && canCombatUnitNow(selected) ? combatTargetOptionsForSelectedUnit().length : 0;
+    const targets = combatTargetOptionsForSelectedUnit().length;
     target.innerHTML = workflowCueHtml({
       tone: "combat",
       step: "待目标",
       title: attackers.length === 1 ? (state.units?.[attackers[0]]?.name || attackers[0]) : `${attackers.length} 个攻击单位`,
-      detail: "点击下方目标卡，或在地图上点红色目标格。防御格内所有单位会共同防御。",
+      detail: "点击下方目标卡，或直接点击地图上的敌方棋子；系统会保留与目标相邻的攻击单位。",
       facts: [`攻击 ${attackers.length} 个单位`, `${targets} 个目标格`]
     });
     return;
@@ -2498,7 +3007,7 @@ function renderCombatWorkflowCue() {
       tone: "ready",
       step: "可结算",
       title: `${verdict.details?.odds_column || "赔率待定"} · ${defenders.join(", ")}`,
-      detail: "底部行动卡可直接随机掷骰结算；需要指定骰点时使用右侧骰子选择。",
+      detail: "先掷骰查看赔率、骰点和结果，再确认执行撤退、消灭等裁判效果。",
       facts: [verdict.details?.odds_column || "赔率待定", defenders.join(", ")]
     });
     return;
@@ -2517,15 +3026,27 @@ function handleActionableUnitsClick(event) {
   if (!button) return;
   const command = button.dataset.actionableCommand;
   if (command === "open-roster") {
-    switchTab("roster", { expandPanel: true });
+    switchTab("state", { expandPanel: true });
+    const drawer = el("stateRosterDrawer");
+    if (drawer) {
+      drawer.open = true;
+      requestAnimationFrame(() => drawer.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
     return;
   }
   const unitId = button.dataset.unitId;
+  if (command === "focus" && unitId && state.units?.[unitId]) {
+    focusUnitFromState(unitId);
+    return;
+  }
+  if (command === "combat" && unitId) {
+    toggleCombatAttacker(unitId);
+    return;
+  }
   if (unitId) selectUnit(unitId, { showStateTab: false });
   if (command === "move") activateMoveForSelectedUnit();
-  else if (command === "combat") activateCombatForSelectedUnit();
   else if (command === "open-phase-panel") focusCurrentPhaseTab({ expandPanel: true });
-  else if (unitId && state.units?.[unitId]?.hex) focusMapOnHex(state.units[unitId].hex);
+  else if (unitId && state.units?.[unitId]?.hex) focusMapOnHex(state.units[unitId].hex, { behavior: "auto" });
 }
 
 function handleCombatTargetListClick(event) {
@@ -2562,17 +3083,63 @@ function canMoveUnitNow(unit) {
   );
 }
 
-function hasLegalRoadMoveFromHere(unit) {
-  if (!unit?.id || !unit.hex || unit.road_mode || !canMoveUnitNow(unit)) return false;
-  const start = normalizeHex(unit.hex);
-  if (movePathDraft.length > 1 && movePathDraft[0] === start) {
-    return !!checkMove(unit.id, movePathDraft, { mode: "road" })?.legal;
+function roadModeBlockedHint(reason = "") {
+  if (reason.includes("堆叠中不能进入道路模式")) return `${reason}。先将同格的另一单位普通移动离开。`;
+  if (reason.includes("敌 ZOC")) return `${reason}。需要先解除敌军控制区限制。`;
+  if (reason.includes("敌方雷区")) return `${reason}。需要先清除雷区。`;
+  if (reason.includes("必须有补给")) return `${reason}。恢复补给后才能进入。`;
+  if (reason.includes("ridge/depression")) return `${reason}。请先普通移动到允许进入的道路格。`;
+  if (reason.includes("只能在道路上")) return `${reason}。请先普通移动到道路格。`;
+  return reason || "当前位置没有可用的道路模式出口。";
+}
+
+function roadModeAvailability(unit) {
+  if (!unit?.id || !unit.hex) return { available: false, reason: "请先选择一个单位。" };
+  if (unit.road_mode) {
+    const cost = isMechanized(unit)
+      ? Number(rules.movement?.road_mode?.mechanized_entry_cost || 3)
+      : Number(rules.movement?.road_mode?.non_mechanized_entry_cost || 1);
+    return { available: true, reason: `当前处于道路模式；切回普通需要 ${cost} MP，并结束本次行动。` };
   }
-  return neighbors(start).some((hex) => checkMove(unit.id, [start, hex], { mode: "road" })?.legal);
+  if (!canMoveUnitNow(unit)) {
+    if ((unit.state || "fresh") !== "fresh") return { available: false, reason: "该单位已经行动，不能再进入道路模式。" };
+    return { available: false, reason: "当前阶段不允许该单位进入道路模式。" };
+  }
+  const start = normalizeHex(unit.hex);
+  const verdicts = neighbors(start).map((hex) => checkMove(unit.id, [start, hex], { mode: "road" }));
+  if (verdicts.some((verdict) => verdict?.legal)) {
+    const cost = isMechanized(unit)
+      ? Number(rules.movement?.road_mode?.mechanized_entry_cost || 3)
+      : Number(rules.movement?.road_mode?.non_mechanized_entry_cost || 1);
+    return { available: true, reason: `可以进入道路模式，进入费用 ${cost} MP。` };
+  }
+  const reasons = verdicts.map((verdict) => verdict?.reason).filter(Boolean);
+  const priorities = [
+    "堆叠中不能进入道路模式",
+    "敌 ZOC 中不能进入道路模式",
+    "敌方雷区中不能进入道路模式",
+    "进入道路模式必须有补给",
+    "ridge/depression 中不能进入道路模式",
+    "机械化单位只能在道路上进入道路模式",
+    "道路模式前/后方",
+    "道路移动空间"
+  ];
+  const reason = priorities.map((text) => reasons.find((item) => item.includes(text))).find(Boolean)
+    || reasons.find((item) => !item.includes("道路模式必须沿道路移动"))
+    || "当前位置没有相邻且可通行的道路格。";
+  return { available: false, reason: roadModeBlockedHint(reason) };
 }
 
 function canEnterRoadModeNow(unit) {
-  return !!(unit && !unit.road_mode && hasLegalRoadMoveFromHere(unit));
+  if (!unit || unit.road_mode) return false;
+  return !!currentRoadModeAvailability(unit)?.available;
+}
+
+function currentRoadModeAvailability(unit) {
+  if (!unit || unit.road_mode) return roadModeAvailability(unit);
+  const key = [uiStateRevision, state.turn, state.phase, unit.id, unit.hex || "", unit.state || ""].join("|");
+  if (!roadModeAvailabilityCache.has(key)) roadModeAvailabilityCache.set(key, roadModeAvailability(unit));
+  return roadModeAvailabilityCache.get(key);
 }
 
 function canLeaveRoadModeNow(unit) {
@@ -2582,7 +3149,7 @@ function canLeaveRoadModeNow(unit) {
 function canCombatUnitNow(unit) {
   return !!(
     unit &&
-    isCombatUnit(unit) &&
+    canAttackUnit(unit) &&
     unit.side === state.active_side &&
     phaseKind() === "combat" &&
     (unit.state || "fresh") === "fresh" &&
@@ -2594,6 +3161,8 @@ function canCombatUnitNow(unit) {
 
 function syncMoveModeAvailability(unit = currentMoveUnit()) {
   const select = el("moveModeSelect");
+  const toggle = el("moveModeToggleBtn");
+  const hint = el("moveModeHint");
   if (!select) return;
   const normalOption = [...select.options].find((option) => option.value === "normal");
   const roadOption = [...select.options].find((option) => option.value === "road");
@@ -2603,29 +3172,113 @@ function syncMoveModeAvailability(unit = currentMoveUnit()) {
       normalOption.disabled = false;
     }
     if (roadOption) {
-      roadOption.hidden = true;
+      roadOption.hidden = false;
       roadOption.disabled = true;
+      roadOption.textContent = "道路模式（先选择单位）";
     }
     select.value = "normal";
+    if (toggle) {
+      toggle.disabled = true;
+      toggle.classList.remove("road-active", "road-unavailable");
+      toggle.setAttribute("aria-pressed", "false");
+      toggle.setAttribute("aria-label", "请先选择单位");
+      toggle.title = "请先选择单位";
+    }
+    if (hint) {
+      hint.className = "move-mode-hint blocked";
+      hint.textContent = "选择单位后检查道路模式。";
+    }
     return;
   }
   const inRoadMode = !!unit.road_mode;
-  const roadAvailable = !!(unit.road_mode || canEnterRoadModeNow(unit));
+  const availability = currentRoadModeAvailability(unit);
+  const roadAvailable = !!(unit.road_mode || availability.available);
   if (normalOption) {
     normalOption.hidden = inRoadMode;
     normalOption.disabled = inRoadMode;
   }
   if (roadOption) {
-    roadOption.hidden = !roadAvailable;
+    roadOption.hidden = false;
     roadOption.disabled = !roadAvailable;
+    roadOption.textContent = inRoadMode
+      ? "道路模式（当前）"
+      : roadAvailable
+        ? "道路模式"
+        : "道路模式（当前不可用）";
   }
   if (inRoadMode) select.value = "road";
   else if (select.value === "road" && !roadAvailable) select.value = "normal";
+  const roadSelected = select.value === "road";
+  if (toggle) {
+    toggle.disabled = !canMoveUnitNow(unit);
+    toggle.classList.toggle("road-active", roadSelected);
+    toggle.classList.toggle("road-unavailable", !roadAvailable && !roadSelected);
+    toggle.setAttribute("aria-pressed", roadSelected ? "true" : "false");
+    toggle.setAttribute("aria-label", `移动方式：${roadSelected ? "道路模式" : "普通移动"}，点击切换`);
+    toggle.title = availability.reason;
+  }
+  if (hint) {
+    hint.className = `move-mode-hint ${roadAvailable ? "available" : "blocked"}`;
+    hint.textContent = availability.reason;
+  }
+}
+
+function refreshMoveModeSelection() {
+  renderRouteStatus();
+  renderActionControls();
+  renderMap();
+}
+
+function setPlannedMoveMode(mode) {
+  const select = el("moveModeSelect");
+  if (!select) return;
+  select.value = mode === "road" ? "road" : "normal";
+  refreshMoveModeSelection();
+}
+
+function leaveCurrentRoadMode() {
+  const unitId = el("moveUnitSelect")?.value;
+  if (!unitId || !state.units[unitId]) return { legal: false, reason: "请先选择单位" };
+  const verdict = RulesEngine.checkLeaveRoadMode(rulesContext(), unitId);
+  if (!verdict.legal) {
+    setOutput("moveOutput", verdict);
+    renderActionControls();
+    return verdict;
+  }
+  pushHistory("leave_road_mode");
+  const result = RulesEngine.leaveRoadMode(rulesContext(), unitId);
+  if (el("moveModeSelect")) el("moveModeSelect").value = "normal";
+  logEvent("leave_road_mode", `${unitId} 退出道路模式`, result.details);
+  renderState();
+  setOutput("moveOutput", result);
+  return result;
+}
+
+function toggleCurrentMoveMode() {
+  const unit = currentMoveUnit();
+  if (!unit) return;
+  if (unit.road_mode) {
+    leaveCurrentRoadMode();
+    return;
+  }
+  const select = el("moveModeSelect");
+  if (!select) return;
+  if (select.value === "road") {
+    setPlannedMoveMode("normal");
+    return;
+  }
+  const availability = currentRoadModeAvailability(unit);
+  if (!availability.available) {
+    setOutput("moveOutput", { legal: false, reason: availability.reason });
+    renderActionControls();
+    return;
+  }
+  setPlannedMoveMode("road");
 }
 
 function hasSelectedSaveSlot() {
   const selected = el("saveSlotSelect")?.value;
-  return !!selected && saveSlots().some((slot) => slot.id === selected);
+  return !!selected && activeSaveSlots().some((slot) => slot.id === selected);
 }
 
 function safeCombatVerdict() {
@@ -2642,6 +3295,11 @@ function safeCombatVerdict() {
 function renderCombatSelectionSummary() {
   const target = el("combatSelectionSummary");
   if (!target) return;
+  if (combatMineClearCandidate()) {
+    target.className = "combat-selection-summary empty hidden";
+    target.innerHTML = "";
+    return;
+  }
   let action;
   try {
     action = parseCombatAction();
@@ -2680,6 +3338,11 @@ function renderCombatSelectionSummary() {
 function renderCombatOverview() {
   const panel = el("combatOverview");
   if (!panel) return;
+  if (combatMineClearCandidate()) {
+    panel.className = "combat-overview empty";
+    panel.innerHTML = "";
+    return;
+  }
   let action;
   try {
     action = parseCombatAction();
@@ -2696,32 +3359,76 @@ function renderCombatOverview() {
   }
   const verdict = attackers.length && defenderHexes.length ? safeCombatVerdict() : null;
   const details = verdict?.details || {};
-  const attack = details.attack_strength ?? attackers.reduce((sum, id) => sum + Number(state.units?.[id]?.attack || 0), 0);
-  const defense = details.defense_strength ?? defenderHexes.reduce((sum, hex) => {
+  const printedAttack = attackers.reduce((sum, id) => sum + Number(state.units?.[id]?.attack || 0), 0);
+  const printedDefense = defenderHexes.reduce((sum, hex) => {
     const defenders = unitsArray().filter((unit) => isMapCounter(unit) && unit.hex === hex && unit.side !== state.active_side && isCombatUnit(unit));
     return sum + defenders.reduce((unitSum, unit) => unitSum + Number(unit.defense || unit.attack || 0), 0);
   }, 0);
+  const attack = details.attack ?? printedAttack;
+  const defense = details.defense ?? printedDefense;
   const odds = details.odds_column || (attack && defense ? combatOddsColumn(attack, defense) : "-");
   const result = verdict?.legal ? "可结算" : verdict ? "需调整" : "待选择";
+  const attackModifiers = [];
+  const attackUnits = attackers.map((id) => ({ id, ...(state.units?.[id] || {}) })).filter((unit) => state.units?.[unit.id]);
+  if (attackUnits.some((unit) => unit.road_mode)) attackModifiers.push("道路模式减半");
+  if (attackUnits.some((unit) => ["partially_supplied", "unsupplied"].includes(supplyState(unit.id)))) attackModifiers.push("补给不足减半");
+  if (state.scenario === "september" && Number(state.turn || 1) === 1 && state.active_side === "axis") attackModifiers.push("首回合攻击加倍");
+  const defenseModifiers = [];
+  const targetTags = [...new Set(defenderHexes.flatMap((hex) => hexTags(hex)))];
+  if (targetTags.includes("hill_or_ridge")) defenseModifiers.push("山脊 ×2");
+  if (targetTags.includes("alamein_box")) defenseModifiers.push("方框 +3");
+  const canceledMineHexes = new Set(details.mine_defense_canceled_hexes || []);
+  if (defenderHexes.some((hex) => !canceledMineHexes.has(hex) && minesAt(hex).some((mine) => mine.side !== state.active_side && !mine.cleared))) {
+    defenseModifiers.push("雷区 ×2");
+  }
+  const defenderUnits = (details.defenders || []).map((id) => ({ id, ...(state.units?.[id] || {}) })).filter((unit) => state.units?.[unit.id]);
+  if (defenderUnits.some((unit) => unit.road_mode)) defenseModifiers.push("道路模式减半");
+  if (defenderUnits.some((unit) => supplyState(unit.id) === "isolated")) defenseModifiers.push("孤立减半");
+  const locationText = defenderHexes.length
+    ? defenderHexes.map((hex) => {
+        const tags = [...hexTags(hex)];
+        if (minesAt(hex).some((mine) => !mine.cleared)) tags.push("minefield");
+        return `${hex} · ${terrainSummaryLabel([...new Set(tags)])}`;
+      }).join(" / ")
+    : "未选择";
+  const locationEffects = [];
+  if (targetTags.includes("hill_or_ridge")) locationEffects.push("防御加倍，D 类撤退结果无效");
+  if (targetTags.includes("alamein_box")) locationEffects.push("方框区域防御加成");
+  if (defenderHexes.some((hex) => minesAt(hex).some((mine) => !mine.cleared))) locationEffects.push("存在雷区");
   panel.className = `combat-overview ${verdict?.legal ? "ok" : verdict ? "bad" : "muted"}`;
   panel.innerHTML = `
-    <div><span>攻击</span><b>${escapeHtml(attack || "-")}</b><small>${escapeHtml(attackers.length)} 单位</small></div>
-    <div><span>防御</span><b>${escapeHtml(defense || "-")}</b><small>${escapeHtml(defenderHexes.length)} 格</small></div>
+    <div><span>有效攻击</span><b>${escapeHtml(attack || "-")}</b><small>棋面 ${escapeHtml(printedAttack || "-")}${attackModifiers.length ? ` · ${escapeHtml(attackModifiers.join(" · "))}` : ""}</small></div>
+    <div><span>有效防御</span><b>${escapeHtml(defense || "-")}</b><small>棋面 ${escapeHtml(printedDefense || "-")}${defenseModifiers.length ? ` · ${escapeHtml(defenseModifiers.join(" · "))}` : ""}</small></div>
     <div><span>赔率</span><b>${escapeHtml(odds || "-")}</b></div>
     <div><span>裁判</span><b>${escapeHtml(result)}</b></div>
+    <div class="combat-overview-location"><span>战斗地点</span><b>${escapeHtml(locationText)}</b>${locationEffects.length ? `<small>${escapeHtml(locationEffects.join(" · "))}</small>` : ""}</div>
   `;
 }
 
 function combatTargetOptionsForSelectedUnit() {
-  if (!selectedUnitId || !state.units?.[selectedUnitId]) return [];
-  const unit = { id: selectedUnitId, ...state.units[selectedUnitId] };
-  if (!canCombatUnitNow(unit)) return [];
-  return adjacentCombats(unit.side).filter((pair) => pair.attacker === selectedUnitId);
+  const attackerIds = selectedCombatAttackerIds();
+  if (!attackerIds.length) return [];
+  const validAttackers = attackerIds.filter((id) => canCombatUnitNow({ id, ...state.units[id] }));
+  if (!validAttackers.length) return [];
+  const pairs = adjacentCombats(state.active_side);
+  const targetHexes = [...new Set(pairs
+    .filter((pair) => validAttackers.includes(pair.attacker))
+    .map((pair) => pair.defender_hex))];
+  return targetHexes.map((hex) => {
+    const eligibleAttackers = validAttackers.filter((id) => pairs.some((pair) => pair.attacker === id && pair.defender_hex === hex));
+    const pair = pairs.find((candidate) => candidate.attacker === eligibleAttackers[0] && candidate.defender_hex === hex);
+    return {
+      ...pair,
+      attacker: eligibleAttackers[0],
+      attackers: eligibleAttackers,
+      excluded_attackers: attackerIds.filter((id) => !eligibleAttackers.includes(id))
+    };
+  });
 }
 
 function combatTargetPreview(pair) {
   const defenders = (pair.defenders || []).map((id) => ({ id, ...(state.units?.[id] || {}) })).filter((unit) => state.units?.[unit.id]);
-  const verdict = checkCombat({ attackers: [pair.attacker], defender_hexes: [pair.defender_hex], die: null, no_retreat_order: false });
+  const verdict = checkCombat({ attackers: pair.attackers || [pair.attacker], defender_hexes: [pair.defender_hex], die: null });
   return {
     legal: verdict.legal,
     reason: verdict.reason,
@@ -2735,13 +3442,19 @@ function combatTargetPreview(pair) {
 function renderCombatTargetList() {
   const panel = el("combatTargetList");
   if (!panel) return;
-  const selected = selectedUnitId && state.units?.[selectedUnitId] ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
+  if (combatMineClearCandidate()) {
+    panel.className = "combat-target-list empty hidden";
+    panel.innerHTML = "";
+    return;
+  }
+  const attackerIds = selectedCombatAttackerIds();
+  const attackers = attackerIds.map((id) => ({ id, ...state.units[id] }));
   if (phaseKind() !== "combat") {
     panel.className = "combat-target-list empty hidden";
     panel.innerHTML = "";
     return;
   }
-  if (!selected || !isCombatUnit(selected)) {
+  if (!attackers.length) {
     panel.className = "combat-target-list empty hidden";
     panel.innerHTML = "";
     return;
@@ -2749,14 +3462,14 @@ function renderCombatTargetList() {
   const targets = combatTargetOptionsForSelectedUnit();
   if (!targets.length) {
     panel.className = "combat-target-list empty";
-    panel.innerHTML = `<p>${escapeHtml(selected.name || selected.id)} 没有可攻击目标。</p>`;
+    panel.innerHTML = `<p>${attackers.length > 1 ? "已选单位附近没有可攻击目标。" : `${escapeHtml(attackers[0].name || attackers[0].id)} 没有可攻击目标。`}</p>`;
     return;
   }
   panel.className = "combat-target-list";
   panel.innerHTML = `
     <div class="combat-target-head">
       <span>可攻击目标</span>
-      <b>${escapeHtml(selected.name || selected.id)}</b>
+      <b>${escapeHtml(attackers.length > 1 ? `已选 ${attackers.length} 个单位，点击目标自动编组` : (attackers[0].name || attackers[0].id))}</b>
     </div>
     <div class="combat-target-cards">
       ${targets.map((pair) => {
@@ -2764,12 +3477,12 @@ function renderCombatTargetList() {
         const selectedTarget = selectedCombatDefenderHex === pair.defender_hex;
         const defenderText = preview.defenders.map((unit) => unit.name || unit.id).join(", ");
         return `
-          <button class="combat-target-card ${selectedTarget ? "selected" : ""} ${preview.legal ? "" : "blocked"}" type="button" data-action="select-combat-target" data-attacker="${escapeHtml(pair.attacker)}" data-defender="${escapeHtml(pair.defender_hex)}">
+          <button class="combat-target-card ${selectedTarget ? "selected" : ""} ${preview.legal ? "" : "blocked"}" type="button" data-action="select-combat-target" data-attacker="${escapeHtml(pair.attacker)}" data-defender="${escapeHtml(pair.defender_hex)}" aria-pressed="${selectedTarget ? "true" : "false"}" aria-label="${selectedTarget ? "取消目标" : "攻击"} ${escapeHtml(pair.defender_hex)} ${escapeHtml(defenderText || "敌方堆叠")}">
             <span>
               <b>${escapeHtml(pair.defender_hex)}</b>
               <small>${escapeHtml(preview.legal ? (defenderText || "敌方堆叠") : preview.reason)}</small>
             </span>
-            <em>${escapeHtml(preview.column || "?")}</em>
+            <em>${escapeHtml(selectedTarget ? "再次点击取消" : `使用 ${pair.attackers.length} 个单位`)} · ${escapeHtml(String(preview.column || "?").replace("-", ":"))}</em>
           </button>
         `;
       }).join("")}
@@ -2797,23 +3510,41 @@ function renderActionControls() {
   setActionVisible("clearRouteBtn", hasRoute);
   syncActionGroupVisible("moveSpareActions", ["enterRoadModeBtn", "leaveRoadModeBtn", "exitWestBtn"]);
   const combatPhase = phaseKind() === "combat";
+  if (combatPhase || el("tab-combat")?.classList.contains("active")) renderCombatControls();
   const combatVerdict = safeCombatVerdict();
   const hasCombatSelection = !!combatVerdict;
-  const combatDie = !!el("combatResolveDieSelect")?.value;
-  renderCombatSelectionSummary();
-  renderCombatOverview();
-  renderCombatTargetList();
+  if (pendingCombatRoll && !pendingCombatRollIsCurrent()) clearPendingCombatRoll();
+  if (combatPhase || el("tab-combat")?.classList.contains("active")) {
+    renderCombatSelectionSummary();
+    renderCombatOverview();
+    renderCombatTargetList();
+    renderCombatWorkflowCue();
+  }
   renderMoveWorkflowCue();
-  renderCombatWorkflowCue();
   setActionVisible("combatResolveSection", combatPhase && hasCombatSelection);
-  setActionVisible("useSelectedCombatBtn", canCombatUnitNow(selected));
-  setActionVisible("previewCombatBtn", combatPhase && hasCombatSelection);
-  setActionVisible("randomCombatBtn", combatPhase && !!combatVerdict?.legal);
-  setActionVisible("resolveCombatBtn", combatPhase && !!combatVerdict?.legal && combatDie);
+  setActionVisible("toggleCombatTableBtn", combatPhase && !!combatVerdict?.legal);
+  const combatActionReady = combatPhase && !!combatVerdict?.legal;
+  const awaitingCombatResult = combatActionReady && !!pendingCombatRoll && pendingCombatRollIsCurrent();
+  const choosingRetreat = awaitingCombatResult && pendingRetreatNeedsChoice();
+  setActionVisible("combatActionBtn", combatActionReady);
+  if (el("combatActionBtn")) {
+    el("combatActionBtn").textContent = choosingRetreat ? "选择撤退格" : awaitingCombatResult ? "执行战斗结果" : "战斗";
+    el("combatActionBtn").disabled = choosingRetreat;
+    el("combatActionBtn").classList.toggle("combat-apply-result", awaitingCombatResult && !choosingRetreat);
+  }
+  renderCombatRollReveal();
+  renderCombatRetreatPlanner();
+  renderCombatCrtPreview();
   setActionVisible("undoActionBtn", actionLog.length > 0);
-  const hasMineClearTarget = combatPhase && !!el("engineerSelect")?.value && !!el("mineHexInput")?.value.trim();
-  setActionVisible("clearMineSection", combatPhase && !!el("engineerSelect")?.options?.length);
-  setActionVisible("clearMineBtn", hasMineClearTarget);
+  if (el("undoActionBtn")) {
+    el("undoActionBtn").disabled = undoActionBlocked();
+    el("undoActionBtn").title = undoActionBlocked() ? "AI 正在行动或战斗结果尚未执行" : "撤销上一步玩家操作";
+  }
+  const mineClear = combatPhase ? combatMineClearCandidate() : null;
+  const mineClearAttempted = !!(mineClear?.mine_cleared_this_turn || mineClear?.cleared_mine_this_turn);
+  setActionVisible("clearMineSection", !!mineClear);
+  setActionVisible("clearMineBtn", !!mineClear);
+  if (el("clearMineBtn")) el("clearMineBtn").disabled = !mineClear || mineClearAttempted;
 
   const aiControlled = currentPhaseIsAiControlled();
   const canSuggestAi = isPlayableSide(state.active_side) && !!(el("aiModeSelect")?.value || aiModeForSide(state.active_side));
@@ -2827,7 +3558,6 @@ function renderActionControls() {
   const selectedSlot = hasSelectedSaveSlot();
   setActionVisible("loadSlotBtn", selectedSlot);
   setActionVisible("deleteSlotBtn", selectedSlot);
-  renderSideCommandBar();
   renderPhaseActionDock();
 }
 
@@ -2838,13 +3568,639 @@ function resolveCombatWithRandomDie() {
     switchTab("combat", { expandPanel: true });
     return;
   }
-  const die = String(Math.floor(Math.random() * 6) + 1);
-  if (el("combatResolveDieSelect")) el("combatResolveDieSelect").value = die;
-  setOutput("combatOutput", resolveCombat(parseCombatAction()));
-  renderActionControls();
+  const die = rollCombatDie();
+  if (el("combatResolveDieSelect")) el("combatResolveDieSelect").value = String(die);
+  revealCombatRoll(die);
 }
 
-function runAutoRouteFromTarget() {
+function debugCombatDie() {
+  const die = Number(el("combatDebugDieSelect")?.value || 0);
+  return Number.isInteger(die) && die >= 1 && die <= 6 ? die : null;
+}
+
+function rollCombatDie() {
+  return debugCombatDie() || Math.floor(Math.random() * 6) + 1;
+}
+
+function combatActionKey(action) {
+  return JSON.stringify({
+    scenario: state.scenario || "custom",
+    turn: Number(state.turn || 1),
+    phase: state.phase,
+    active_side: state.active_side,
+    attackers: [...(action.attackers || [])].sort(),
+    defender_hexes: [...(action.defender_hexes || [])].map(normalizeHex).sort(),
+    die: Number(action.die || 0)
+  });
+}
+
+function pendingCombatRollIsCurrent() {
+  if (!pendingCombatRoll) return false;
+  try {
+    return pendingCombatRoll.key === combatActionKey(parseCombatAction());
+  }
+  catch {
+    return false;
+  }
+}
+
+function pendingCombatRetreatRequirement() {
+  if (!pendingCombatRoll || !pendingCombatRollIsCurrent()) return null;
+  const details = pendingCombatRoll.verdict?.details || {};
+  const outcome = details.outcome || "";
+  if (/^A[123]$/.test(outcome)) {
+    const unitIds = [...(details.attackers || [])];
+    return { unitIds, count: Number(outcome.slice(1)), side: "攻击方", retreatingSide: state.units?.[unitIds[0]]?.side || state.active_side };
+  }
+  if (/^D[123]$/.test(outcome)) {
+    const unitIds = [...(details.defenders || [])];
+    return { unitIds, count: Number(outcome.slice(1)), side: "防御方", retreatingSide: state.units?.[unitIds[0]]?.side || oppositeSide(state.active_side) };
+  }
+  return null;
+}
+
+function preparePendingRetreatSelection(paths = {}, requestedOrder = null) {
+  const requirement = pendingCombatRetreatRequirement();
+  if (!requirement) {
+    pendingRetreatSelection = null;
+    return null;
+  }
+  const selectedPaths = structuredClone(paths || {});
+  const requested = Array.isArray(requestedOrder) ? [...new Set(requestedOrder)] : [];
+  const processingOrder = requested.length === requirement.unitIds.length
+    && requested.every((id) => requirement.unitIds.includes(id))
+    ? requested
+    : [...requirement.unitIds];
+  const plan = RulesEngine.planRetreats(rulesContext(), processingOrder, requirement.count, selectedPaths);
+  pendingRetreatSelection = { ...requirement, processingOrder, paths: selectedPaths, plan };
+  return pendingRetreatSelection;
+}
+
+function pendingRetreatNeedsChoice() {
+  return !!pendingRetreatSelection?.plan && !pendingRetreatSelection.plan.complete;
+}
+
+function pendingRetreatIsAiControlled() {
+  const side = pendingRetreatSelection?.retreatingSide;
+  return isPlayableSide(side) && isAiController(playerController(side));
+}
+
+function autoPlanPendingRetreatForAi() {
+  const selection = pendingRetreatSelection;
+  if (!selection || !pendingRetreatIsAiControlled()) return null;
+  const plan = RulesEngine.autoPlanRetreats(rulesContext(), selection.unitIds, selection.count);
+  if (!plan.legal || !plan.complete) return null;
+  selection.paths = structuredClone(plan.paths || {});
+  selection.plan = plan;
+  return selection;
+}
+
+function scheduleAiRetreatResolution() {
+  if (aiRetreatResolutionTimer) clearTimeout(aiRetreatResolutionTimer);
+  if (!pendingRetreatSelection?.plan?.complete || !pendingRetreatIsAiControlled() || !pendingCombatRoll) return;
+  const rollKey = pendingCombatRoll.key;
+  const delay = Math.max(900, aiPlaybackTiming().preview);
+  aiRetreatResolutionTimer = setTimeout(() => {
+    aiRetreatResolutionTimer = 0;
+    if (!pendingCombatRoll || pendingCombatRoll.key !== rollKey) return;
+    if (!pendingRetreatSelection?.plan?.complete || !pendingRetreatIsAiControlled()) return;
+    applyPendingCombatRoll();
+  }, delay);
+}
+
+function previewPendingRetreatRoute(rawHex) {
+  const selection = pendingRetreatSelection;
+  const pending = selection?.plan?.pending;
+  if (!selection || !pending || selection.plan.complete) return null;
+  let firstHex;
+  try { firstHex = normalizeHex(rawHex); }
+  catch { return null; }
+  if (!pending.options?.some((option) => option.hex === firstHex)) return null;
+  const currentUnitId = pending.unit;
+  const paths = structuredClone(selection.paths || {});
+  paths[currentUnitId] ||= [];
+  paths[currentUnitId][pending.step - 1] = firstHex;
+  let plan = null;
+  for (let guard = 0; guard < 10; guard += 1) {
+    plan = RulesEngine.planRetreats(rulesContext(), selection.processingOrder || selection.unitIds, selection.count, paths);
+    if (!plan.legal) return null;
+    const continuation = plan.pending;
+    if (!continuation || continuation.unit !== currentUnitId) break;
+    const nextHex = continuation.options?.[0]?.hex;
+    if (!nextHex) break;
+    paths[currentUnitId][continuation.step - 1] = nextHex;
+  }
+  const unitPath = (paths[currentUnitId] || []).filter(Boolean);
+  const fullRoute = [state.units?.[currentUnitId]?.hex || pending.from, ...unitPath];
+  const visibleRoute = [pending.from, ...unitPath.slice(Math.max(0, pending.step - 1))];
+  return {
+    unitId: currentUnitId,
+    firstHex,
+    destination: unitPath[unitPath.length - 1] || firstHex,
+    fullRoute,
+    visibleRoute,
+    paths,
+    plan,
+    eliminated: !!plan?.eliminated?.includes(currentUnitId)
+  };
+}
+
+function pendingRetreatRoutePreviews() {
+  const options = pendingRetreatSelection?.plan?.pending?.options || [];
+  return options.map((option) => previewPendingRetreatRoute(option.hex)).filter(Boolean);
+}
+
+function shortestHexStepDistance(rawStart, rawTarget) {
+  let start;
+  let target;
+  try {
+    start = normalizeHex(rawStart);
+    target = normalizeHex(rawTarget);
+  }
+  catch { return Infinity; }
+  if (start === target) return 0;
+  const queue = [[start, 0]];
+  const seen = new Set([start]);
+  while (queue.length) {
+    const [current, steps] = queue.shift();
+    for (const next of neighbors(current)) {
+      if (seen.has(next)) continue;
+      if (next === target) return steps + 1;
+      seen.add(next);
+      queue.push([next, steps + 1]);
+    }
+  }
+  return Infinity;
+}
+
+function explainInvalidRetreatTarget(rawHex) {
+  const selection = pendingRetreatSelection;
+  const pending = selection?.plan?.pending;
+  if (!selection || !pending) return;
+  let target;
+  try { target = normalizeHex(rawHex); }
+  catch { return; }
+  const unit = state.units?.[pending.unit];
+  const start = unit?.hex || pending.from;
+  const minimum = shortestHexStepDistance(start, target);
+  const reason = Number.isFinite(minimum) && minimum > selection.count
+    ? `${unit?.name || pending.unit} 从 ${start} 到 ${target} 最少需要撤退 ${minimum} 格；本次战斗结果只允许 ${selection.count} 格。`
+    : `${target} 不是当前合法撤退终点。撤退路线还必须避开敌方单位、敌方控制区和敌方雷区，并遵守撤退优先级。`;
+  setRetreatMapFeedback({ hex: target, text: "此格不可撤退", tone: "error" });
+  setOutput("combatOutput", { legal: false, reason });
+  renderActionControls();
+  renderMap();
+}
+
+function selectPendingRetreatUnit(unitId) {
+  const selection = pendingRetreatSelection;
+  const plan = selection?.plan;
+  if (!selection || !plan || plan.complete || pendingRetreatIsAiControlled()) return false;
+  if (!selection.unitIds.includes(unitId) || plan.eliminated?.includes(unitId)) return false;
+  if ((selection.paths?.[unitId]?.length || 0) >= selection.count) return false;
+  if (plan.pending?.unit === unitId) return true;
+
+  const currentOrder = selection.processingOrder || selection.unitIds;
+  const completed = currentOrder.filter((id) =>
+    plan.eliminated?.includes(id) || (selection.paths?.[id]?.length || 0) >= selection.count
+  );
+  const waiting = currentOrder.filter((id) => !completed.includes(id) && id !== unitId);
+  const processingOrder = [...completed, unitId, ...waiting];
+  const nextPlan = RulesEngine.planRetreats(rulesContext(), processingOrder, selection.count, selection.paths || {});
+  selection.processingOrder = processingOrder;
+  selection.plan = nextPlan;
+
+  const selected = state.units?.[unitId];
+  const pending = nextPlan.pending;
+  setOutput(
+    "combatOutput",
+    pending?.unit === unitId
+      ? `已选择 ${selected?.name || unitId}，请在地图或上方选项中确定完整撤退路线。`
+      : `${selected?.name || unitId} 当前无合法撤退路线；请继续处理 ${state.units?.[pending?.unit]?.name || pending?.unit || "下一单位"}。`
+  );
+  renderActionControls();
+  renderMap();
+  if (pending?.unit && state.units?.[pending.unit]?.hex) focusMapOnHex(state.units[pending.unit].hex, { behavior: "smooth" });
+  return true;
+}
+
+function choosePendingRetreatHex(rawHex) {
+  const pending = pendingRetreatSelection?.plan?.pending;
+  if (!pending || pendingRetreatSelection.plan.complete) return false;
+  let hex;
+  try { hex = normalizeHex(rawHex); }
+  catch { return false; }
+  const previews = pendingRetreatRoutePreviews();
+  const preview = previews.find((item) => item.firstHex === hex)
+    || previews.find((item) => item.destination === hex)
+    || previews.find((item) => item.visibleRoute.includes(hex));
+  if (!preview) return false;
+  const currentUnitId = preview.unitId;
+  const completedName = state.units?.[currentUnitId]?.name || currentUnitId || "单位";
+  setRetreatMapFeedback({
+    hex: preview.destination,
+    route: preview.fullRoute,
+    text: "撤退已确认",
+    detail: `${completedName} → ${preview.destination}`,
+    tone: "success"
+  });
+  preparePendingRetreatSelection(preview.paths, pendingRetreatSelection?.processingOrder);
+  const next = pendingRetreatSelection?.plan?.pending;
+  setOutput(
+    "combatOutput",
+    pendingRetreatSelection?.plan?.complete
+      ? `${completedName} 的撤退路线已确认；全部撤退路线已经确定，可以执行战斗结果。`
+      : `${completedName} 的撤退路线已确认；现在处理 ${state.units?.[next?.unit]?.name || next?.unit || "下一单位"}。`
+  );
+  renderActionControls();
+  renderMap();
+  if (next?.unit && state.units?.[next.unit]?.hex) focusMapOnHex(state.units[next.unit].hex, { behavior: "smooth" });
+  return true;
+}
+
+function clearPendingCombatRoll() {
+  if (aiRetreatResolutionTimer) clearTimeout(aiRetreatResolutionTimer);
+  if (retreatMapFeedbackTimer) clearTimeout(retreatMapFeedbackTimer);
+  aiRetreatResolutionTimer = 0;
+  retreatMapFeedbackTimer = 0;
+  retreatMapFeedback = null;
+  pendingCombatRoll = null;
+  pendingRetreatSelection = null;
+  aiCombatPlayback = null;
+  if (el("combatResolveDieSelect")) el("combatResolveDieSelect").value = "";
+  const reveal = el("combatRollReveal");
+  if (reveal) {
+    reveal.className = "combat-roll-reveal hidden";
+    reveal.innerHTML = "";
+  }
+  const planner = el("combatRetreatPlanner");
+  if (planner) {
+    planner.className = "combat-retreat-planner hidden";
+    planner.innerHTML = "";
+  }
+  document.querySelectorAll("#mapOverlay .retreat-option-group").forEach((node) => node.remove());
+}
+
+function invalidateAsyncGameWork(reason = "game state replaced") {
+  aiRunGeneration += 1;
+  aiAutoRunning = false;
+  aiSuggestion = null;
+  pendingPhaseEndKey = null;
+  clearCombatSelection();
+  cancelPendingMovementWork(reason);
+  selectedUnitId = null;
+  selectedHexId = null;
+  highlightedSupplyPath = [];
+  movePathDraft = [];
+}
+
+function combatOutcomeExplanation(outcome) {
+  if (/^A[123]$/.test(outcome || "")) return `攻击方撤退 ${outcome.slice(1)} 格`;
+  if (/^D[123]$/.test(outcome || "")) return `防御方撤退 ${outcome.slice(1)} 格`;
+  const labels = {
+    Ae: "攻击方全部消灭",
+    De: "防御方全部消灭",
+    Ex: "双方交换损失",
+    "No Effect": "战斗无效果，双方留在原位"
+  };
+  return labels[outcome] || "战斗无效果";
+}
+
+function combatReportUnitNames(ids = []) {
+  return ids.map((id) => state.units?.[id]?.name || id).join("、") || "未知单位";
+}
+
+function combatReportEffectText(entry = {}) {
+  const verdict = entry.verdict || {};
+  const effects = verdict.effects || {};
+  const parts = [combatOutcomeExplanation(verdict.outcome)];
+  const eliminated = [
+    ...(effects.eliminated || []),
+    ...(effects.retreated?.eliminated || []),
+    ...(effects.exchange?.eliminated_attackers || []),
+    ...(effects.exchange?.eliminated_defenders || [])
+  ];
+  if (eliminated.length) parts.push(`消灭：${combatReportUnitNames([...new Set(eliminated)])}`);
+  if (effects.retreated?.retreated?.length) {
+    const routes = entry.action?.retreat_paths || {};
+    const retreatText = effects.retreated.retreated.map((id) => {
+      const path = routes[id] || [];
+      return `${state.units?.[id]?.name || id}${path.length ? ` → ${path.join(" → ")}` : " 已撤退"}`;
+    }).join("；");
+    parts.push(`撤退：${retreatText}`);
+  }
+  if (effects.advanced) parts.push(`战后推进：${state.units?.[effects.advanced.unit]?.name || effects.advanced.unit} → ${effects.advanced.to}`);
+  if (effects.defender_advanced) parts.push(`防御方推进：${state.units?.[effects.defender_advanced.unit]?.name || effects.defender_advanced.unit} → ${effects.defender_advanced.to}`);
+  return parts.join(" · ");
+}
+
+function combatReportCardHtml(entry = {}, options = {}) {
+  const verdict = entry.verdict || {};
+  const outcome = verdict.outcome || "-";
+  const side = entry.side || phaseSide(entry.phase) || "neutral";
+  const terrainText = (verdict.battle_terrain || []).map((item) => `${item.hex} · ${item.terrain}`).join(" / ")
+    || (verdict.defender_hexes || []).join("、")
+    || "未知地点";
+  const time = entry.time ? new Date(entry.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  return `
+    <article class="combat-report-card ${escapeHtml(side)} outcome-${escapeHtml(String(outcome).toLowerCase().replace(/[^a-z0-9]+/g, "-"))} ${options.latest ? "latest" : ""}">
+      <header>
+        <span>T${escapeHtml(entry.turn || state.turn || 1)} · ${escapeHtml(sideDisplayName(side))}${time ? ` · ${escapeHtml(time)}` : ""}</span>
+        <strong>${escapeHtml(outcome)}</strong>
+      </header>
+      <div class="combat-report-matchup">
+        <b>${escapeHtml(combatReportUnitNames(verdict.attackers || entry.action?.attackers || []))}</b>
+        <span>攻击</span>
+        <b>${escapeHtml(combatReportUnitNames(verdict.defenders || []))}</b>
+      </div>
+      <div class="combat-report-facts">
+        <span><small>地点</small><b>${escapeHtml(terrainText)}</b></span>
+        <span><small>战力</small><b>${escapeHtml(verdict.attack ?? "-")} : ${escapeHtml(verdict.defense ?? "-")}</b></span>
+        <span><small>赔率</small><b>${escapeHtml(String(verdict.odds_column || "-").replace("-", ":"))}</b></span>
+        <span><small>骰点</small><b>${escapeHtml(verdict.die ?? entry.action?.die ?? "-")}</b></span>
+      </div>
+      <p>${escapeHtml(combatReportEffectText(entry))}</p>
+    </article>
+  `;
+}
+
+function renderCombatReports() {
+  const reports = state.combat_log || [];
+  const latest = reports.at(-1);
+  const latestPanel = el("latestCombatReport");
+  if (latestPanel) {
+    latestPanel.className = `latest-combat-report${latest ? "" : " hidden"}`;
+    latestPanel.innerHTML = latest
+      ? `<div class="latest-combat-report-head"><span>最新战报</span><b>${escapeHtml(combatOutcomeExplanation(latest.verdict?.outcome))}</b></div>${combatReportCardHtml(latest, { latest: true })}`
+      : "";
+  }
+  if (el("combatReportCount")) el("combatReportCount").textContent = String(reports.length);
+  const list = el("combatReportList");
+  if (!list) return;
+  list.innerHTML = reports.length
+    ? reports.slice(-20).reverse().map((entry) => combatReportCardHtml(entry)).join("")
+    : `<div class="combat-report-empty"><b>暂无战报</b><span>完成战斗后，攻击、防御、骰点和结果会保留在这里。</span></div>`;
+}
+
+function renderCombatCrtPreview() {
+  const panel = el("combatCrtPreview");
+  const button = el("toggleCombatTableBtn");
+  if (!panel || !button) return;
+  button.textContent = combatCrtPreviewOpen ? "收起结果表" : "查看结果表";
+  button.setAttribute("aria-expanded", combatCrtPreviewOpen ? "true" : "false");
+  const baseAction = (() => {
+    try { return parseCombatAction(); }
+    catch { return null; }
+  })();
+  if (!combatCrtPreviewOpen || !baseAction?.attackers?.length || !baseAction?.defender_hexes?.length) {
+    panel.className = "combat-crt-preview hidden";
+    panel.innerHTML = "";
+    return;
+  }
+  const rows = [];
+  let odds = "-";
+  for (let die = 1; die <= 6; die++) {
+    const verdict = checkCombat({ ...baseAction, die });
+    if (!verdict.legal) {
+      panel.className = "combat-crt-preview hidden";
+      panel.innerHTML = "";
+      return;
+    }
+    odds = verdict.details?.odds_column || odds;
+    const outcome = verdict.details?.outcome || "-";
+    const rolled = Number(pendingCombatRoll?.action?.die || 0) === die;
+    rows.push(`
+      <tr class="${rolled ? "rolled" : ""}">
+        <th scope="row"><span>${die}</span></th>
+        <td><b>${escapeHtml(outcome)}</b>${rolled ? "<em>本次</em>" : ""}</td>
+        <td>${escapeHtml(combatOutcomeExplanation(outcome))}</td>
+      </tr>
+    `);
+  }
+  panel.className = "combat-crt-preview";
+  panel.innerHTML = `
+    <div class="combat-crt-preview-head"><span>战斗结果表</span><b>当前赔率 ${escapeHtml(odds)}</b></div>
+    <table>
+      <thead><tr><th>骰点</th><th>结果</th><th>效果</th></tr></thead>
+      <tbody>${rows.join("")}</tbody>
+    </table>
+  `;
+}
+
+function renderCombatRollReveal() {
+  const reveal = el("combatRollReveal");
+  if (!reveal) return;
+  const playback = pendingCombatRoll && pendingCombatRollIsCurrent()
+    ? pendingCombatRoll
+    : aiCombatPlayback;
+  if (!playback) {
+    reveal.className = "combat-roll-reveal hidden";
+    reveal.innerHTML = "";
+    return;
+  }
+  const details = playback.verdict?.details || {};
+  const outcome = details.outcome || "-";
+  reveal.className = `combat-roll-reveal${playback.ai ? " ai-combat-roll" : ""} outcome-${String(outcome).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  reveal.innerHTML = `
+    <div class="combat-die-result" aria-label="骰点 ${escapeHtml(details.die)}">
+      <span>${playback.ai ? "AI 骰点" : "骰点"}</span>
+      <strong>${escapeHtml(details.die)}</strong>
+    </div>
+    <div class="combat-roll-verdict">
+      <span>${playback.ai ? `${escapeHtml(playerControllerLabel(playerController(playback.side)))} 战斗裁定` : "战斗结果表"}</span>
+      <div><b>${escapeHtml(details.odds_column || "-")}</b><i>赔率</i><strong>${escapeHtml(outcome)}</strong></div>
+      <p>攻 ${escapeHtml(details.attack ?? "-")} · 防 ${escapeHtml(details.defense ?? "-")} · ${escapeHtml(combatOutcomeExplanation(outcome))}</p>
+    </div>
+  `;
+}
+
+function renderCombatRetreatPlanner() {
+  const panel = el("combatRetreatPlanner");
+  if (!panel) return;
+  const selection = pendingRetreatSelection;
+  const plan = selection?.plan;
+  if (!selection || !plan) {
+    panel.className = "combat-retreat-planner hidden";
+    panel.innerHTML = "";
+    return;
+  }
+  const pathRows = selection.unitIds.map((id) => {
+    const unit = state.units?.[id];
+    const path = selection.paths?.[id] || [];
+    const eliminated = plan.eliminated?.includes(id);
+    const selectedSteps = path.length;
+    const remaining = Math.max(0, selection.count - selectedSteps);
+    const isCurrent = plan.pending?.unit === id;
+    const complete = eliminated || remaining === 0;
+    const route = [unit?.hex || "-", ...path].map((hex) => escapeHtml(hex)).join(" → ");
+    let routeStatus = "";
+    if (eliminated) {
+      routeStatus = "无路可退，执行后消灭";
+    } else if (complete) {
+      routeStatus = `${route} <em>已完成</em>`;
+    } else if (isCurrent) {
+      routeStatus = `${selectedSteps ? `${route} ` : ""}<em>待选完整路线</em>`;
+    } else if (selectedSteps) {
+      routeStatus = `${route} <em>还差 ${remaining} 格</em>`;
+    } else {
+      routeStatus = `<em>${pendingRetreatIsAiControlled() ? "等待处理" : "点击处理"}</em>`;
+    }
+    const progress = eliminated
+      ? "无法撤退"
+      : complete
+        ? `${selectedSteps} / ${selection.count} 格 · 已完成`
+        : isCurrent
+          ? `需撤退 ${remaining} 格`
+          : "等待处理";
+    const selectable = !pendingRetreatIsAiControlled() && !plan.complete && !complete;
+    const tag = selectable ? "button" : "div";
+    const attributes = selectable
+      ? `type="button" data-retreat-unit="${escapeHtml(id)}" aria-label="选择处理 ${escapeHtml(unit?.name || id)}" aria-pressed="${isCurrent ? "true" : "false"}"`
+      : "";
+    return `
+      <${tag} ${attributes} class="combat-retreat-path ${selectable ? "selectable" : ""} ${eliminated ? "blocked" : ""} ${isCurrent ? "current" : ""} ${complete ? "complete" : ""}">
+        <span><strong>${escapeHtml(unit?.name || id)}</strong><i>${progress}</i></span>
+        <b>${routeStatus}</b>
+      </${tag}>
+    `;
+  }).join("");
+  if (plan.complete) {
+    const aiController = pendingRetreatIsAiControlled()
+      ? playerControllerLabel(playerController(selection.retreatingSide))
+      : "";
+    panel.className = "combat-retreat-planner complete";
+    panel.innerHTML = `
+      <div class="combat-retreat-head">
+        <span>${escapeHtml(aiController ? `${aiController} 已规划撤退` : "撤退路线已确定")}</span>
+        <b>${escapeHtml(selection.side)} · ${escapeHtml(selection.count)} 格</b>
+      </div>
+      <div class="combat-retreat-paths">${pathRows}</div>
+    `;
+    return;
+  }
+  const pending = plan.pending;
+  const unit = state.units?.[pending?.unit];
+  const routePreviews = pendingRetreatRoutePreviews();
+  panel.className = `combat-retreat-planner ${plan.legal ? "choosing" : "blocked"}`;
+  panel.innerHTML = `
+    <div class="combat-retreat-head">
+      <span>当前撤退单位</span>
+      <b>${escapeHtml(selection.side)} · ${escapeHtml(selection.count)} 格</b>
+    </div>
+    ${pending ? `
+      <div class="combat-retreat-unit">
+        <img src="${escapeHtml(counterImageFor(unit) || "")}" alt="">
+        <span><strong>${escapeHtml(unit?.name || pending.unit)}</strong><small>当前位置 ${escapeHtml(pending.from)} · 选择完整撤退路线</small></span>
+      </div>
+      <div class="combat-retreat-options">
+        ${routePreviews.map((preview) => `
+          <button type="button" data-retreat-hex="${escapeHtml(preview.firstHex)}">
+            <strong>${preview.eliminated ? "无路可退" : `撤至 ${escapeHtml(preview.destination)}`}</strong>
+            <span>${preview.fullRoute.map((hex) => escapeHtml(hex)).join(" → ")}</span>
+          </button>
+        `).join("")}
+      </div>
+      <small>地图上的金色路线对应上方选项。</small>
+    ` : `<p>${escapeHtml(plan.reason || "撤退路线无法完成")}</p>`}
+    <div class="combat-retreat-paths">${pathRows}</div>
+  `;
+}
+
+function revealCombatRoll(die = Number(el("combatResolveDieSelect")?.value || 0)) {
+  const action = { ...parseCombatAction(), die: Number(die) };
+  if (!Number.isInteger(action.die) || action.die < 1 || action.die > 6) {
+    clearPendingCombatRoll();
+    setOutput("combatOutput", { legal: false, reason: "请先选择 1 至 6 的骰点" });
+    renderActionControls();
+    return;
+  }
+  if (el("combatResolveDieSelect")) el("combatResolveDieSelect").value = String(action.die);
+  const verdict = checkCombat(action);
+  if (!verdict.legal) {
+    clearPendingCombatRoll();
+    setOutput("combatOutput", verdict);
+    renderActionControls();
+    return;
+  }
+  pendingCombatRoll = {
+    key: combatActionKey(action),
+    action: structuredClone(action),
+    verdict: structuredClone(verdict)
+  };
+  preparePendingRetreatSelection();
+  const aiRetreat = autoPlanPendingRetreatForAi();
+  const aiRetreatLabel = aiRetreat
+    ? playerControllerLabel(playerController(aiRetreat.retreatingSide))
+    : "";
+  setOutput(
+    "combatOutput",
+    aiRetreat
+      ? `${aiRetreatLabel} 已自动规划${aiRetreat.side}撤退路线，正在执行战斗结果。`
+      : pendingRetreatNeedsChoice()
+      ? "骰点与结果已经确定。请为当前单位选择金色撤退路线。"
+      : "骰点与结果已经确定。确认后才会移动或消灭棋子。"
+  );
+  renderActionControls();
+  if (pendingRetreatNeedsChoice() || aiRetreat) {
+    renderMap();
+    const retreatingId = pendingRetreatSelection?.plan?.pending?.unit || pendingRetreatSelection?.unitIds?.[0];
+    if (retreatingId && state.units?.[retreatingId]?.hex) focusMapOnHex(state.units[retreatingId].hex, { behavior: "smooth" });
+  }
+  if (aiRetreat) scheduleAiRetreatResolution();
+}
+
+function applyPendingCombatRoll(options = {}) {
+  if (!pendingCombatRoll || !pendingCombatRollIsCurrent()) {
+    clearPendingCombatRoll();
+    setOutput("combatOutput", { legal: false, reason: "战斗选择已经改变，请重新掷骰" });
+    renderActionControls();
+    return { legal: false, reason: "战斗选择已经改变，请重新掷骰" };
+  }
+  if (pendingRetreatNeedsChoice()) {
+    setOutput("combatOutput", { legal: false, reason: "请先为撤退单位选完撤退格" });
+    renderActionControls();
+    renderMap();
+    return { legal: false, reason: "请先为撤退单位选完撤退格" };
+  }
+  const pending = pendingCombatRoll;
+  const action = structuredClone(pendingCombatRoll.action);
+  if (pendingRetreatSelection?.plan?.complete) {
+    action.retreat_paths = structuredClone(pendingRetreatSelection.paths || {});
+    action.retreat_order = [...(pendingRetreatSelection.processingOrder || pendingRetreatSelection.unitIds || [])];
+  }
+  const verdict = checkCombat(action);
+  if (!verdict.legal) {
+    clearPendingCombatRoll();
+    setOutput("combatOutput", verdict);
+    renderActionControls();
+    return verdict;
+  }
+  clearPendingCombatRoll();
+  const result = resolveCombat(action, { skipHistory: !!pending.ai });
+  setOutput("combatOutput", result);
+  renderActionControls();
+  if (pending.ai && !options.fromAiLoop && result.legal) {
+    incrementAiPhaseActionCount();
+    if (pending.resumeAutoplay && state.ai_autoplay) {
+      setTimeout(() => scheduleAiAutoplay(), aiPlaybackTiming().result);
+    }
+  }
+  return result;
+}
+
+function unreachableRouteVerdict(unitId, target, diagnosis = null) {
+  if (diagnosis?.reason) return { ...diagnosis, legal: false };
+  const unit = unitId && state.units?.[unitId] ? { id: unitId, ...state.units[unitId] } : null;
+  const start = unit?.hex ? normalizeHex(unit.hex) : "当前格";
+  const allowance = unit ? effectiveMovement(unit) : null;
+  const limit = Number.isFinite(allowance) ? `${allowance} MP 内` : "当前条件下";
+  return {
+    legal: false,
+    reason: `${start} → ${target} 当前不可达：不存在 ${limit}同时满足地形、ZOC 与堆叠规则的路线`
+  };
+}
+
+async function runAutoRouteFromTarget() {
   const unitId = el("moveUnitSelect")?.value;
   const rawTarget = el("moveTargetInput")?.value || "";
   let target;
@@ -2857,12 +4213,28 @@ function runAutoRouteFromTarget() {
     return false;
   }
   if (el("moveTargetInput")) el("moveTargetInput").value = target;
-  const path = findLegalPath(unitId, target, moveOptions());
+  moveRouteFailure = null;
+  const options = moveOptions();
+  setOutput("moveOutput", { status: "正在检查路线", unit: unitId, target });
+  let path = null;
+  try {
+    path = await requestLegalPath(unitId, target, options);
+  }
+  catch {
+    path = findLegalPath(unitId, target, options);
+  }
+  if (el("moveUnitSelect")?.value !== unitId || el("moveTargetInput")?.value !== target) return false;
   if (!path) {
-    setOutput("moveOutput", { legal: false, reason: "找不到合法自动路线", target });
+    const diagnosis = await requestMoveDiagnosis(unitId, target, options);
+    if (el("moveUnitSelect")?.value !== unitId || el("moveTargetInput")?.value !== target) return false;
+    const verdict = unreachableRouteVerdict(unitId, target, diagnosis);
+    moveRouteFailure = { unitId, target, verdict };
+    setOutput("moveOutput", verdict);
     renderActionControls();
+    renderMap();
     return false;
   }
+  moveRouteFailure = null;
   movePathDraft = path;
   syncMovePathInput();
   renderRouteStatus();
@@ -2886,8 +4258,17 @@ function handlePhaseActionDockClick(event) {
     focusCurrentPhaseTab({ expandPanel: true });
     return;
   }
+  if (command === "open-log") {
+    el("afterActionReport")?.classList.add("hidden");
+    switchTab("log", { expandPanel: true });
+    return;
+  }
+  if (command === "return-home") {
+    returnToHome();
+    return;
+  }
   if (command === "open-ai-panel") {
-    switchTab("ai", { expandPanel: true });
+    switchTab("settings", { expandPanel: true });
     return;
   }
   if (command === "resume-ai") {
@@ -2899,6 +4280,19 @@ function handlePhaseActionDockClick(event) {
     return;
   }
   if (command === "end-phase") {
+    const repair = temporaryOverstackRepair();
+    if (repair) {
+      pendingPhaseEndKey = null;
+      setOutput("moveOutput", {
+        legal: false,
+        reason: repair.options.length
+          ? `${repair.hex} 的临时超堆叠必须先通过移动恢复`
+          : `${repair.hex} 已无法通过移动恢复，请选择超限单位移除`
+      });
+      focusCurrentPhaseTab({ expandPanel: true });
+      renderState();
+      return;
+    }
     if (!phaseEndConfirmationPending()) {
       pendingPhaseEndKey = phaseEndKey();
       renderState();
@@ -2913,7 +4307,7 @@ function handlePhaseActionDockClick(event) {
     return;
   }
   if (command === "apply-move") {
-    el("applyMoveBtn")?.click();
+    executeCurrentMove();
     return;
   }
   if (command === "undo-route") {
@@ -2936,21 +4330,37 @@ function handlePhaseActionDockClick(event) {
     focusActionableUnit(sortedActionableUnits()[0]);
     return;
   }
+  if (command === "focus-overstack") {
+    const repair = temporaryOverstackRepair();
+    if (!repair) return;
+    const preferred = repair.options[0]?.unit || repair.removable_unit_ids[0];
+    const unit = preferred && state.units?.[preferred] ? { id: preferred, ...state.units[preferred] } : null;
+    if (unit) focusActionableUnit(unit);
+    return;
+  }
+  if (command === "eliminate-overstack") {
+    const repair = temporaryOverstackRepair();
+    if (!repair || !repair.removable_unit_ids.includes(selectedUnitId)) return;
+    pushHistory("eliminate_unresolved_temporary_overstack");
+    const result = RulesEngine.eliminateTemporaryOverstackUnit(rulesContext(), selectedUnitId);
+    if (!result.legal) actionLog.pop();
+    else logEvent("temporary_overstack_elimination", result.reason, result.details || {});
+    selectedUnitId = null;
+    setOutput("moveOutput", result);
+    renderState();
+    return;
+  }
   if (command === "focus-actionable") {
     const unitId = button.dataset.unitId;
     focusActionableUnit(sortedActionableUnits().find((unit) => unit.id === unitId));
     return;
   }
   if (command === "use-selected-combat") {
-    el("useSelectedCombatBtn")?.click();
+    activateCombatForSelectedUnit();
     return;
   }
-  if (command === "preview-combat") {
-    el("previewCombatBtn")?.click();
-    return;
-  }
-  if (command === "roll-combat") {
-    resolveCombatWithRandomDie();
+  if (command === "combat-action") {
+    el("combatActionBtn")?.click();
   }
 }
 
@@ -3048,7 +4458,7 @@ function activeTabName() {
 function focusCurrentPhaseTab(options = {}) {
   const guide = phaseGuide(state.phase);
   const targetTab = guide.tab || "state";
-  const utilityTabs = new Set(["roster", "rulebook", "ai", "settings", "calibration"]);
+  const utilityTabs = new Set(["rulebook", "ai", "settings"]);
   if (options.respectUtility && utilityTabs.has(activeTabName())) return;
   switchTab(targetTab, { expandPanel: !!options.expandPanel });
 }
@@ -3078,7 +4488,30 @@ function phaseTabBadge(tabName = "") {
   return "";
 }
 
+function syncPhaseTabVisibility() {
+  const playTabs = document.querySelector(".play-tabs");
+  if (!playTabs) return;
+  const targetTab = phaseGuide(state.phase).tab || "state";
+  const visibleTabs = new Set(["state", targetTab]);
+  playTabs.style.setProperty("--visible-action-tabs", String(visibleTabs.size));
+  playTabs.querySelectorAll(".tab[data-tab]").forEach((tab) => {
+    const hidden = !visibleTabs.has(tab.dataset.tab);
+    tab.classList.toggle("phase-tab-hidden", hidden);
+    tab.setAttribute("aria-hidden", hidden ? "true" : "false");
+    tab.tabIndex = hidden ? -1 : 0;
+  });
+
+  const activePlayTab = playTabs.querySelector(".tab.active");
+  if (!activePlayTab?.classList.contains("phase-tab-hidden")) return;
+  document.querySelectorAll(".tab, .tab-panel").forEach((node) => node.classList.remove("active"));
+  playTabs.querySelector(`.tab[data-tab="${targetTab}"]`)?.classList.add("active");
+  el(`tab-${targetTab}`)?.classList.add("active");
+  const modeByTab = { move: "move", combat: "combat", judge: "all", state: "command" };
+  if (modeByTab[targetTab]) setMapViewMode(modeByTab[targetTab]);
+}
+
 function syncPhaseRecommendedTab() {
+  syncPhaseTabVisibility();
   const targetTab = phaseGuide(state.phase).tab || "state";
   document.querySelectorAll(".tab").forEach((tab) => {
     const tabName = tab.dataset.tab || "";
@@ -3164,7 +4597,20 @@ function recoverMovementSpentForSide(side) {
 }
 
 function advancePhase(options = {}) {
-  pushHistory("advance_phase");
+  if (state.game_completed) {
+    showAfterActionReport(state.final_victory || checkVictory());
+    return;
+  }
+  const unresolvedOverstack = temporaryOverstackRepair();
+  if (unresolvedOverstack) {
+    setOutput("moveOutput", {
+      legal: false,
+      reason: `${unresolvedOverstack.hex} 的临时超堆叠尚未恢复，不能结束初始移动阶段`
+    });
+    renderState();
+    return false;
+  }
+  if (!options.skipHistory) pushHistory("advance_phase");
   pendingPhaseEndKey = null;
   const fromPhase = state.phase;
   const fromTurn = Number(state.turn || 1);
@@ -3177,21 +4623,27 @@ function advancePhase(options = {}) {
   }
   state.phase = next.phase;
   syncActiveSideFromPhase();
+  if (phaseKind(fromPhase) === "combat" || phaseKind(state.phase) === "combat") {
+    clearCombatSelection();
+    aiCombatPlayback = null;
+  }
   if (phaseKind(state.phase) === "combat") recoverMovementSpentForSide(state.active_side);
   selectedUnitId = null;
   movePathDraft = [];
   syncMovePathInput();
   logEvent("phase", `阶段推进：${phaseDisplayName(fromPhase)} -> ${phaseDisplayName(state.phase)}`, { from_turn: fromTurn, to_turn: state.turn, from_phase: fromPhase, to_phase: state.phase });
+  if (isFinalVictoryCheck()) finalizeCompletedGame(checkVictory());
   renderState();
   const shouldFocus = options.focusPhaseTab ?? !state.ai_autoplay;
   if (shouldFocus) focusCurrentPhaseTab();
   scheduleAiAutoplay();
+  return true;
 }
 
 function advancePhaseForAi() {
   suppressAiActionRender = true;
   try {
-    advancePhase({ focusPhaseTab: false });
+    return advancePhase({ focusPhaseTab: false, skipHistory: true });
   }
   finally {
     suppressAiActionRender = false;
@@ -3303,37 +4755,22 @@ function renderTurnBanner() {
   const guide = phaseGuide(state.phase);
   const side = state.active_side === "allies" ? "allies" : "axis";
   const isEndTurn = state.phase === "end_game_turn";
-  const sideDisplay = isEndTurn ? "End Turn" : (side === "axis" ? "Axis" : "Allies");
+  const sideDisplay = isEndTurn ? "回合结束" : (side === "axis" ? "轴心国" : "盟军");
   const controller = playerControllerLabel(playerController(side));
-  const progress = phaseProgressMeta();
   const victory = victoryStatusSummary();
-  let nextPhaseText = "下一回合";
-  try {
-    nextPhaseText = phaseDisplayName(RulesEngine.nextPhase(rulesContext()).phase);
-  }
-  catch {
-    nextPhaseText = "下一阶段";
-  }
-  const aiControlled = currentPhaseIsAiControlled();
-  const aiState = isEndTurn
-    ? "系统结算阶段"
-    : aiControlled
-    ? (state.ai_autoplay ? "AI 会自动执行" : "AI 已暂停")
-    : "等待玩家操作";
+  const finalTurn = scenarioFinalTurn(state.scenario);
+  const turnLabel = `第 ${state.turn || 1} 回合 · 共 ${finalTurn} 回合`;
+  const phaseLabelText = isEndTurn ? "回合结束结算" : `${sideDisplay} ${phaseShortLabel(state.phase)}`;
   banner.className = `turn-banner ${side}`;
   banner.innerHTML = `
     <div class="turn-focus">
       <span>${escapeHtml(sideDisplay)} · ${escapeHtml(isEndTurn ? "系统" : controller)}</span>
-      <strong>Turn ${escapeHtml(state.turn || 1)} · ${escapeHtml(phaseDisplayName(state.phase))}</strong>
+      <strong>${escapeHtml(turnLabel)} · ${escapeHtml(phaseLabelText)}</strong>
       <small>${escapeHtml(guide.action)}</small>
     </div>
     ${renderTurnPhaseFlow()}
     <div class="turn-status">
-      <span>${escapeHtml(scenarioShortName(state.scenario))}</span>
-      <span>VP ${escapeHtml(victory.vp)}</span>
-      <span>${escapeHtml(progress.current)}/${escapeHtml(progress.total)}</span>
-      <span>${escapeHtml(nextPhaseText)}</span>
-      <span>${escapeHtml(aiState)}</span>
+      <div class="turn-status-item vp"><span>轴心国 VP</span><b>${escapeHtml(victory.vp)}</b></div>
     </div>
   `;
 }
@@ -3364,41 +4801,26 @@ function renderPhaseTrail() {
   return `<div class="phase-trail" aria-label="本回合阶段进度">${items}</div>`;
 }
 
-function renderSideCommandBar() {
+function renderSideCommandBar(options = {}) {
   const bar = el("sideCommandBar");
   if (!bar) return;
   const side = state.active_side === "allies" ? "allies" : "axis";
   const isEndTurn = state.phase === "end_game_turn";
-  const sideDisplay = isEndTurn ? "End Turn" : (side === "axis" ? "Axis" : "Allies");
-  const controller = isEndTurn ? "系统" : playerControllerLabel(playerController(side));
   const aiControlled = currentPhaseIsAiControlled();
   const aiState = isEndTurn
     ? "系统结算"
     : aiControlled
     ? (state.ai_autoplay ? "AI 自动" : "AI 暂停")
-    : "玩家操作";
-  const progress = phaseProgressMeta();
-  let nextPhaseText = "下一回合";
-  try {
-    nextPhaseText = phaseDisplayName(RulesEngine.nextPhase(rulesContext()).phase);
-  }
-  catch {
-    nextPhaseText = "下一阶段";
-  }
+    : "玩家";
   const directive = phaseDirective();
   bar.className = `side-command-bar ${side}`;
   bar.innerHTML = `
-    <div class="side-command-head">
-      <span>${escapeHtml(sideDisplay)} · ${escapeHtml(controller)}</span>
-      <b>Turn ${escapeHtml(state.turn || 1)} · ${escapeHtml(progress.current)}/${escapeHtml(progress.total)}</b>
-    </div>
     ${renderPhaseDirective(directive, {
-      label: `当前 · ${phaseDisplayName(state.phase)}`,
-      status: aiState,
-      next: `下一 · ${nextPhaseText}`
+      label: phaseDisplayName(state.phase),
+      status: aiState
     })}
     ${renderRecentEvent()}
-    ${renderRuleWarnings()}
+    ${options.skipWarnings ? "" : renderRuleWarnings()}
   `;
 }
 
@@ -3442,6 +4864,7 @@ function eventTypeLabel(type = "") {
     clear_mine: "清雷",
     ai_move: "AI 移动",
     ai_combat_choice: "AI 战斗",
+    ai_combat_pass: "AI 跳过战斗",
     ai_exit_west: "AI 撤出",
     exit_west: "撤出",
     save: "保存",
@@ -3488,9 +4911,11 @@ function terrainTagLabel(tag = "") {
     depression: "洼地",
     sea: "海面",
     all_sea: "全海",
+    coastline: "海岸",
     alamein_box: "方框区域",
     road: "道路",
     track: "小路",
+    minefield: "雷区",
     impassable: "不可通行"
   };
   return labels[tag] || String(tag || "");
@@ -3503,23 +4928,16 @@ function terrainSummaryLabel(tags = []) {
 
 function renderRecentEvent() {
   const latest = (state.game_log || []).at(-1);
-  if (!latest) {
-    return `
-      <div class="side-command-recent empty">
-        <span>最近行动</span>
-        <b>暂无</b>
-      </div>
-    `;
-  }
+  if (!latest) return "";
   const time = latest.time ? new Date(latest.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
   const focusTarget = logEntryFocusTarget(latest);
+  const visibleTypes = new Set(["move", "combat", "clear_mine", "ai_move", "ai_combat_choice", "ai_combat_pass", "ai_exit_west", "exit_west", "isolation_elimination"]);
+  if (!actionLog.length && !focusTarget && !visibleTypes.has(latest.type)) return "";
   return `
     <div class="side-command-recent ${escapeHtml(latest.type || "")}">
-      <div>
-        <span>${escapeHtml(eventTypeLabel(latest.type))}</span>
-        <b>${escapeHtml(latest.summary || latest.type || "事件")}</b>
-        <small>T${escapeHtml(latest.turn || state.turn || 1)} · ${escapeHtml(phaseDisplayName(latest.phase))}${time ? ` · ${escapeHtml(time)}` : ""}</small>
-      </div>
+      <span>${escapeHtml(eventTypeLabel(latest.type))}</span>
+      <b>${escapeHtml(latest.summary || latest.type || "事件")}</b>
+      ${time ? `<small>${escapeHtml(time)}</small>` : ""}
       ${(actionLog.length || focusTarget) ? `
         <div class="side-command-recent-actions">
           ${focusTarget ? `<button type="button" data-log-focus-type="${escapeHtml(focusTarget.type)}" data-log-focus-value="${escapeHtml(focusTarget.id || focusTarget.hex)}">${escapeHtml(focusTarget.label)}</button>` : ""}
@@ -3534,45 +4952,18 @@ function renderStateBrief(summary = {}) {
   const target = el("stateBrief");
   if (!target) return;
   const side = state.active_side === "allies" ? "Allies" : "Axis";
-  const guide = phaseGuide(state.phase);
-  const progress = phaseProgressMeta();
-  const victory = victoryStatusSummary();
-  const actionableCount = actionableUnitsForCurrentPhase().length;
   const supplyText = Number(summary.unsupplied || 0) > 0 ? `${summary.unsupplied} 个缺补给` : "补给正常";
   const stackingOk = summary.stacking?.legal !== false;
-  const primaryLabel = state.phase === "end_game_turn"
-    ? "打开裁判"
-    : currentPhaseIsAiControlled()
-    ? (state.ai_autoplay ? "查看 AI" : "恢复 AI")
-    : `进入${guide.tabLabel}`;
-  const primaryCommand = state.phase === "end_game_turn"
-    ? "open-phase-panel"
-    : currentPhaseIsAiControlled()
-    ? (state.ai_autoplay ? "open-ai-panel" : "resume-ai")
-    : "open-phase-panel";
-  const endLabel = state.phase === "end_game_turn" ? "下一回合" : phaseKind() === "combat" ? "跳过战斗" : "结束阶段";
-  const selectionText = selectedUnitId && state.units?.[selectedUnitId]
-    ? `${state.units[selectedUnitId].name || selectedUnitId} · ${state.units[selectedUnitId].hex || ""}`
-    : selectedHexId
-    ? `坐标 ${selectedHexId}`
-    : "未选择";
   target.className = `state-brief ${state.active_side || ""} ${stackingOk ? "" : "warning"}`;
   target.innerHTML = `
-    <div class="state-brief-main">
-      <span>${escapeHtml(side)} · Turn ${escapeHtml(state.turn || 1)} · ${escapeHtml(progress.current)}/${escapeHtml(progress.total)}</span>
-      <strong>${escapeHtml(phaseShortLabel(state.phase))}</strong>
-      <div class="state-brief-actions">
-        <button class="primary-action" type="button" data-command="${escapeHtml(primaryCommand)}">${escapeHtml(primaryLabel)}</button>
-        <button class="quiet-action" type="button" data-command="end-phase">${escapeHtml(phaseEndButtonLabel(endLabel))}</button>
-      </div>
+    <div class="state-brief-heading">
+      <span>战场概况</span>
     </div>
     <div class="state-brief-facts" aria-label="局面摘要">
-      <span><b>${escapeHtml(actionableCount)}</b> 可行动</span>
-      <span><b>VP ${escapeHtml(victory.vp)}</b> ${escapeHtml(victory.level)}</span>
-      <span><b>${escapeHtml(scenarioShortName(state.scenario))}</b> 终局 T${escapeHtml(victory.finalTurn)}</span>
-      <span><b>${escapeHtml(supplyText)}</b></span>
-      <span><b class="${stackingOk ? "ok" : "bad"}">${escapeHtml(stackingOk ? "堆叠 OK" : "堆叠问题")}</b></span>
-      <span><b>${escapeHtml(selectionText)}</b></span>
+      <span><b>${escapeHtml(summary.axis || 0)}</b> Axis</span>
+      <span><b>${escapeHtml(summary.allies || 0)}</b> Allies</span>
+      <span class="${Number(summary.unsupplied || 0) > 0 ? "bad" : "ok"}">${escapeHtml(side)} ${escapeHtml(supplyText)}</span>
+      <span class="${stackingOk ? "ok" : "bad"}">${escapeHtml(stackingOk ? "堆叠正常" : "堆叠问题")}</span>
     </div>
   `;
 }
@@ -3619,7 +5010,10 @@ function syncPlayerControls() {
 }
 
 function syncAiAutoControls() {
-  if (el("aiAutoToggleBtn")) el("aiAutoToggleBtn").textContent = state.ai_autoplay ? "暂停 AI" : "恢复 AI";
+  if (el("aiAutoToggleBtn")) {
+    el("aiAutoToggleBtn").textContent = state.ai_autoplay ? "暂停 AI" : "恢复 AI";
+    el("aiAutoToggleBtn").classList.toggle("action-hidden", !anySideAiControlled());
+  }
   const side = phaseSide(state.phase) || state.active_side;
   const controller = playerController(side);
   const controlled = isPlayableSide(side) && isAiController(controller);
@@ -3648,7 +5042,6 @@ function syncAiAutoControls() {
 }
 
 function setupScenarioTurnDefault(scenario) {
-  if (scenario === "july") return 7;
   return 1;
 }
 
@@ -3660,7 +5053,7 @@ function setupScenarioPhaseDefault(scenario) {
 function setupScenarioBrief(scenario = "july") {
   const data = {
     july: {
-      role: "Axis 先手，战役中段开局",
+      role: "Axis 先手，完整进行 7 个回合",
       vp: "初始胜利点 25",
       note: "轴心国继续东进，盟军固守阿拉曼防线。"
     },
@@ -3695,6 +5088,17 @@ function initializeVisualEffects() {
   const saved = localStorage.getItem(VISUAL_EFFECTS_STORAGE_KEY) || "full";
   applyVisualEffectsMode(saved, { persist: false });
   window.addEventListener("resize", () => applyVisualEffectsMode(visualEffectsMode, { persist: false }));
+}
+
+function applyAiPlaybackSpeed(speed, options = {}) {
+  aiPlaybackSpeed = ["slow", "normal", "fast"].includes(speed) ? speed : "slow";
+  document.documentElement.dataset.aiSpeed = aiPlaybackSpeed;
+  if (el("aiPlaybackSpeedSelect")) el("aiPlaybackSpeedSelect").value = aiPlaybackSpeed;
+  if (options.persist !== false) localStorage.setItem(AI_PLAYBACK_SPEED_STORAGE_KEY, aiPlaybackSpeed);
+}
+
+function initializeAiPlaybackSpeed() {
+  applyAiPlaybackSpeed(localStorage.getItem(AI_PLAYBACK_SPEED_STORAGE_KEY) || "slow", { persist: false });
 }
 
 function syncSetupSceneIntel(scenario = "july") {
@@ -3739,12 +5143,35 @@ function hideSetupScreen() {
   el("setupScreen")?.classList.add("hidden");
 }
 
+function returnToHome() {
+  try {
+    persistCurrentGameSlot({
+      id: activeSaveSlotId || `slot-${Date.now()}`,
+      name: activeSaveSlotId ? undefined : autoSaveSlotName(),
+      autoSave: !activeSaveSlotId,
+      render: false
+    });
+  }
+  catch (error) {
+    console.warn("Save before returning home failed", error);
+  }
+  state.ai_autoplay = false;
+  syncAiAutoControls();
+  closeDockMenus();
+  closeMapToolMenus();
+  el("afterActionReport")?.classList.add("hidden");
+  showSetupScreen();
+}
+
 function renderSetupHero() {
   const home = setupMode === "home";
-  if (el("setupHeroTitle")) el("setupHeroTitle").textContent = home ? "Alamein" : "开局配置";
+  const archive = setupMode === "archive";
+  if (el("setupHeroTitle")) el("setupHeroTitle").textContent = home ? "Alamein" : archive ? "战役档案" : "开局配置";
   if (el("setupHeroSubtitle")) {
     el("setupHeroSubtitle").textContent = home
       ? "North African Campaign"
+      : archive
+      ? "After Action Records"
       : "战役、阶段、双方角色";
   }
   syncSetupSceneIntel(el("setupScenarioSelect")?.value || state.scenario || "july");
@@ -3774,16 +5201,19 @@ function scheduleGameMapPreload() {
 }
 
 function setSetupMode(mode) {
-  setupMode = mode === "new" ? "new" : "home";
+  setupMode = mode === "new" ? "new" : mode === "archive" ? "archive" : "home";
   el("setupHomePanel")?.classList.toggle("hidden", setupMode !== "home");
   el("setupNewGamePanel")?.classList.toggle("hidden", setupMode !== "new");
+  el("setupArchivePanel")?.classList.toggle("hidden", setupMode !== "archive");
   renderSetupHero();
   if (setupMode === "new") scheduleGameMapPreload();
+  if (setupMode === "archive") renderSetupArchive();
 }
 
 function syncSetupControls() {
   setSetupMode(setupMode);
   renderSetupLatestSave();
+  renderSetupArchive();
   if (el("setupScenarioSelect")) el("setupScenarioSelect").value = state.scenario || el("scenarioSelect")?.value || "july";
   if (el("setupTurnInput")) el("setupTurnInput").value = state.turn || setupScenarioTurnDefault(el("setupScenarioSelect")?.value || "july");
   if (el("setupPhaseSelect")) el("setupPhaseSelect").value = state.phase || setupScenarioPhaseDefault(el("setupScenarioSelect")?.value || "july");
@@ -3816,6 +5246,7 @@ function renderSetupSummary() {
 function applySetupOptionsToState() {
   const phase = el("setupPhaseSelect")?.value || setupScenarioPhaseDefault(state.scenario || "july");
   state.turn = Number(el("setupTurnInput")?.value || setupScenarioTurnDefault(state.scenario || "july"));
+  state.started_turn = state.turn;
   state.phase = phase;
   syncActiveSideFromPhase();
   state.player_control ||= { axis: "human", allies: "human" };
@@ -3885,8 +5316,33 @@ function saveSlots() {
   return saveSlotsCache;
 }
 
+function slotIsArchived(slot) {
+  if (!slot) return false;
+  if (slot.archived || slot.state?.game_completed || slot.victory?.final || slot.state?.final_victory?.final) return true;
+  const finalTurn = RulesEngine.scenarioFinalTurn(slot.scenario || slot.state?.scenario);
+  return slot.phase === "end_game_turn" && Number(slot.turn || 0) >= Number(finalTurn || Infinity);
+}
+
+function activeSaveSlots() {
+  return saveSlots().filter((slot) => !slotIsArchived(slot));
+}
+
+function archivedSaveSlots() {
+  return saveSlots()
+    .filter(slotIsArchived)
+    .sort((a, b) => String(b.completed_at || b.saved_at || "").localeCompare(String(a.completed_at || a.saved_at || "")));
+}
+
 function writeSaveSlots(slots) {
-  saveSlotsCache = slots.slice(0, MAX_SAVE_SLOTS);
+  const seen = new Set();
+  const unique = slots.filter((slot) => {
+    if (!slot?.id || seen.has(slot.id)) return false;
+    seen.add(slot.id);
+    return true;
+  });
+  const active = unique.filter((slot) => !slotIsArchived(slot)).slice(0, MAX_SAVE_SLOTS);
+  const archived = unique.filter(slotIsArchived).slice(0, MAX_ARCHIVED_GAMES);
+  saveSlotsCache = [...active, ...archived];
   writeLocalJson(SAVE_SLOTS_STORAGE_KEY, saveSlotsCache);
 }
 
@@ -3897,6 +5353,8 @@ function autoSaveSlotName() {
 function buildSaveSlot(id, name, options = {}) {
   const previous = options.previous || {};
   const savedAt = new Date().toISOString();
+  const victory = state.final_victory?.final ? state.final_victory : checkVictory();
+  const archived = options.archived ?? previous.archived ?? (!!state.game_completed || !!victory.final);
   return {
     ...previous,
     id,
@@ -3907,6 +5365,9 @@ function buildSaveSlot(id, name, options = {}) {
     scenario: state.scenario || "custom",
     turn: Number(state.turn || 1),
     phase: state.phase,
+    archived,
+    completed_at: archived ? (state.completed_at || previous.completed_at || savedAt) : null,
+    victory: archived ? structuredClone(victory) : null,
     state: structuredClone(state)
   };
 }
@@ -3916,7 +5377,7 @@ function persistCurrentGameSlot(options = {}) {
   const id = options.id || activeSaveSlotId || `slot-${Date.now()}`;
   const previous = slots.find((item) => item.id === id);
   const name = options.name || previous?.name || currentSaveSlotName();
-  const slot = buildSaveSlot(id, name, { previous, autoSave: !!options.autoSave });
+  const slot = buildSaveSlot(id, name, { previous, autoSave: !!options.autoSave, archived: options.archived });
   const next = [slot, ...slots.filter((item) => item.id !== id)];
   writeSaveSlots(next);
   activeSaveSlotId = id;
@@ -3946,7 +5407,7 @@ function slotLabel(slot) {
 }
 
 function latestSaveSummary() {
-  const latest = saveSlots()[0];
+  const latest = activeSaveSlots()[0];
   if (!latest) return "暂无本地存档，进入游戏后可在设置里保存。";
   const when = latest.saved_at ? new Date(latest.saved_at).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
   const title = latest.name || `${scenarioShortName(latest.scenario)} Turn ${latest.turn || 1}`;
@@ -3956,7 +5417,7 @@ function latestSaveSummary() {
 function renderSetupLatestSave() {
   const target = el("setupLatestSaveText");
   const button = el("setupModeLoadBtn");
-  const latest = saveSlots()[0];
+  const latest = activeSaveSlots()[0];
   const hasSaves = !!latest;
   if (target) target.textContent = latestSaveSummary();
   if (button) {
@@ -3969,10 +5430,84 @@ function renderSetupLatestSave() {
   }
 }
 
+function archivedVictory(slot) {
+  if (slot?.victory?.final) return slot.victory;
+  if (slot?.state?.final_victory?.final) return slot.state.final_victory;
+  if (!slot?.state) return null;
+  try {
+    return RulesEngine.checkVictory(RulesEngine.createContext({ state: structuredClone(slot.state), rules, terrain }));
+  }
+  catch {
+    return null;
+  }
+}
+
+function archiveResultLabel(victory = {}) {
+  if (victory.winner) return `${sideDisplayName(victory.winner)}胜利`;
+  return victory.level === "Draw" ? "平局" : (victory.level || "战役结束");
+}
+
+function renderArchivedLog(entries = []) {
+  if (!entries.length) return `<p class="setup-archive-log-empty">该归档没有行动日志。</p>`;
+  return entries.map((entry) => {
+    const when = entry.time ? new Date(entry.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    return `
+      <div class="setup-archive-log-row">
+        <span>T${escapeHtml(entry.turn || 1)}</span>
+        <b>${escapeHtml(eventTypeLabel(entry.type))}</b>
+        <p>${escapeHtml(entry.summary || "对局记录")}</p>
+        <small>${escapeHtml(phaseDisplayName(entry.phase))}${when ? ` · ${escapeHtml(when)}` : ""}</small>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderSetupArchive() {
+  const slots = archivedSaveSlots();
+  const count = el("setupArchiveCountText");
+  const list = el("setupArchiveList");
+  if (count) count.textContent = slots.length ? `${slots.length} 场已结束战役，可查看日志` : "暂无已结束战役";
+  if (!list) return;
+  if (!slots.length) {
+    list.innerHTML = `
+      <div class="setup-archive-empty">
+        <b>暂无战役档案</b>
+        <span>完成一场战役后，最终胜负和对局日志会自动归档到这里。</span>
+      </div>
+    `;
+    return;
+  }
+  list.innerHTML = slots.map((slot) => {
+    const victory = archivedVictory(slot) || {};
+    const entries = slot.state?.game_log || [];
+    const span = gameTurnSpan(slot.state || { scenario: slot.scenario, turn: slot.turn, game_log: entries }, victory);
+    const completed = slot.completed_at || slot.saved_at;
+    const when = completed ? new Date(completed).toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+    return `
+      <article class="setup-archive-card ${escapeHtml(slot.scenario || "custom")}">
+        <div class="setup-archive-card-main">
+          <span>${escapeHtml(scenarioShortName(slot.scenario))} · T${escapeHtml(span.start)}–T${escapeHtml(span.end)} · ${escapeHtml(span.count)} 回合</span>
+          <strong>${escapeHtml(archiveResultLabel(victory))}</strong>
+          <small>${escapeHtml(victory.reason || scenarioDisplayName(slot.scenario))}</small>
+        </div>
+        <div class="setup-archive-card-facts">
+          <span><b>${escapeHtml(victory.victory_points ?? slot.state?.victory_points ?? 0)}</b>VP</span>
+          <span><b>${escapeHtml(entries.length)}</b>日志</span>
+          <time>${escapeHtml(when || "结束时间未知")}</time>
+        </div>
+        <details class="setup-archive-log">
+          <summary>查看对局日志</summary>
+          <div>${renderArchivedLog(entries)}</div>
+        </details>
+      </article>
+    `;
+  }).join("");
+}
+
 function renderSettingsLatestSave() {
   const target = el("settingsLatestSave");
   if (!target) return;
-  const latest = saveSlots()[0];
+  const latest = activeSaveSlots()[0];
   target.className = `latest-save-card ${latest ? "" : "empty"}`;
   if (!latest) {
     target.innerHTML = `
@@ -3995,10 +5530,6 @@ function renderSettingsCurrentGame() {
   const target = el("settingsCurrentGame");
   if (!target) return;
   const victory = victoryStatusSummary();
-  const latest = saveSlots()[0];
-  const latestText = latest
-    ? `${latest.name || scenarioShortName(latest.scenario)} · T${latest.turn || 1} · ${phaseShortLabel(latest.phase)}`
-    : "暂无本地存档";
   const aiText = anySideAiControlled()
     ? (state.ai_autoplay ? "AI 自动推进已开启" : "AI 已配置但暂停")
     : "双方由玩家操作";
@@ -4011,7 +5542,6 @@ function renderSettingsCurrentGame() {
     <div class="settings-current-facts">
       <span><b>VP ${escapeHtml(victory.vp)}</b>${escapeHtml(victory.level)}</span>
       <span><b>终局</b>T${escapeHtml(victory.finalTurn)}</span>
-      <span><b>最近存档</b>${escapeHtml(latestText)}</span>
     </div>
   `;
 }
@@ -4021,7 +5551,7 @@ function renderSaveSlotSelect(selectId, emptyLabel = "新存档槽") {
   if (!select) return;
   const selected = select.value;
   select.innerHTML = "";
-  const slots = saveSlots();
+  const slots = activeSaveSlots();
   const empty = document.createElement("option");
   empty.value = "";
   empty.textContent = slots.length ? emptyLabel : "暂无存档";
@@ -4038,7 +5568,7 @@ function renderSaveSlotSelect(selectId, emptyLabel = "新存档槽") {
 function renderSaveSlots(options = {}) {
   renderSaveSlotSelect("saveSlotSelect", "新存档槽");
   renderSaveSlotSelect("setupSaveSlotSelect", "选择一个存档");
-  if (activeSaveSlotId && el("saveSlotSelect") && saveSlots().some((slot) => slot.id === activeSaveSlotId)) {
+  if (activeSaveSlotId && el("saveSlotSelect") && activeSaveSlots().some((slot) => slot.id === activeSaveSlotId)) {
     el("saveSlotSelect").value = activeSaveSlotId;
   }
   renderSetupLatestSave();
@@ -4061,7 +5591,7 @@ function saveCurrentSlot() {
 }
 
 function loadSlotById(id, options = {}) {
-  const slot = saveSlots().find((item) => item.id === id);
+  const slot = activeSaveSlots().find((item) => item.id === id);
   if (!slot) {
     setOutput(options.outputId || "saveOutput", { legal: false, reason: "请选择一个存档槽" });
     return;
@@ -4071,6 +5601,7 @@ function loadSlotById(id, options = {}) {
   activeSaveSlotId = slot.id;
   logEvent("load", `读取存档槽位：${slot.name || slot.id}`, { slot_id: slot.id, saved_at: slot.saved_at });
   if (el("scenarioSelect")) el("scenarioSelect").value = state.scenario || "july";
+  applyZoom();
   renderState();
   renderDataOutput();
   renderAutoJudge();
@@ -4086,12 +5617,12 @@ function loadSelectedSlot() {
 }
 
 function loadLatestSlot() {
-  const latest = saveSlots()[0];
+  const latest = activeSaveSlots()[0];
   loadSlotById(latest?.id, { outputId: "saveOutput" });
 }
 
 function loadSetupSelectedSlot() {
-  const slots = saveSlots();
+  const slots = activeSaveSlots();
   if (!slots.length) {
     alert("还没有可加载的存档。进入游戏后可在设置页保存局面。");
     return;
@@ -4250,10 +5781,7 @@ function drawMoveRoute(svg) {
     dot.setAttribute("transform", `translate(${x} ${y})`);
     const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     circle.setAttribute("r", index === 0 ? 8 : 7);
-    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    text.setAttribute("y", 1);
-    text.textContent = index;
-    dot.append(circle, text);
+    dot.append(circle);
     svg.append(dot);
   });
 }
@@ -4279,11 +5807,12 @@ function drawZoc(svg) {
   }
 }
 
-function drawReachableHexes(svg) {
+function drawReachableHexes(svg, reachableOverride = null) {
   const unit = selectedUnitId ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
   if (!unit || !isMovableUnit(unit) || !canMoveInCurrentPhase(unit, moveOptions()) || unit.state !== "fresh") return;
-  const reachable = reachableHexes(selectedUnitId, moveOptions());
-  const showCostLabels = reachable.size <= 72;
+  const reachable = reachableOverride instanceof Map
+    ? reachableOverride
+    : reachableHexes(selectedUnitId, moveOptions());
   for (const [hex, info] of reachable.entries()) {
     if (hex === normalizeHex(unit.hex)) continue;
     const { x, y } = hexToPoint(hex);
@@ -4295,36 +5824,18 @@ function drawReachableHexes(svg) {
     title.textContent = `${hex}: ${info.cost} MP`;
     polygon.append(title);
     svg.append(polygon);
-    if (showCostLabels) {
-      const label = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      label.setAttribute("class", "reachable-cost-label");
-      label.setAttribute("transform", `translate(${x} ${y - 18})`);
-      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-      rect.setAttribute("x", -15);
-      rect.setAttribute("y", -9);
-      rect.setAttribute("width", 30);
-      rect.setAttribute("height", 18);
-      rect.setAttribute("rx", 9);
-      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      text.setAttribute("y", 1);
-      text.textContent = `${info.cost}`;
-      label.append(rect, text);
-      svg.append(label);
-    }
   }
 }
 
 function drawCombatTargets(svg) {
-  const unit = selectedUnitId ? { id: selectedUnitId, ...state.units[selectedUnitId] } : null;
-  if (!unit || !isCombatUnit(unit) || unit.side !== state.active_side || phaseKind() !== "combat") return;
-  const enemyByHex = unitsByHex(enemyUnits(unit.side));
+  if (phaseKind() !== "combat") return;
   const targetPairs = new Map(combatTargetOptionsForSelectedUnit().map((pair) => [pair.defender_hex, pair]));
-  for (const hex of neighbors(unit.hex)) {
-    if (!enemyByHex[hex]) continue;
+  if (!targetPairs.size) return;
+  const enemyByHex = unitsByHex(enemyUnits(state.active_side));
+  for (const [hex, pair] of targetPairs) {
     const { x, y } = hexToPoint(hex);
     if (!isInsideMapZone(x, y)) continue;
-    const pair = targetPairs.get(hex);
-    const preview = pair ? combatTargetPreview(pair) : null;
+    const preview = combatTargetPreview(pair);
     const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
     polygon.setAttribute("points", hexPolygonPoints(x, y));
     polygon.setAttribute("class", `combat-target-hex ${selectedCombatDefenderHex === hex ? "selected" : ""} ${preview?.legal === false ? "blocked" : ""}`);
@@ -4368,70 +5879,317 @@ function drawSupplyPath(svg) {
   }
 }
 
+function applyPlannedRoute(unitId, targetHex, path) {
+  if (unitId !== selectedUnitId || el("moveTargetInput")?.value !== targetHex) return;
+  const pathFound = Array.isArray(path) && path.length > 0;
+  const unit = selectedUnit();
+  if (pathFound) moveRouteFailure = null;
+  if (pathFound) movePathDraft = path;
+  else movePathDraft = unit?.hex ? [normalizeHex(unit.hex)] : [];
+  syncMovePathInput();
+  renderRouteStatus();
+  renderActionControls();
+  renderSelectionSummary();
+  renderSelectedUnit();
+  renderMapSelectionHud();
+  renderSideCommandBar({ skipWarnings: true });
+  scheduleMapRender();
+  switchTab("move", { expandPanel: true });
+  if (!pathFound) {
+    setOutput("moveOutput", { status: "正在分析不能到达的原因", unit: unitId, target: targetHex });
+    requestMoveDiagnosis(unitId, targetHex, moveOptions()).then((diagnosis) => {
+      if (unitId !== selectedUnitId || el("moveTargetInput")?.value !== targetHex) return;
+      const verdict = unreachableRouteVerdict(unitId, targetHex, diagnosis);
+      moveRouteFailure = { unitId, target: targetHex, verdict };
+      setOutput("moveOutput", verdict);
+      renderActionControls();
+      renderMap();
+    });
+  }
+}
+
 function clickRouteHex(hex) {
   const unit = selectedUnit();
   if (!unit || !canMoveUnitNow({ id: selectedUnitId, ...unit })) return;
   const hx = normalizeHex(hex);
+  const unitId = selectedUnitId;
+  const options = moveOptions();
   if (el("moveTargetInput")) el("moveTargetInput").value = hx;
-  const autoPath = findLegalPath(selectedUnitId, hx, moveOptions());
-  if (autoPath) {
-    movePathDraft = autoPath;
-    syncMovePathInput();
-    renderRouteStatus();
-    renderActionControls();
-    renderMap();
-    switchTab("move", { expandPanel: true });
+  const cachedPath = cachedReachableHexes(unitId, options)?.get(hx)?.path;
+  if (cachedPath) {
+    applyPlannedRoute(unitId, hx, cachedPath);
     return;
   }
   if (!movePathDraft.length || movePathDraft[0] !== normalizeHex(unit.hex)) {
     movePathDraft = [normalizeHex(unit.hex)];
   }
-  const existing = movePathDraft.indexOf(hx);
-  if (existing >= 0) {
-    movePathDraft = movePathDraft.slice(0, existing + 1);
-  }
-  else {
-    movePathDraft.push(hx);
-  }
   syncMovePathInput();
   renderRouteStatus();
-  renderActionControls();
-  renderMap();
   switchTab("move", { expandPanel: true });
+  requestReachableHexes(unitId, options)
+    .then((reachable) => reachable.get(hx)?.path || requestLegalPath(unitId, hx, options))
+    .then((path) => applyPlannedRoute(unitId, hx, path))
+    .catch(() => applyPlannedRoute(unitId, hx, null));
 }
 
-function drawHexClickZones(svg) {
-  const unit = selectedUnit();
-  const routing = !!(selectedUnitId && unit && canMoveUnitNow({ id: selectedUnitId, ...unit }));
-  const combatPicking = !!(selectedUnitId && unit && canCombatUnitNow({ id: selectedUnitId, ...unit }));
+function mapHexCenters() {
+  if (mapHexCentersCache) return mapHexCentersCache;
+  mapHexCentersCache = [];
   for (let col = 1; col <= 49; col++) {
     const [minRow, maxRow] = COLUMN_ROW_BOUNDS[col];
     for (let row = minRow; row <= maxRow; row++) {
       const hex = `${String(col).padStart(2, "0")}${String(row).padStart(2, "0")}`;
       const { x, y } = hexToPoint(hex);
       if (!isInsideMapZone(x, y)) continue;
-      const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-      polygon.setAttribute("points", hexPolygonPoints(x, y));
-      polygon.setAttribute("class", `hex-click-zone ${movePathDraft.includes(hex) ? "in-route" : ""} ${selectedHexId === hex ? "selected-hex" : ""}`);
-      polygon.setAttribute("data-hex", hex);
-      polygon.addEventListener("click", (event) => {
-        event.stopPropagation();
-        if (combatPicking && unitsByHex(enemyUnits(unit.side))[hex]) {
-          selectCombatTarget(hex, selectedUnitId);
-        }
-        else if (routing) clickRouteHex(hex);
-        else selectHex(hex);
-      });
-      svg.append(polygon);
+      mapHexCentersCache.push({ hex, x, y });
+    }
+  }
+  return mapHexCentersCache;
+}
+
+function mapHexFromPointerEvent(event) {
+  const svg = el("mapOverlay");
+  const rect = svg?.getBoundingClientRect();
+  if (!rect?.width || !rect?.height) return "";
+  const point = {
+    x: (event.clientX - rect.left) * 4100 / rect.width,
+    y: (event.clientY - rect.top) * 3275 / rect.height
+  };
+  let nearest = null;
+  let nearestDistance = Infinity;
+  for (const center of mapHexCenters()) {
+    const distance = (center.x - point.x) ** 2 + (center.y - point.y) ** 2;
+    if (distance < nearestDistance) {
+      nearest = center;
+      nearestDistance = distance;
+    }
+  }
+  return nearest && nearestDistance <= 60 ** 2 ? nearest.hex : "";
+}
+
+function setRetreatMapFeedback({ hex, route = [], text = "", detail = "", tone = "success" }) {
+  if (retreatMapFeedbackTimer) clearTimeout(retreatMapFeedbackTimer);
+  const token = `${Date.now()}-${Math.random()}`;
+  retreatMapFeedback = { token, hex: normalizeHex(hex), route: [...route], text, detail, tone };
+  retreatMapFeedbackTimer = setTimeout(() => {
+    retreatMapFeedbackTimer = 0;
+    if (retreatMapFeedback?.token !== token) return;
+    retreatMapFeedback = null;
+    renderMap();
+  }, 2400);
+}
+
+function drawRetreatMapFeedback(target) {
+  const feedback = retreatMapFeedback;
+  if (!feedback?.hex) return;
+  const point = hexToPoint(feedback.hex);
+  const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  group.setAttribute("class", `retreat-map-feedback ${feedback.tone === "error" ? "error" : "success"}`);
+  group.setAttribute("aria-label", `${feedback.text}${feedback.detail ? `：${feedback.detail}` : ""}`);
+
+  if (feedback.route?.length > 1) {
+    const route = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    route.setAttribute("points", feedback.route.map((hex) => {
+      const routePoint = hexToPoint(hex);
+      return `${routePoint.x},${routePoint.y}`;
+    }).join(" "));
+    route.setAttribute("class", "retreat-confirmed-route");
+    group.append(route);
+  }
+
+  const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+  polygon.setAttribute("points", hexPolygonPoints(point.x, point.y));
+  polygon.setAttribute("class", "retreat-feedback-hex");
+  const marker = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  marker.setAttribute("x", point.x);
+  marker.setAttribute("y", point.y + 10);
+  marker.setAttribute("class", "retreat-feedback-mark");
+  marker.textContent = feedback.tone === "error" ? "×" : "✓";
+  const label = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  label.setAttribute("class", "retreat-feedback-label");
+  label.setAttribute("transform", `translate(${point.x} ${point.y - 70})`);
+  const labelRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  labelRect.setAttribute("x", -62);
+  labelRect.setAttribute("y", -15);
+  labelRect.setAttribute("width", 124);
+  labelRect.setAttribute("height", 30);
+  labelRect.setAttribute("rx", 6);
+  const labelText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  labelText.setAttribute("y", 6);
+  labelText.textContent = feedback.text;
+  const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+  title.textContent = feedback.detail || feedback.text;
+  label.append(labelRect, labelText);
+  group.append(polygon, marker, label, title);
+  target.append(group);
+}
+
+function drawRetreatOptions(target) {
+  const pending = pendingRetreatSelection?.plan?.pending;
+  if (!pending || pendingRetreatSelection.plan.complete) return;
+  for (const preview of pendingRetreatRoutePreviews()) {
+    const routePoints = preview.visibleRoute.map((hex) => {
+      const point = hexToPoint(hex);
+      return `${point.x},${point.y}`;
+    }).join(" ");
+    if (routePoints) {
+      const route = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      route.setAttribute("points", routePoints);
+      route.setAttribute("class", "retreat-route-preview");
+      target.append(route);
+    }
+    const firstPoint = hexToPoint(preview.firstHex);
+    const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    group.setAttribute("class", "retreat-option-group");
+    group.setAttribute("role", "button");
+    group.setAttribute("tabindex", "0");
+    group.setAttribute("data-retreat-hex", preview.firstHex);
+    group.setAttribute("aria-label", `确认 ${state.units?.[preview.unitId]?.name || preview.unitId} 撤退至 ${preview.destination}`);
+    group.addEventListener("click", (event) => {
+      event.stopPropagation();
+      choosePendingRetreatHex(preview.firstHex);
+    });
+    group.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.stopPropagation();
+      choosePendingRetreatHex(preview.firstHex);
+    });
+    const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+    polygon.setAttribute("points", hexPolygonPoints(firstPoint.x, firstPoint.y));
+    polygon.setAttribute("class", "retreat-option-hex");
+    const destinationPoint = hexToPoint(preview.destination);
+    const destination = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+    destination.setAttribute("points", hexPolygonPoints(destinationPoint.x, destinationPoint.y));
+    destination.setAttribute("class", "retreat-destination-hex");
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("x", destinationPoint.x);
+    text.setAttribute("y", destinationPoint.y + 5);
+    text.setAttribute("class", "retreat-option-label");
+    text.textContent = preview.destination;
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = `${state.units?.[preview.unitId]?.name || preview.unitId}：${preview.fullRoute.join(" → ")}`;
+    group.append(polygon, destination, text, title);
+    target.append(group);
+  }
+}
+
+function drawConfirmedRetreatGhosts(target) {
+  const selection = pendingRetreatSelection;
+  const plan = selection?.plan;
+  if (!selection || !plan) return;
+  const ghostsByHex = {};
+  for (const id of selection.unitIds || []) {
+    const unit = state.units?.[id];
+    const path = selection.paths?.[id] || [];
+    if (!unit || plan.eliminated?.includes(id) || path.length < Number(selection.count || 0)) continue;
+    const destination = normalizeHex(path[path.length - 1]);
+    ghostsByHex[destination] ||= [];
+    ghostsByHex[destination].push({ id, ...unit, hex: destination });
+  }
+  for (const [hex, ghosts] of Object.entries(ghostsByHex)) {
+    const point = hexToPoint(hex);
+    for (const { unit, size, x, y } of stackLayout(ghosts, point.x, point.y, true)) {
+      const ghost = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      ghost.setAttribute("class", `retreat-confirmed-ghost ${unit.side || "neutral"}`);
+      ghost.setAttribute("transform", `translate(${x} ${y})`);
+      ghost.setAttribute("aria-label", `${unit.name || unit.id} 已选择撤退至 ${hex}`);
+      ghost.setAttribute("pointer-events", "none");
+
+      const frame = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      frame.setAttribute("class", "retreat-ghost-frame");
+      frame.setAttribute("width", size);
+      frame.setAttribute("height", size);
+      frame.setAttribute("rx", 4);
+      const image = document.createElementNS("http://www.w3.org/2000/svg", "image");
+      image.setAttribute("href", counterImageFor(unit));
+      image.setAttribute("width", size);
+      image.setAttribute("height", size);
+      image.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      const shade = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      shade.setAttribute("class", "retreat-ghost-shade");
+      shade.setAttribute("width", size);
+      shade.setAttribute("height", size);
+      shade.setAttribute("rx", 4);
+      const badge = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      badge.setAttribute("class", "retreat-ghost-badge");
+      badge.setAttribute("x", size - 4);
+      badge.setAttribute("y", size - 4);
+      badge.textContent = "撤";
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent = `${unit.name || unit.id}：已选择撤退至 ${hex}`;
+      ghost.append(frame, image, shade, badge, title);
+      target.append(ghost);
     }
   }
 }
 
-function renderMap() {
-  const svg = el("mapOverlay");
-  svg.innerHTML = "";
+function handleMapOverlayClick(event) {
+  const hex = mapHexFromPointerEvent(event);
+  if (!hex) return;
+  if (choosePendingRetreatHex(hex)) return;
+  if (pendingRetreatNeedsChoice()) {
+    explainInvalidRetreatTarget(hex);
+    return;
+  }
+  const unit = selectedUnit();
   const viewMode = el("mapViewModeSelect")?.value || "command";
-  renderMapLegend();
+  const routing = !!(viewMode === "move" && selectedUnitId && unit && canMoveUnitNow({ id: selectedUnitId, ...unit }));
+  const targetPair = viewMode === "combat"
+    ? combatTargetOptionsForSelectedUnit().find((pair) => pair.defender_hex === hex)
+    : null;
+  if (targetPair && unitsByHex(enemyUnits(state.active_side))[hex]) selectCombatTarget(hex, targetPair.attacker);
+  else if (routing) clickRouteHex(hex);
+  else selectHex(hex);
+}
+
+function currentActionInvolvedUnitIds(viewMode) {
+  const involved = new Set();
+  if (pendingRetreatNeedsChoice()) {
+    const retreatingId = pendingRetreatSelection?.plan?.pending?.unit;
+    if (retreatingId && state.units?.[retreatingId]) involved.add(retreatingId);
+    return involved;
+  }
+  if (pendingCombatRoll && pendingCombatRollIsCurrent()) {
+    const details = pendingCombatRoll.verdict?.details || {};
+    for (const id of [...(details.attackers || []), ...(details.defenders || [])]) {
+      if (state.units?.[id]) involved.add(id);
+    }
+    const retreatingId = pendingRetreatSelection?.plan?.pending?.unit;
+    if (retreatingId) involved.add(retreatingId);
+    return involved;
+  }
+  if (viewMode === "move") {
+    const unit = currentMoveUnit();
+    if (unit && canMoveUnitNow(unit)) involved.add(unit.id);
+    return involved;
+  }
+  if (viewMode === "combat") {
+    for (const id of selectedCombatAttackerIds()) involved.add(id);
+    let defenderHexes = [];
+    try { defenderHexes = parseCombatAction().defender_hexes || []; }
+    catch {}
+    for (const [id, unit] of Object.entries(state.units || {})) {
+      if (!unit?.eliminated && unit.hex && unit.side !== state.active_side) {
+        try {
+          if (defenderHexes.includes(normalizeHex(unit.hex))) involved.add(id);
+        }
+        catch {}
+      }
+    }
+    return involved;
+  }
+  if (viewMode === "supply" && selectedUnitId && highlightedSupplyPath.length) involved.add(selectedUnitId);
+  return involved;
+}
+
+function renderMap() {
+  cancelScheduledMapRender();
+  const svg = el("mapOverlay");
+  const fragment = document.createDocumentFragment();
+  const viewMode = el("mapViewModeSelect")?.value || "command";
+  const retreatChoiceActive = pendingRetreatNeedsChoice();
+  svg.classList.toggle("retreat-choice-active", retreatChoiceActive);
   syncLayerCountBadge();
   const showTerrain = el("showTerrainToggle").checked || viewMode === "terrain" || viewMode === "all";
   const showUnits = el("showUnitsToggle").checked;
@@ -4444,6 +6202,8 @@ function renderMap() {
     ? { id: selectedUnitId, ...state.units[selectedUnitId] }
     : null;
   const actionableUnitIds = new Set(actionableUnitsForCurrentPhase().map((unit) => unit.id));
+  const combatGroupIds = new Set(selectedCombatAttackerIds());
+  const actionInvolvedIds = currentActionInvolvedUnitIds(viewMode);
   const focusUnitsOnMap = viewMode === "move" || viewMode === "combat";
 
   if (showTerrain) {
@@ -4454,7 +6214,7 @@ function renderMap() {
       polygon.setAttribute("class", `terrain-hex ${terrainClass(tags)}`);
       polygon.append(document.createElementNS("http://www.w3.org/2000/svg", "title"));
       polygon.querySelector("title").textContent = `${hex}: ${terrainSummaryLabel(tags)}`;
-      svg.append(polygon);
+      fragment.append(polygon);
     }
   }
 
@@ -4473,15 +6233,31 @@ function renderMap() {
       const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
       title.textContent = `${hex}: ${mines.map((mine) => `${sideDisplayName(mine.side)} ${mine.name || mine.id}`).join("; ")}`;
       group.append(polygon, text, title);
-      svg.append(group);
+      fragment.append(group);
     }
   }
 
-  if (showZoc) drawZoc(svg);
+  if (showZoc) drawZoc(fragment);
   const showReachable = el("showReachableToggle")?.checked || (viewMode === "move" && !!selectedForMove && canMoveUnitNow(selectedForMove));
-  if (showReachable && (viewMode === "move" || viewMode === "all")) drawReachableHexes(svg);
-  if (viewMode === "combat" || viewMode === "all") drawCombatTargets(svg);
-  drawSupplyPath(svg);
+  const shouldShowReachable = showReachable && (viewMode === "move" || viewMode === "all") && selectedForMove && canMoveUnitNow(selectedForMove);
+  const reachableOptions = moveOptions();
+  let reachable = shouldShowReachable ? cachedReachableHexes(selectedUnitId, reachableOptions) : null;
+  let reachableLoading = false;
+  if (shouldShowReachable && !reachable) {
+    reachableLoading = true;
+    const requestedUnitId = selectedUnitId;
+    const requestedRevision = uiStateRevision;
+    requestReachableHexes(requestedUnitId, reachableOptions)
+      .then(() => {
+        if (requestedRevision === uiStateRevision && requestedUnitId === selectedUnitId) renderMap();
+      })
+      .catch(() => {});
+    reachable = new Map();
+  }
+  if (reachable) drawReachableHexes(fragment, reachable);
+  if (viewMode === "combat" || viewMode === "all") drawCombatTargets(fragment);
+  drawSupplyPath(fragment);
+  drawRetreatOptions(fragment);
 
   if (showHex) {
     for (let col = 1; col <= 49; col++) {
@@ -4495,15 +6271,16 @@ function renderMap() {
         text.setAttribute("y", y + 4);
         text.setAttribute("class", "hex-label");
         text.textContent = hex;
-        svg.append(text);
+        fragment.append(text);
       }
     }
   }
 
-  drawHexClickZones(svg);
-  drawMoveRoute(svg);
+  drawMoveRoute(fragment);
 
   if (showUnits) {
+    let selectedMarkerNode = null;
+    let retreatingMarkerNode = null;
     const stacked = unitsByHex();
     for (const [hex, units] of Object.entries(stacked)) {
       const { x, y } = hexToPoint(hex);
@@ -4511,14 +6288,49 @@ function renderMap() {
       stackLayout(visibleUnits, x, y, expandStacks).forEach(({ unit, size, x: unitX, y: unitY }) => {
         const marker = !isCombatUnit(unit);
         const actionable = actionableUnitIds.has(unit.id);
-        const muted = focusUnitsOnMap && isPlayableSide(unit.side) && !actionable && unit.id !== selectedUnitId;
+        const combatGroupMember = viewMode === "combat" && !retreatChoiceActive && combatGroupIds.has(unit.id);
+        const retreating = pendingRetreatSelection?.plan?.pending?.unit === unit.id;
+        const actionInvolved = actionInvolvedIds.has(unit.id);
+        const friendlyUnavailable = focusUnitsOnMap
+          && unit.side === state.active_side
+          && !actionable
+          && unit.id !== selectedUnitId;
+        const enemyContact = focusUnitsOnMap
+          && isPlayableSide(unit.side)
+          && unit.side !== state.active_side
+          && unit.id !== selectedUnitId;
         const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        g.setAttribute("class", `unit-marker ${unit.side} ${marker ? "marker" : "counter"} ${unit.id === selectedUnitId ? "selected" : ""} ${actionable ? "actionable" : ""} ${muted ? "phase-muted" : ""}`);
+        g.setAttribute("class", `unit-marker ${unit.side} ${marker ? "marker" : "counter"} ${unit.id === selectedUnitId ? "selected" : ""} ${combatGroupMember ? "combat-group" : ""} ${retreating ? "retreating" : ""} ${actionInvolved ? "action-involved" : ""} ${actionable ? "actionable" : ""} ${friendlyUnavailable ? "friendly-unavailable" : ""} ${enemyContact ? "enemy-contact" : ""} ${unit.state === "spent" ? "spent" : ""}`);
+        if (friendlyUnavailable) g.setAttribute("data-relation", "friendly-unavailable");
+        else if (enemyContact) g.setAttribute("data-relation", "enemy");
+        else if (unit.side === state.active_side) g.setAttribute("data-relation", "friendly");
         g.setAttribute("data-unit-id", unit.id);
         g.setAttribute("transform", `translate(${unitX} ${unitY})`);
         g.addEventListener("click", (event) => {
           event.stopPropagation();
-          selectUnit(unit.id, { showStateTab: phaseKind() !== "combat" });
+          if (choosePendingRetreatHex(unit.hex)) return;
+          if (pendingRetreatNeedsChoice()) {
+            explainInvalidRetreatTarget(unit.hex);
+            return;
+          }
+          const targetPair = phaseKind() === "combat"
+            && el("mapViewModeSelect")?.value === "combat"
+            && unit.side !== state.active_side
+            ? combatTargetOptionsForSelectedUnit().find((pair) => pair.defender_hex === unit.hex)
+            : null;
+          if (targetPair) {
+            selectCombatTarget(unit.hex, targetPair.attacker);
+            return;
+          }
+          const ownCombatPicker = phaseKind() === "combat"
+            && el("mapViewModeSelect")?.value === "combat"
+            && unit.side === state.active_side
+            && canCombatUnitNow({ id: unit.id, ...unit });
+          if (ownCombatPicker) {
+            toggleCombatAttacker(unit.id);
+            return;
+          }
+          selectUnit(unit.id, { showStateTab: false });
           if (phaseKind() === "combat" && isCombatUnit(unit) && unit.side === state.active_side) {
             switchTab("combat", { expandPanel: true });
             el("combatAttackersInput").value = unit.id;
@@ -4526,6 +6338,16 @@ function renderMap() {
           }
         });
         const imagePath = counterImageFor(unit);
+        if (unit.id === selectedUnitId || combatGroupMember || retreating || actionInvolved) {
+          const halo = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+          halo.setAttribute("class", `unit-selection-halo ${retreating ? "retreat" : combatGroupMember || (actionInvolved && viewMode === "combat") ? "combat" : ""}`);
+          halo.setAttribute("x", -12);
+          halo.setAttribute("y", -12);
+          halo.setAttribute("width", size + 24);
+          halo.setAttribute("height", size + 24);
+          halo.setAttribute("rx", 7);
+          g.append(halo);
+        }
         if (isPlayableSide(unit.side)) {
           const frame = document.createElementNS("http://www.w3.org/2000/svg", "rect");
           frame.setAttribute("class", "unit-side-frame");
@@ -4542,43 +6364,116 @@ function renderMap() {
         image.setAttribute("height", size);
         image.setAttribute("preserveAspectRatio", "xMidYMid meet");
         g.append(image);
+        if (actionInvolved) {
+          const flash = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+          flash.setAttribute("class", `unit-action-flash ${retreating ? "retreat" : combatGroupMember || (actionInvolved && viewMode === "combat") ? "combat" : viewMode === "move" ? "move" : ""}`);
+          flash.setAttribute("x", -14);
+          flash.setAttribute("y", -14);
+          flash.setAttribute("width", size + 28);
+          flash.setAttribute("height", size + 28);
+          flash.setAttribute("rx", 9);
+          g.append(flash);
+        }
+        if (retreating) {
+          const badge = document.createElementNS("http://www.w3.org/2000/svg", "g");
+          badge.setAttribute("class", "current-retreat-badge");
+          const badgeRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+          badgeRect.setAttribute("x", -11);
+          badgeRect.setAttribute("y", -39);
+          badgeRect.setAttribute("width", size + 22);
+          badgeRect.setAttribute("height", 27);
+          badgeRect.setAttribute("rx", 5);
+          const badgeText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          badgeText.setAttribute("x", size / 2);
+          badgeText.setAttribute("y", -20);
+          badgeText.textContent = "撤退中";
+          badge.append(badgeRect, badgeText);
+          g.append(badge);
+        }
+        if (combatGroupMember && !marker) {
+          const badge = document.createElementNS("http://www.w3.org/2000/svg", "g");
+          badge.setAttribute("class", "combat-group-badge");
+          const badgeRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+          badgeRect.setAttribute("x", -5);
+          badgeRect.setAttribute("y", size - 15);
+          badgeRect.setAttribute("width", 25);
+          badgeRect.setAttribute("height", 18);
+          badgeRect.setAttribute("rx", 4);
+          const badgeText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          badgeText.setAttribute("x", 7.5);
+          badgeText.setAttribute("y", size - 2);
+          badgeText.textContent = "攻";
+          badge.append(badgeRect, badgeText);
+          g.append(badge);
+        }
+        if (unit.state === "spent" && !marker) {
+          const badge = document.createElementNS("http://www.w3.org/2000/svg", "g");
+          badge.setAttribute("class", "unit-status-badge");
+          const badgeRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+          badgeRect.setAttribute("x", size - 22);
+          badgeRect.setAttribute("y", -5);
+          badgeRect.setAttribute("width", 27);
+          badgeRect.setAttribute("height", 17);
+          badgeRect.setAttribute("rx", 4);
+          const badgeText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          badgeText.setAttribute("x", size - 8.5);
+          badgeText.setAttribute("y", 6.5);
+          badgeText.textContent = "已";
+          badge.append(badgeRect, badgeText);
+          g.append(badge);
+        }
         const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
         title.textContent = `${unit.name || unit.id} ${sideDisplayName(unit.side)} ${hex}`;
         g.append(title);
-        svg.append(g);
+        if (retreating) retreatingMarkerNode = g;
+        else if (unit.id === selectedUnitId) selectedMarkerNode = g;
+        else fragment.append(g);
       });
     }
+    if (selectedMarkerNode) fragment.append(selectedMarkerNode);
+    if (retreatingMarkerNode) fragment.append(retreatingMarkerNode);
   }
-  renderMapActionHint();
+  drawConfirmedRetreatGhosts(fragment);
+  drawRetreatMapFeedback(fragment);
+  svg.replaceChildren(fragment);
+  renderMapActionHint(reachable, reachableLoading);
+}
+
+function cancelScheduledMapRender() {
+  if (pendingMapRenderFrame) cancelAnimationFrame(pendingMapRenderFrame);
+  if (pendingMapRenderTimer) clearTimeout(pendingMapRenderTimer);
+  pendingMapRenderFrame = 0;
+  pendingMapRenderTimer = 0;
+}
+
+function scheduleMapRender() {
+  cancelScheduledMapRender();
+  pendingMapRenderFrame = requestAnimationFrame(() => {
+    pendingMapRenderFrame = 0;
+    pendingMapRenderTimer = setTimeout(() => {
+      pendingMapRenderTimer = 0;
+      renderMap();
+    }, 0);
+  });
 }
 
 function renderState() {
+  resetUiComputationCaches();
   renderTurnBanner();
   renderSideCommandBar();
   syncPhaseRecommendedTab();
   el("turnInput").value = state.turn || 1;
   el("activeSideSelect").value = state.active_side || "axis";
   el("phaseSelect").value = state.phase || rules.turn_sequence[0];
-  const units = unitsArray().filter(isMapCounter);
   const combat = combatUnitsArray();
-  const engineers = units.filter((u) => isEngineer(u) && isPlayableSide(u.side) && !u.eliminated);
   const axis = combat.filter((u) => u.side === "axis").length;
   const allies = combat.filter((u) => u.side === "allies").length;
-  const markers = units.length - combat.length - engineers.length;
   const stacking = checkStacking();
   const supply = checkSupply(state.active_side || "axis");
   const unsupplied = Object.values(supply).filter((value) => value !== "supplied").length;
-  renderStateBrief({ unsupplied, stacking });
+  renderStateBrief({ unsupplied, stacking, axis, allies });
   renderSettingsCurrentGame();
-  el("stateStats").innerHTML = `
-    <div class="stat"><b>${combat.length}</b>作战单位</div>
-    <div class="stat"><b>${engineers.length}</b>工程兵</div>
-    <div class="stat"><b>${axis} / ${allies}</b>Axis / Allies</div>
-    <div class="stat"><b>${markers}</b>标记</div>
-    <div class="stat"><b>${unsupplied}</b>缺补给</div>
-    <div class="stat"><b class="${stacking.legal ? "ok" : "bad"}">${stacking.legal ? "OK" : "问题"}</b>堆叠</div>
-  `;
-  renderUnitList();
+  if (el("stateRosterDrawer")?.open) renderUnitList();
   renderMoveUnits();
   renderSelectionSummary();
   renderSelectedUnit();
@@ -4587,10 +6482,11 @@ function renderState() {
   renderOperationHint();
   renderActionableUnits();
   renderCombatControls();
-  renderCalibration();
+  if (el("unitDebugDrawer")?.open) renderCalibration();
   syncPlayerControls();
   renderAiConfig();
   renderGameLog();
+  renderCombatReports();
   renderMap();
   renderAutoJudge();
   renderActionControls();
@@ -4664,25 +6560,33 @@ function renderUnitList() {
 
 function renderUnitCard(unit) {
     const card = document.createElement("div");
+    card.dataset.unitId = unit.id;
     const supply = isPlayableSide(unit.side) && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit))
-      ? supplyStateLabel(supplyState(unit.id))
+      ? supplyStateLabel(uiSupplyState(unit.id))
       : unitTypeGroup(unit).label;
+    const unitStatus = unitStateLabel(unit.state || "fresh");
     card.className = `unit-card ${unit.side} ${unit.id === selectedUnitId ? "selected" : ""}`;
     card.innerHTML = `
-      <div class="unit-title">
-        <span>${unit.name || unit.id}</span>
-        <span>${unitTypeGroup(unit).label} ${unit.hex || ""}</span>
-      </div>
-      <div class="unit-meta readonly">
-        <span><b>ID</b>${escapeHtml(unit.id)}</span>
-        <span><b>坐标</b>${escapeHtml(unit.hex || "未部署")}</span>
-        <span><b>A/D</b>${escapeHtml(unit.attack ?? 0)}/${escapeHtml(unit.defense ?? unit.attack ?? 0)}</span>
-        <span><b>MP</b>${escapeHtml(unit.movement ?? 0)}</span>
-        <span><b>补给</b>${escapeHtml(supply)}</span>
+      <span class="unit-card-counter ${escapeHtml(unit.side || "neutral")}">
+        <img src="${escapeHtml(counterImageFor(unit))}" alt="" loading="lazy" decoding="async">
+      </span>
+      <div class="unit-card-body">
+        <div class="unit-card-heading">
+          <strong>${escapeHtml(unit.name || unit.id)}</strong>
+          <span>${escapeHtml(unitTypeGroup(unit).label)}</span>
+        </div>
+        <div class="unit-card-facts">
+          <span><small>编号</small><b>${escapeHtml(unit.id)}</b></span>
+          <span><small>坐标</small><b>${escapeHtml(unit.hex || "未部署")}</b></span>
+          <span><small>战斗力</small><b>${escapeHtml(unit.attack ?? 0)}</b></span>
+          <span><small>移动力</small><b>${escapeHtml(unit.movement ?? 0)} MP</b></span>
+          <span class="${actionableChipTone(supply)}"><small>补给</small><b>${escapeHtml(supply)}</b></span>
+          <span class="${actionableChipTone(unitStatus)}"><small>状态</small><b>${escapeHtml(unitStatus)}</b></span>
+        </div>
       </div>
     `;
-    card.addEventListener("click", (event) => {
-      selectUnit(unit.id);
+    card.addEventListener("click", () => {
+      focusUnitFromState(unit.id);
     });
     return card;
 }
@@ -4728,28 +6632,35 @@ function renderMoveUnits() {
   renderRouteStatus();
 }
 
+function combatMineClearCandidate() {
+  if (phaseKind() !== "combat" || !selectedUnitId) return null;
+  const unit = state.units?.[selectedUnitId];
+  if (!unit || unit.eliminated || unit.side !== state.active_side || !isCombatUnit({ id: selectedUnitId, ...unit })) return null;
+  if (!unit.hex || !enemyMinesAt(unit.side, unit.hex).length) return null;
+  return { id: selectedUnitId, ...unit };
+}
+
 function renderCombatControls() {
-  const engineerSelect = el("engineerSelect");
-  if (engineerSelect) {
-    const selected = engineerSelect.value;
-    engineerSelect.innerHTML = "";
-    const candidates = unitsArray().filter((u) => (
-      u.side === state.active_side &&
-      !u.eliminated &&
-      (isEngineer(u) || (isCombatUnit(u) && enemyMinesAt(u.side, u.hex).length))
-    ));
-    for (const unit of candidates) {
-      const option = document.createElement("option");
-      option.value = unit.id;
-      option.textContent = `${isEngineer(unit) ? "工兵" : "战斗单位"} · ${unit.name || unit.id} (${unit.hex})`;
-      engineerSelect.append(option);
-    }
-    if (selected && state.units[selected]) engineerSelect.value = selected;
+  const candidate = combatMineClearCandidate();
+  const unitInput = el("engineerSelect");
+  const hexInput = el("mineHexInput");
+  if (unitInput) unitInput.value = candidate?.id || "";
+  if (hexInput) hexInput.value = candidate?.hex || "";
+  if (!candidate) return;
+  const attempted = !!(candidate.mine_cleared_this_turn || candidate.cleared_mine_this_turn);
+  const mineSide = enemySide(candidate.side);
+  if (el("mineClearTitle")) el("mineClearTitle").textContent = `${candidate.name || candidate.id} 位于 ${sideDisplayName(mineSide)}雷区 ${candidate.hex}`;
+  if (el("mineClearHint")) {
+    el("mineClearHint").textContent = attempted
+      ? "本回合已尝试排雷，不能再次掷骰。"
+      : "清除后雷区永久移除；无论成功失败，本回合都不能再次尝试。";
   }
-  if (selectedUnitId && state.units[selectedUnitId] && isCombatUnit({ id: selectedUnitId, ...state.units[selectedUnitId] })) {
-    const input = el("combatAttackersInput");
-    if (input && !input.value.trim()) input.value = selectedUnitId;
+  if (el("mineClearOdds")) {
+    el("mineClearOdds").textContent = attempted
+      ? "排雷机会已消耗"
+      : candidate.side === "axis" ? "3-6 成功" : "2-6 成功";
   }
+  if (el("clearMineBtn")) el("clearMineBtn").textContent = attempted ? "本回合已尝试" : "掷骰排雷";
 }
 
 function renderCalibration() {
@@ -4873,6 +6784,7 @@ function formatFeedbackOutput(value) {
       </div>
     `;
   }
+  if (value.details?.mine_hex) return formatMineClearFeedback(value);
   const legal = value.legal !== false;
   const status = legal ? "裁判通过" : "裁判阻止";
   const details = value.details || {};
@@ -4892,6 +6804,7 @@ function formatFeedbackOutput(value) {
   if (details.effects?.eliminated?.length) lines.push(["消灭", details.effects.eliminated.join(", ")]);
   if (details.effects?.retreated?.retreated?.length) lines.push(["撤退", details.effects.retreated.retreated.join(", ")]);
   if (details.effects?.advanced) lines.push(["战后推进", `${details.effects.advanced.unit} -> ${details.effects.advanced.to}`]);
+  if (details.selection_note) lines.push(["编组调整", details.selection_note]);
   if (details.missing?.length) lines.push(["还需攻击", details.missing.join(", ")]);
   if (value.undone) lines.push(["撤销", value.undone]);
   const body = lines.length
@@ -4905,6 +6818,33 @@ function formatFeedbackOutput(value) {
       </div>
       ${chips.length ? `<div class="feedback-chips">${chips.map(([key, val]) => `<span><b>${escapeHtml(key)}</b>${escapeHtml(val)}</span>`).join("")}</div>` : ""}
       ${body}
+    </div>
+  `;
+}
+
+function formatMineClearFeedback(value) {
+  const details = value.details || {};
+  const cleared = details.cleared !== false;
+  const die = details.die == null ? null : Number(details.die);
+  const mineSide = sideDisplayName(details.mine_side);
+  const resultTitle = cleared ? "排雷成功" : "排雷失败";
+  const resultText = cleared
+    ? `${details.unit_name ? `${details.unit_name}：` : ""}${mineSide} 雷区 ${details.mine_hex} 已永久移除。`
+    : `${details.unit_name ? `${details.unit_name}：` : ""}${mineSide} 雷区 ${details.mine_hex} 仍然保留，本回合不能再次尝试。`;
+  const rollText = die == null ? "自动" : String(die);
+  return `
+    <div class="mine-roll-feedback ${cleared ? "success" : "failure"}">
+      <div class="mine-roll-die"><span>${die == null ? "工兵" : "1d6"}</span><strong>${escapeHtml(rollText)}</strong></div>
+      <div class="mine-roll-copy">
+        <span>排雷结果</span>
+        <strong>${escapeHtml(resultTitle)}</strong>
+        <p>${escapeHtml(resultText)}</p>
+      </div>
+      <dl>
+        <div><dt>成功点数</dt><dd>${escapeHtml(details.success_range || "-")}</dd></div>
+        <div><dt>本次骰点</dt><dd>${escapeHtml(rollText)}</dd></div>
+        <div><dt>雷区状态</dt><dd>${cleared ? "已清除" : "仍存在"}</dd></div>
+      </dl>
     </div>
   `;
 }
@@ -5179,9 +7119,10 @@ function showAfterActionReport(victory = {}) {
   if (el("afterActionTitle")) el("afterActionTitle").textContent = winner;
   if (el("afterActionReason")) el("afterActionReason").textContent = victory.reason || "裁判已完成最终结算。";
   if (el("afterActionFacts")) {
+    const span = gameTurnSpan(state, victory);
     el("afterActionFacts").innerHTML = `
       <div><span>SCENARIO</span><b>${escapeHtml(scenarioShortName(state.scenario))}</b></div>
-      <div><span>FINAL TURN</span><b>T${escapeHtml(victory.final_turn || state.turn || 1)}</b></div>
+      <div><span>GAME SPAN</span><b>T${escapeHtml(span.start)}–T${escapeHtml(span.end)} · ${escapeHtml(span.count)} 回合</b></div>
       <div><span>VICTORY POINTS</span><b>${escapeHtml(victory.victory_points ?? state.victory_points ?? 0)}</b></div>
     `;
   }
@@ -5396,16 +7337,48 @@ function focusOpeningView(options = {}) {
   focusMapOnUnits();
 }
 
-function focusMapOnHex(hex) {
+function focusUnitFromState(unitId) {
+  const unit = state.units?.[unitId];
+  if (!unit?.hex) return;
+  setMapViewMode("command");
+  selectUnit(unitId, { showStateTab: false });
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => focusMapOnHex(unit.hex, { behavior: "auto" }));
+  });
+}
+
+function visibleMapCenter(viewport) {
+  const viewportRect = viewport.getBoundingClientRect();
+  const sidePanel = document.querySelector(".side-panel");
+  const sideRect = sidePanel?.getBoundingClientRect();
+  let visibleRight = viewportRect.right;
+  if (
+    sideRect &&
+    sideRect.width > 0 &&
+    sideRect.left > viewportRect.left &&
+    sideRect.left < viewportRect.right &&
+    sideRect.bottom > viewportRect.top &&
+    sideRect.top < viewportRect.bottom
+  ) {
+    visibleRight = sideRect.left;
+  }
+  return {
+    x: Math.max(1, visibleRight - viewportRect.left) / 2,
+    y: Math.max(1, viewportRect.height) / 2
+  };
+}
+
+function focusMapOnHex(hex, options = {}) {
   if (!hex || !onMap(hex)) return;
   const { x, y } = hexToPoint(hex);
   const scale = Number(settings.zoom) / 100;
   const viewport = el("mapViewport");
   if (!viewport) return;
+  const center = visibleMapCenter(viewport);
   viewport.scrollTo({
-    left: x * scale - viewport.clientWidth / 2,
-    top: y * scale - viewport.clientHeight / 2,
-    behavior: "smooth"
+    left: x * scale - center.x,
+    top: y * scale - center.y,
+    behavior: options.behavior || "smooth"
   });
 }
 
@@ -5621,20 +7594,23 @@ function aiUnitPriority(unit) {
 
 function readyAttackersForAi() {
   return friendlyUnits(state.active_side).filter((unit) => {
+    if (!canAttackUnit(unit)) return false;
     if (unit.state !== "fresh" || unit.attacked_this_turn || unit.attacked_this_phase) return false;
     if (aiScoreSupplyState(unit.id) === "isolated") return false;
-    if (enemyMinesAt(unit.side, unit.hex).length && !unit.mine_cleared_entry) return false;
+    if (enemyMinesAt(unit.side, unit.hex).length) return false;
     return true;
   });
 }
 
-function crtColumn(column) {
+function crtColumn(column, defenderHexes = []) {
   const columns = rules.combat?.odds_columns || DEFAULT_RULES.combat?.odds_columns || ["1-4", "1-3", "1-2", "1-1", "2-1", "3-1", "4-1", "5-1", "6-1", "7-1"];
   const index = columns.indexOf(column);
   if (index < 0) return {};
   const result = {};
+  const ruggedDefense = defenderHexes.some((hex) => hexTags(hex).includes("hill_or_ridge"));
   for (let die = 1; die <= 6; die++) {
-    result[String(die)] = rules.combat?.crt?.[String(die)]?.[index] || null;
+    const raw = rules.combat?.crt?.[String(die)]?.[index] || null;
+    result[String(die)] = ruggedDefense && /^D[123]$/.test(raw || "") ? "No Effect" : raw;
   }
   return result;
 }
@@ -5649,7 +7625,7 @@ function publicCombatVerdict(action) {
       ...verdict.details,
       die: null,
       outcome: null,
-      crt_column: crtColumn(verdict.details.odds_column)
+      crt_column: crtColumn(verdict.details.odds_column, verdict.details.defender_hexes || [])
     }
   };
 }
@@ -5677,7 +7653,7 @@ function enumerateCombatActions(limit = 50) {
       const key = `${attackerIds.sort().join(",")}=>${defenderHexes.sort().join(",")}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const action = { type: "combat", attackers: attackerIds, defender_hexes: defenderHexes, no_retreat_order: false };
+      const action = { type: "combat", attackers: attackerIds, defender_hexes: defenderHexes };
       const verdict = publicCombatVerdict(action);
       if (verdict.legal) {
         actions.push({ ...action, verdict });
@@ -5891,13 +7867,16 @@ function exitWestUnit(unitId, source = "manual") {
   const validation = canExitWest(unitId);
   if (!validation.legal) return validation;
   const action = validation.action;
-  pushHistory(source === "ai" ? "ai_exit_west" : "exit_west");
+  if (source !== "ai") pushHistory("exit_west");
   const unit = state.units[action.unit];
+  unit.exit_hex = normalizeHex(unit.hex);
   unit.exited_edge = "west";
   unit.exit_edge = "west";
+  unit.exited = "west";
   unit.exited_turn = Number(state.turn || 1);
   unit.exit_turn = Number(state.turn || 1);
   unit.off_map = true;
+  unit.hex = null;
   unit.state = "spent";
   logEvent(source === "ai" ? "ai_exit_west" : "exit_west", `${source === "ai" ? "AI " : ""}撤出西边 ${action.unit}`, { action, turn: state.turn });
   renderState();
@@ -6096,11 +8075,17 @@ function suggestRulesAction() {
     const kind = phaseKind();
     const minimumScore = kind === "combat" ? 165 : kind === "supply_movement" ? 2 : state.active_side === "axis" ? 4 : 6;
     const best = candidates.find((action) => action.type !== "pass" && action.score >= minimumScore);
+    const legalActions = candidates.filter((action) => action.type !== "pass");
+    const passReason = kind === "combat"
+      ? legalActions.length
+        ? "存在合法攻击，但当前赔率或预期战果不利，复杂规则 AI 选择保存兵力"
+        : "当前没有相邻且符合规则的攻击目标"
+      : "复杂规则 AI 没有找到值得执行的合法动作";
     return {
       type: "rules",
       policy: "固定规则：Axis 向 Alamein/东方推进；Allies 防守关键区并只就近截击，不以 Axis 后方补给源为全局目标；战斗阶段优先公开 CRT 期望值高的合法攻击。",
       target: fixedAiTarget(state.active_side),
-      action: best || { type: "pass", reason: "复杂规则 AI 没有找到值得执行的合法动作" },
+      action: best || { type: "pass", reason: passReason },
       candidates: candidates.slice(0, 10).map((action) => ({ score: action.score, action: compactAction(action) }))
     };
   }
@@ -6177,7 +8162,7 @@ function normalizeAiAction(raw) {
   if (action.type === "exit_west") return { type: "exit_west", unit: action.unit };
   if (action.type === "move_intent") return { type: "move_intent", unit: action.unit, destination: action.destination || action.target || action.hex, mode: action.mode || "auto" };
   if (action.type === "move") return { type: "move", unit: action.unit, path: (action.path || []).map(normalizeHex), mode: action.mode || "normal" };
-  if (action.type === "combat") return { type: "combat", attackers: action.attackers || [], defender_hexes: (action.defender_hexes || []).map(normalizeHex), no_retreat_order: !!action.no_retreat_order };
+  if (action.type === "combat") return { type: "combat", attackers: action.attackers || [], defender_hexes: (action.defender_hexes || []).map(normalizeHex) };
   return { type: "pass", reason: action.reason || raw?.reason || "不行动" };
 }
 
@@ -6197,7 +8182,7 @@ function validateAiAction(rawAction) {
   return { legal: false, reason: `未知 AI 动作 ${action.type}`, action };
 }
 
-function applyAiAction(rawAction) {
+function applyAiAction(rawAction, options = {}) {
   const validation = validateAiAction(rawAction);
   if (!validation.legal) return validation;
   const action = validation.action;
@@ -6206,7 +8191,6 @@ function applyAiAction(rawAction) {
     return exitWestUnit(action.unit, "ai");
   }
   if (action.type === "move") {
-    pushHistory("ai_move");
     const unit = state.units[action.unit];
     const fromHex = normalizeHex(unit.hex);
     unit.hex = normalizeHex(action.path[action.path.length - 1]);
@@ -6226,10 +8210,13 @@ function applyAiAction(rawAction) {
   }
   if (action.type === "combat") {
     logEvent("ai_combat_choice", `AI 选择攻击 ${action.defender_hexes.join(", ")}`, { action });
-    const userDie = Number(el("combatResolveDieSelect")?.value || 0);
-    const die = userDie >= 1 && userDie <= 6 ? userDie : Math.floor(Math.random() * 6) + 1;
-    const result = resolveCombat({ attackers: action.attackers, defender_hexes: action.defender_hexes, die, no_retreat_order: !!action.no_retreat_order });
-    return { ...result, action, die, source: userDie ? "user" : "frontend_random" };
+    const fixedDie = debugCombatDie();
+    const requestedDie = Number(options.die || 0);
+    const die = fixedDie || (Number.isInteger(requestedDie) && requestedDie >= 1 && requestedDie <= 6
+      ? requestedDie
+      : Math.floor(Math.random() * 6) + 1);
+    const result = resolveCombat({ attackers: action.attackers, defender_hexes: action.defender_hexes, die });
+    return { ...result, action, die, source: fixedDie ? "debug_fixed" : "frontend_random" };
   }
   return { legal: false, reason: `不能执行未知动作 ${action.type}`, action };
 }
@@ -6295,7 +8282,7 @@ function inspectUnitForAi(unitId) {
       zoc_hexes: zocHexes(full),
       terrain: unit.hex ? hexTags(unit.hex) : [],
       can_move_now: isMovableUnit(full) && canMoveInCurrentPhase(full, { mode: "normal" }) && unit.state === "fresh",
-      can_attack_now: phaseKind() === "combat" && isCombatUnit(full) && unit.side === state.active_side && unit.state === "fresh" && !unit.attacked_this_turn
+      can_attack_now: phaseKind() === "combat" && canAttackUnit(full) && unit.side === state.active_side && unit.state === "fresh" && !unit.attacked_this_turn
     }
   };
 }
@@ -6350,8 +8337,7 @@ function sameAiAction(a, b) {
   }
   if (left.type === "combat") {
     return [...(left.attackers || [])].sort().join(",") === [...(right.attackers || [])].sort().join(",") &&
-      [...(left.defender_hexes || [])].sort().join(",") === [...(right.defender_hexes || [])].sort().join(",") &&
-      !!left.no_retreat_order === !!right.no_retreat_order;
+      [...(left.defender_hexes || [])].sort().join(",") === [...(right.defender_hexes || [])].sort().join(",");
   }
   return false;
 }
@@ -6443,7 +8429,7 @@ function runAiTool(tool, args = {}) {
       const path = findLegalPath(args.unit, args.target, { mode: args.mode || "normal" });
       return path ? { legal: true, path, verdict: checkMove(args.unit, path, { mode: args.mode || "normal" }) } : { legal: false, reason: "找不到合法路径" };
     }
-    if (tool === "check_combat") return publicCombatVerdict({ attackers: args.attackers || [], defender_hexes: (args.defender_hexes || []).map(normalizeHex), no_retreat_order: !!args.no_retreat_order });
+    if (tool === "check_combat") return publicCombatVerdict({ attackers: args.attackers || [], defender_hexes: (args.defender_hexes || []).map(normalizeHex) });
     if (tool === "inspect_unit") return inspectUnitForAi(args.unit);
     if (tool === "inspect_hex") return inspectHexForAi(args.hex);
     if (tool === "trace_supply") return traceSupplyForAi(args.unit);
@@ -6525,7 +8511,7 @@ function compactUnitForAi(unit, options = {}) {
     enemy_zoc_here: unit.hex && isPlayableSide(unit.side) ? enemyZocSources(unit.side, unit.hex).size > 0 : false,
     zoc_hexes: isCombatUnit(full) ? zocHexes(full) : [],
     can_move_now: unit.side === state.active_side && isMovableUnit(full) && canMoveInCurrentPhase(full, { mode: "normal" }) && unit.state === "fresh",
-    can_attack_now: unit.side === state.active_side && phaseKind() === "combat" && isCombatUnit(full) && unit.state === "fresh" && !unit.attacked_this_turn,
+    can_attack_now: unit.side === state.active_side && phaseKind() === "combat" && canAttackUnit(full) && unit.state === "fresh" && !unit.attacked_this_turn,
     nearby_enemies: includeNearby ? nearestEnemiesForAi(full, nearbyLimit) : []
   };
 }
@@ -6763,7 +8749,7 @@ function rulesBriefForAi() {
   const stacking = rules.stacking || {};
   const combat = rules.combat || {};
   return {
-    game: rules.game?.title || "First Alamein",
+    game: rules.game?.title || "El Alamein",
     role: "You are the active side's game agent. Your job is to win the scenario, using only legal actions accepted by the front-end judge.",
     turn_sequence: rules.turn_sequence || DEFAULT_RULES.turn_sequence,
     movement: [
@@ -7449,6 +9435,173 @@ async function suggestAiAction() {
   return suggestHeuristicAction();
 }
 
+function aiPlaybackTiming() {
+  const profiles = {
+    slow: { focus: 1100, preview: 1800, result: 2600, phase: 2200 },
+    normal: { focus: 700, preview: 1200, result: 1700, phase: 1800 },
+    fast: { focus: 400, preview: 650, result: 900, phase: 800 }
+  };
+  return profiles[aiPlaybackSpeed] || profiles.slow;
+}
+
+function waitForAiPlayback(duration) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(duration) || 0)));
+}
+
+function aiActionFocusHex(action, after = false) {
+  if (action.type === "move") {
+    const path = action.path || [];
+    return after ? path[path.length - 1] : (state.units?.[action.unit]?.hex || path[0]);
+  }
+  if (action.type === "combat") return action.defender_hexes?.[0] || state.units?.[action.attackers?.[0]]?.hex || "";
+  if (action.type === "exit_west") return state.units?.[action.unit]?.hex || "";
+  return "";
+}
+
+async function presentAiAction(action) {
+  const timing = aiPlaybackTiming();
+  const focusHex = aiActionFocusHex(action);
+  aiCombatPlayback = null;
+  setOutput("aiOutput", { status: "AI 正在展示行动", action, side: state.active_side, phase: state.phase });
+  if (action.type === "move") {
+    selectedUnitId = action.unit;
+    selectedHexId = null;
+    setMapViewMode("move");
+    movePathDraft = [...(action.path || [])];
+    syncMovePathInput();
+    if (el("moveUnitSelect")) el("moveUnitSelect").value = action.unit;
+    switchTab("move", { expandPanel: true });
+    renderSelectedUnit();
+    renderRouteStatus();
+    renderActionControls();
+    renderMap();
+  }
+  else if (action.type === "combat") {
+    clearPendingCombatRoll();
+    selectedUnitId = action.attackers?.[0] || null;
+    selectedHexId = null;
+    selectedCombatDefenderHex = action.defender_hexes?.[0] || null;
+    setSelectedCombatAttackers(action.attackers || []);
+    if (el("combatDefendersInput")) el("combatDefendersInput").value = (action.defender_hexes || []).join(" ");
+    setMapViewMode("combat");
+    switchTab("combat", { expandPanel: true });
+    renderSelectedUnit();
+    renderActionControls();
+    renderMap();
+  }
+  else if (action.type === "exit_west") {
+    selectedUnitId = action.unit;
+    selectedHexId = null;
+    setMapViewMode("command");
+    renderSelectedUnit();
+    renderActionControls();
+    renderMap();
+  }
+  if (focusHex && onMap(focusHex)) focusMapOnHex(focusHex, { behavior: "smooth" });
+  await waitForAiPlayback(timing.focus);
+  const destination = aiActionFocusHex(action, true);
+  if (destination && destination !== focusHex && onMap(destination)) focusMapOnHex(destination, { behavior: "smooth" });
+  await waitForAiPlayback(timing.preview);
+}
+
+async function executeAiActionWithPlayback(action, generation = aiRunGeneration) {
+  const preflight = validateAiAction(action);
+  if (!preflight.legal) return preflight;
+  const executableAction = preflight.action || action;
+  await presentAiAction(executableAction);
+  if (generation !== aiRunGeneration) return { legal: false, reason: "AI 行动已因局面切换而取消", action: executableAction };
+  if (executableAction.type === "combat") {
+    const combatDie = debugCombatDie() || Math.floor(Math.random() * 6) + 1;
+    const combatAction = { ...executableAction, die: combatDie };
+    const verdict = checkCombat(combatAction);
+    if (!verdict.legal) return verdict;
+
+    if (el("combatResolveDieSelect")) el("combatResolveDieSelect").value = String(combatDie);
+    pendingCombatRoll = {
+      key: combatActionKey(combatAction),
+      action: structuredClone(combatAction),
+      verdict: structuredClone(verdict),
+      ai: true,
+      side: state.active_side,
+      resumeAutoplay: !!state.ai_autoplay
+    };
+    aiCombatPlayback = null;
+    preparePendingRetreatSelection();
+    const aiRetreat = autoPlanPendingRetreatForAi();
+    const waitingForPlayerRetreat = pendingRetreatNeedsChoice() && !pendingRetreatIsAiControlled();
+    logEvent("ai_combat_choice", `AI 选择攻击 ${combatAction.defender_hexes.join(", ")}`, { action: combatAction, verdict });
+    setOutput("aiOutput", {
+      status: "AI 战斗裁定",
+      action: combatAction,
+      side: state.active_side,
+      phase: state.phase,
+      die: combatDie,
+      odds: verdict.details?.odds_column,
+      outcome: verdict.details?.outcome,
+      reason: waitingForPlayerRetreat
+        ? `骰点 ${combatDie} · 赔率 ${verdict.details?.odds_column || "-"} · ${combatOutcomeExplanation(verdict.details?.outcome)}。等待玩家选择撤退路线。`
+        : `骰点 ${combatDie} · 赔率 ${verdict.details?.odds_column || "-"} · ${combatOutcomeExplanation(verdict.details?.outcome)}`
+    });
+    setOutput(
+      "combatOutput",
+      waitingForPlayerRetreat
+        ? "AI 战斗的骰点与结果已经确定。请为当前单位选择金色撤退路线；完成前 AI 不会继续行动。"
+        : aiRetreat
+          ? `${playerControllerLabel(playerController(aiRetreat.retreatingSide))} 已规划${aiRetreat.side}撤退路线。`
+          : "AI 战斗的骰点与结果已经确定，正在执行战斗结果。"
+    );
+    renderActionControls();
+    renderMap();
+    const retreatingId = pendingRetreatSelection?.plan?.pending?.unit || pendingRetreatSelection?.unitIds?.[0];
+    if (retreatingId && state.units?.[retreatingId]?.hex) {
+      focusMapOnHex(state.units[retreatingId].hex, { behavior: "smooth" });
+    }
+    await waitForAiPlayback(aiPlaybackTiming().result);
+    if (generation !== aiRunGeneration) return { legal: false, reason: "AI 战斗已因局面切换而取消", action: combatAction, die: combatDie, verdict };
+
+    if (waitingForPlayerRetreat) {
+      return {
+        legal: true,
+        awaiting_player_retreat: true,
+        reason: "等待玩家选择撤退路线",
+        action: combatAction,
+        die: combatDie,
+        verdict
+      };
+    }
+
+    const result = applyPendingCombatRoll({ fromAiLoop: true });
+    renderState();
+    const resultHex = aiActionFocusHex(combatAction, true);
+    if (resultHex && onMap(resultHex)) focusMapOnHex(resultHex, { behavior: "smooth" });
+    setOutput("aiOutput", {
+      status: result.legal ? "AI 战斗已执行" : "AI 战斗被裁判拒绝",
+      action: combatAction,
+      die: combatDie,
+      outcome: verdict.details?.outcome,
+      applied: result
+    });
+    await waitForAiPlayback(aiPlaybackTiming().result);
+    return { ...result, action: combatAction, die: combatDie };
+  }
+
+  let result;
+  suppressAiActionRender = true;
+  try {
+    if (generation !== aiRunGeneration) return { legal: false, reason: "AI 行动已因局面切换而取消", action: executableAction };
+    result = applyAiAction(executableAction);
+  }
+  finally {
+    suppressAiActionRender = false;
+  }
+  renderState();
+  const resultHex = aiActionFocusHex(executableAction, true);
+  if (resultHex && onMap(resultHex)) focusMapOnHex(resultHex, { behavior: "smooth" });
+  setOutput("aiOutput", { status: result.legal ? "AI 行动已执行" : "AI 行动被裁判拒绝", action: executableAction, applied: result });
+  await waitForAiPlayback(aiPlaybackTiming().result);
+  return result;
+}
+
 function renderAiConfig() {
   const config = el("aiExternalConfig");
   if (!config) return;
@@ -7472,7 +9625,7 @@ async function playAiForCurrentSide() {
     setOutput("aiOutput", { error: aiSuggestion.error || "AI 没有返回最终动作", suggestion: aiSuggestion });
     return aiSuggestion;
   }
-  const result = applyAiAction(aiSuggestion.action);
+  const result = await executeAiActionWithPlayback(normalizeAiAction(aiSuggestion.action));
   setOutput("aiOutput", { applied: result, suggestion: aiSuggestion });
   aiSuggestion = null;
   return result;
@@ -7537,8 +9690,14 @@ function shouldAdvanceAiPhaseByBudget(side = state.active_side) {
 
 function scheduleAiAutoplay() {
   syncAiAutoControls();
-  if (!state.ai_autoplay || aiAutoRunning || !currentPhaseIsAiControlled()) return;
-  setTimeout(() => autoPlayAi(), 30);
+  const waitingForPlayerRetreat = pendingCombatRoll?.ai
+    && pendingRetreatNeedsChoice()
+    && !pendingRetreatIsAiControlled();
+  if (!state.ai_autoplay || aiAutoRunning || !currentPhaseIsAiControlled() || waitingForPlayerRetreat) return;
+  const generation = aiRunGeneration;
+  setTimeout(() => {
+    if (generation === aiRunGeneration) autoPlayAi();
+  }, 250);
 }
 
 function setAiAutoplay(value) {
@@ -7551,34 +9710,51 @@ function setAiAutoplay(value) {
 
 async function autoPlayAi(maxSteps = 80) {
   if (aiAutoRunning) return { legal: false, reason: "AI 自动推进已经在运行" };
+  const generation = aiRunGeneration;
   aiAutoRunning = true;
   const log = [];
   let finalVictory = null;
   try {
-    for (let step = 0; step < maxSteps && state.ai_autoplay; step++) {
+    for (let step = 0; step < maxSteps && state.ai_autoplay && generation === aiRunGeneration; step++) {
       if (state.phase === "end_game_turn") {
         finalVictory = stopAiAtFinalVictory(log);
         if (finalVictory) break;
         const from = state.phase;
-        advancePhase();
+        advancePhaseForAi();
         log.push({ step: step + 1, action: "advance_phase", from, to: state.phase });
-        await new Promise((resolve) => setTimeout(resolve, 5));
+        await waitForAiPlayback(aiPlaybackTiming().phase);
         continue;
       }
       const side = phaseSide(state.phase);
       if (!isPlayableSide(side) || !isAiController(playerController(side))) break;
       state.active_side = side;
+      const overstackRepair = temporaryOverstackRepair();
+      if (overstackRepair && !overstackRepair.options.length) {
+        const chosen = [...overstackRepair.removable_unit_ids]
+          .sort((left, right) => Number(state.units?.[left]?.attack || 0) - Number(state.units?.[right]?.attack || 0) || left.localeCompare(right))[0];
+        const repairResult = RulesEngine.eliminateTemporaryOverstackUnit(rulesContext(), chosen);
+        log.push({ step: step + 1, side, action: "eliminate_unresolved_temporary_overstack", unit: chosen, result: repairResult });
+        if (!repairResult.legal) {
+          state.ai_autoplay = false;
+          break;
+        }
+        logEvent("temporary_overstack_elimination", `${playerControllerLabel(playerController(side))} 选择移除 ${chosen}`, repairResult.details || {});
+        renderState();
+        await waitForAiPlayback(aiPlaybackTiming().move);
+        continue;
+      }
       if (shouldAdvanceAiPhaseByBudget(side)) {
         const from = state.phase;
         const count = aiPhaseActionCount();
         const limit = aiPhaseActionLimit(side);
-        advancePhase();
+        advancePhaseForAi();
         log.push({ step: step + 1, side, action: "budget_then_advance", count, limit, from, to: state.phase });
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await waitForAiPlayback(aiPlaybackTiming().phase);
         continue;
       }
       setOutput("aiOutput", { status: "auto_running", step: step + 1, side, phase: state.phase, log: log.slice(-8) });
       const suggestion = await suggestAiAction();
+      if (generation !== aiRunGeneration) break;
       if (suggestion.error || !suggestion.action) {
         log.push({ step: step + 1, side, phase: state.phase, error: suggestion.error || "AI 没有动作" });
         state.ai_autoplay = false;
@@ -7587,18 +9763,28 @@ async function autoPlayAi(maxSteps = 80) {
       const action = normalizeAiAction(suggestion.action);
       if (action.type === "pass") {
         const from = state.phase;
-        advancePhase();
+        if (phaseKind() === "combat") {
+          const reason = action.reason || "当前没有值得发起的攻击";
+          setOutput("aiOutput", { status: "AI 跳过战斗", side, phase: state.phase, action, reason });
+          logEvent("ai_combat_pass", `${playerControllerLabel(playerController(side))} 跳过战斗：${reason}`, { action, reason });
+          await waitForAiPlayback(aiPlaybackTiming().preview);
+        }
+        advancePhaseForAi();
         log.push({ step: step + 1, side, action: "pass_then_advance", from, to: state.phase });
-        await new Promise((resolve) => setTimeout(resolve, 5));
+        await waitForAiPlayback(aiPlaybackTiming().phase);
         continue;
       }
-      let result;
-      suppressAiActionRender = true;
-      try {
-        result = applyAiAction(action);
-      }
-      finally {
-        suppressAiActionRender = false;
+      const result = await executeAiActionWithPlayback(action, generation);
+      if (generation !== aiRunGeneration) break;
+      if (result.awaiting_player_retreat) {
+        log.push({
+          step: step + 1,
+          side,
+          phase: state.phase,
+          action: compactAction(action),
+          result: { legal: true, awaiting_player_retreat: true, reason: result.reason, die: result.die }
+        });
+        break;
       }
       if (result.legal) incrementAiPhaseActionCount();
       log.push({ step: step + 1, side, phase: state.phase, action: compactAction(action), result: { legal: result.legal, reason: result.reason, die: result.die } });
@@ -7606,22 +9792,38 @@ async function autoPlayAi(maxSteps = 80) {
         state.ai_autoplay = false;
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, 15));
     }
   }
   finally {
-    aiAutoRunning = false;
-    syncAiAutoControls();
+    if (generation === aiRunGeneration) {
+      aiAutoRunning = false;
+      syncAiAutoControls();
+    }
   }
-  const stillCanRun = state.ai_autoplay && currentPhaseIsAiControlled();
+  if (generation !== aiRunGeneration) return { legal: false, reason: "AI 自动行动已因局面切换而取消", log };
+  const waitingForPlayerRetreat = pendingCombatRoll?.ai
+    && pendingRetreatNeedsChoice()
+    && !pendingRetreatIsAiControlled();
+  const stillCanRun = state.ai_autoplay && currentPhaseIsAiControlled() && !waitingForPlayerRetreat;
   setOutput("aiOutput", finalVictory
     ? { status: "final_victory", victory: finalVictory, log }
     : {
-      status: stillCanRun ? "auto_paused_at_step_limit" : state.ai_autoplay ? "auto_waiting_for_human" : "auto_stopped",
+      status: waitingForPlayerRetreat
+        ? "auto_waiting_for_player_retreat"
+        : stillCanRun
+          ? "auto_paused_at_step_limit"
+          : state.ai_autoplay
+            ? "auto_waiting_for_human"
+            : "auto_stopped",
+      reason: waitingForPlayerRetreat ? "AI 战斗已经裁定，等待玩家选择己方单位的撤退路线" : undefined,
       max_steps: maxSteps,
       log
     });
-  if (stillCanRun) setTimeout(() => autoPlayAi(maxSteps), 30);
+  if (stillCanRun) {
+    setTimeout(() => {
+      if (generation === aiRunGeneration) autoPlayAi(maxSteps);
+    }, 250);
+  }
   return { legal: true, log };
 }
 
@@ -7637,6 +9839,7 @@ async function loadJson(url, fallback) {
 }
 
 function applyStateDefaults(nextState) {
+  invalidateAsyncGameWork();
   state = nextState || structuredClone(FALLBACK_STATE);
   RulesEngine.applyStateDefaults(state);
   const legacyPhases = {
@@ -7655,7 +9858,9 @@ function applyStateDefaults(nextState) {
   state.ai_autoplay = anySideAiControlled();
   state.victory_points ||= 0;
   state.boxed_areas_active ??= true;
-  state.rules_version ||= "first-alamein-standard-v1";
+  if (!state.rules_version || state.rules_version === "first-alamein-standard-v1") {
+    state.rules_version = "el-alamein-cn-translation-v1";
+  }
   state.app_version = APP_VERSION;
   state.scenario_meta = { ...(RulesEngine.SCENARIO_META[state.scenario] || {}), ...(state.scenario_meta || {}), standard_scenario_only: true };
   state.road_supply_markers ||= {};
@@ -7673,6 +9878,16 @@ function applyStateDefaults(nextState) {
       unit.movement = 0;
     }
     if (unit.stats_status === "needs_counter_read") unit.stats_status = "needs_manual_review";
+    const imageName = String(unit.image || "").split("/").at(-1);
+    const printedStats = COUNTER_PRINTED_STATS[imageName];
+    const migrateEngineerStats = printedStats?.parenthesizedAttack && Number(unit.movement || 0) === 0;
+    if (printedStats && (unit.stats_status === "needs_manual_review" || migrateEngineerStats)) {
+      unit.attack = printedStats.attack;
+      unit.defense = printedStats.attack;
+      unit.movement = printedStats.movement;
+      if (printedStats.parenthesizedAttack) unit.parenthesized_attack = true;
+      unit.stats_status = "verified";
+    }
     unit.supply_state ||= "supplied";
     unit.road_mode = !!unit.road_mode;
     unit.road_facing ??= unit.facing ?? null;
@@ -7683,6 +9898,7 @@ function applyStateDefaults(nextState) {
     unit.mine_cleared_this_turn = !!(unit.mine_cleared_this_turn || unit.cleared_mine_this_turn);
     unit.cleared_mine_this_turn = unit.mine_cleared_this_turn;
     unit.engineer_assisted_this_turn = !!unit.engineer_assisted_this_turn;
+    delete unit.mine_cleared_entry;
     if (isMapCounter(unit) && !unit.image) unit.image = defaultCounterImage(unit);
   }
   if (selectedUnitId && !state.units[selectedUnitId]) selectedUnitId = null;
@@ -7732,13 +9948,56 @@ async function loadScenario(name) {
 }
 
 async function initData() {
-  rules = await loadJson("./rules_first_alamein.json", DEFAULT_RULES);
+  rules = await loadJson("./rules_el_alamein.json", DEFAULT_RULES);
   terrain = await loadJson("./terrain.json", { hexes: {}, edges: {} });
   applyStateDefaults(await loadJson(SCENARIO_URLS.july, FALLBACK_STATE));
 }
 
+function executeCurrentMove() {
+  const unitId = currentMoveUnitId();
+  const unit = unitId ? state.units?.[unitId] : null;
+  const path = [...movePathDraft];
+  const verdict = unit && path.length > 1
+    ? checkMove(unitId, path, moveOptions())
+    : { legal: false, reason: "请先选择单位并规划路线" };
+  if (!verdict.legal) {
+    renderAutoJudge();
+    setOutput("moveOutput", verdict);
+    renderActionControls();
+    return verdict;
+  }
+
+  pushHistory("move");
+  const fromHex = normalizeHex(unit.hex);
+  unit.hex = normalizeHex(path[path.length - 1]);
+  unit.road_mode = moveOptions().mode === "road";
+  unit.road_facing = path.length > 1 ? hexDirection(path[path.length - 2], path[path.length - 1]) : unit.road_facing;
+  unit.facing = unit.road_facing;
+  unit.state = "spent";
+  unit.temporary_overstack = false;
+  if (verdict.details?.repaired_temporary_overstack || verdict.details?.progressed_temporary_overstack) {
+    const originStack = RulesEngine.checkStacking(rulesContext(), state, { hexes: [fromHex] });
+    for (const candidate of Object.values(state.units || {})) {
+      if (!candidate.hex || normalizeHex(candidate.hex) !== fromHex || !isStackingUnit(candidate)) continue;
+      candidate.temporary_overstack = !originStack.legal;
+    }
+  }
+  if (isEngineer({ id: unitId, ...unit }) && phaseKind() === "initial_movement" && enemyMinesAt(unit.side, unit.hex).length) {
+    RulesEngine.clearMine(rulesContext(), unitId, unit.hex);
+  }
+  selectedUnitId = unitId;
+  movePathDraft = [unit.hex];
+  syncMovePathInput();
+  logEvent("move", `移动 ${unitId}：${fromHex} -> ${unit.hex}`, { unit: unitId, path, mode: moveOptions().mode, verdict });
+  renderState();
+  renderAutoJudge();
+  setOutput("moveOutput", verdict);
+  return verdict;
+}
+
 function initControls() {
   initializeVisualEffects();
+  initializeAiPlaybackSpeed();
   for (const phase of rules.turn_sequence || DEFAULT_RULES.turn_sequence) {
     const option = document.createElement("option");
     option.value = phase;
@@ -7758,7 +10017,7 @@ function initControls() {
   document.addEventListener("click", (event) => {
     if (event.target.closest?.(".phase-dock-more")) return;
     closeDockMenus();
-    if (!event.target.closest?.(".map-toolbar")) closeMapToolMenus();
+    if (!event.target.closest?.(".map-control-surface")) closeMapToolMenus();
   });
   el("sideCommandBar")?.addEventListener("click", (event) => {
     const commandButton = event.target.closest?.("button[data-command]");
@@ -7773,6 +10032,15 @@ function initControls() {
     if (event.target.closest?.("#loadLatestSlotBtn")) loadLatestSlot();
   });
   el("combatTargetList")?.addEventListener("click", handleCombatTargetListClick);
+  el("combatRetreatPlanner")?.addEventListener("click", (event) => {
+    const routeButton = event.target.closest?.("button[data-retreat-hex]");
+    if (routeButton) {
+      choosePendingRetreatHex(routeButton.dataset.retreatHex);
+      return;
+    }
+    const unitButton = event.target.closest?.("button[data-retreat-unit]");
+    if (unitButton) selectPendingRetreatUnit(unitButton.dataset.retreatUnit);
+  });
   el("routeStepList")?.addEventListener("click", handleRouteStepListClick);
   el("tab-log")?.addEventListener("click", handleGameLogClick);
   document.addEventListener("keydown", (event) => {
@@ -7821,6 +10089,7 @@ function initControls() {
   el("phaseSelect").addEventListener("change", () => {
     state.phase = el("phaseSelect").value;
     syncActiveSideFromPhase();
+    if (isFinalVictoryCheck()) finalizeCompletedGame(checkVictory());
     renderState();
     focusCurrentPhaseTab();
     scheduleAiAutoplay();
@@ -7843,9 +10112,12 @@ function initControls() {
   el("aiProfileSelect")?.addEventListener("change", () => applyAiProfile(el("aiProfileSelect").value));
   el("saveAiProfileBtn")?.addEventListener("click", saveAiProfile);
   el("deleteAiProfileBtn")?.addEventListener("click", deleteAiProfile);
+  el("returnHomeBtn")?.addEventListener("click", returnToHome);
   el("openSetupBtn")?.addEventListener("click", showSetupScreen);
   el("setupModeNewBtn")?.addEventListener("click", () => setSetupMode("new"));
   el("setupModeLoadBtn")?.addEventListener("click", loadSetupSelectedSlot);
+  el("setupModeArchiveBtn")?.addEventListener("click", () => setSetupMode("archive"));
+  el("setupArchiveBackBtn")?.addEventListener("click", () => setSetupMode("home"));
   el("setupBackHomeBtn")?.addEventListener("click", () => setSetupMode("home"));
   el("setupStartBtn")?.addEventListener("click", startFromSetup);
   document.querySelectorAll("[data-setup-scenario]").forEach((button) => {
@@ -7879,13 +10151,19 @@ function initControls() {
     setOutput("setupSaveOutput", { slots: saveSlots().map(slotLabel) });
   });
   el("setupSaveSlotSelect")?.addEventListener("change", () => {
-    const slot = saveSlots().find((item) => item.id === el("setupSaveSlotSelect").value);
+    const slot = activeSaveSlots().find((item) => item.id === el("setupSaveSlotSelect").value);
     setOutput("setupSaveOutput", slot ? { selected: slotLabel(slot) } : { reason: "请选择一个存档槽" });
   });
   el("sidePanelToggleBtn")?.addEventListener("click", toggleSidePanel);
   el("gameSettingsBtn")?.addEventListener("click", () => switchTab("settings", { expandPanel: true }));
   el("visualEffectsSelect")?.addEventListener("change", () => applyVisualEffectsMode(el("visualEffectsSelect").value));
-  el("closeAfterActionBtn")?.addEventListener("click", () => el("afterActionReport")?.classList.add("hidden"));
+  el("aiPlaybackSpeedSelect")?.addEventListener("change", () => applyAiPlaybackSpeed(el("aiPlaybackSpeedSelect").value));
+  el("afterActionViewLogBtn")?.addEventListener("click", () => {
+    el("afterActionReport")?.classList.add("hidden");
+    switchTab("log", { expandPanel: true });
+  });
+  el("afterActionHomeBtn")?.addEventListener("click", returnToHome);
+  el("mapOverlay")?.addEventListener("click", handleMapOverlayClick);
   el("unitSearch").addEventListener("input", renderUnitList);
   el("ruleSearch")?.addEventListener("input", filterRulebook);
   el("expandRulesBtn")?.addEventListener("click", () => setRulebookOpen(true));
@@ -7917,21 +10195,18 @@ function initControls() {
     renderMap();
   });
   el("moveUnitSelect").addEventListener("change", () => selectUnit(el("moveUnitSelect").value, { showStateTab: false }));
-  el("moveModeSelect").addEventListener("change", () => { renderRouteStatus(); renderActionControls(); renderMap(); });
-  el("combatResolveDieSelect").addEventListener("change", () => {
-    renderAutoJudge();
-    renderActionControls();
+  el("moveModeSelect").addEventListener("change", refreshMoveModeSelection);
+  el("moveModeToggleBtn")?.addEventListener("click", toggleCurrentMoveMode);
+  el("combatActionBtn")?.addEventListener("click", () => {
+    if (pendingCombatRoll && pendingCombatRollIsCurrent()) applyPendingCombatRoll();
+    else resolveCombatWithRandomDie();
   });
-  el("useSelectedCombatBtn").addEventListener("click", () => {
-    if (selectedUnitId) el("combatAttackersInput").value = selectedUnitId;
-    if (selectedCombatDefenderHex) el("combatDefendersInput").value = selectedCombatDefenderHex;
-    setOutput("combatOutput", checkCombat(parseCombatAction()));
-    renderActionControls();
+  el("toggleCombatTableBtn")?.addEventListener("click", () => {
+    combatCrtPreviewOpen = !combatCrtPreviewOpen;
+    renderCombatCrtPreview();
   });
-  el("previewCombatBtn").addEventListener("click", previewCombatFromInputs);
-  el("randomCombatBtn")?.addEventListener("click", resolveCombatWithRandomDie);
-  el("resolveCombatBtn").addEventListener("click", () => {
-    setOutput("combatOutput", resolveCombat(parseCombatAction()));
+  el("combatDebugDieSelect")?.addEventListener("change", () => {
+    clearPendingCombatRoll();
     renderActionControls();
   });
   el("undoActionBtn").addEventListener("click", undoLastAction);
@@ -7940,8 +10215,14 @@ function initControls() {
     renderActionControls();
   });
   ["combatAttackersInput", "combatDefendersInput", "engineerSelect", "mineHexInput"].forEach((id) => {
-    el(id)?.addEventListener("input", renderActionControls);
-    el(id)?.addEventListener("change", renderActionControls);
+    el(id)?.addEventListener("input", () => {
+      if (id === "combatAttackersInput" || id === "combatDefendersInput") clearPendingCombatRoll();
+      renderActionControls();
+    });
+    el(id)?.addEventListener("change", () => {
+      if (id === "combatAttackersInput" || id === "combatDefendersInput") clearPendingCombatRoll();
+      renderActionControls();
+    });
   });
   ["combatAttackersInput", "combatDefendersInput"].forEach((id) => {
     el(id)?.addEventListener("keydown", (event) => {
@@ -7952,7 +10233,17 @@ function initControls() {
   });
   el("calibrationStatusFilter").addEventListener("change", renderCalibration);
   el("calibrationSearch").addEventListener("input", renderCalibration);
-  el("moveTargetInput")?.addEventListener("input", renderActionControls);
+  el("stateRosterDrawer")?.addEventListener("toggle", () => {
+    if (el("stateRosterDrawer").open) renderUnitList();
+  });
+  el("unitDebugDrawer")?.addEventListener("toggle", () => {
+    if (el("unitDebugDrawer").open) renderCalibration();
+  });
+  el("moveTargetInput")?.addEventListener("input", () => {
+    moveRouteFailure = null;
+    renderActionControls();
+    scheduleMapRender();
+  });
   el("moveTargetInput")?.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
@@ -7971,27 +10262,15 @@ function initControls() {
   });
   el("autoRouteBtn").addEventListener("click", runAutoRouteFromTarget);
   el("enterRoadModeBtn").addEventListener("click", () => {
-    el("moveModeSelect").value = "road";
-    renderRouteStatus();
-    renderActionControls();
-    renderMap();
-  });
-  el("leaveRoadModeBtn").addEventListener("click", () => {
-    const unitId = el("moveUnitSelect").value;
-    if (!unitId || !state.units[unitId]) return;
-    const verdict = RulesEngine.checkLeaveRoadMode(rulesContext(), unitId);
-    if (!verdict.legal) {
-      setOutput("moveOutput", verdict);
+    const availability = currentRoadModeAvailability(currentMoveUnit());
+    if (!availability.available) {
+      setOutput("moveOutput", { legal: false, reason: availability.reason });
       renderActionControls();
       return;
     }
-    pushHistory("leave_road_mode");
-    const result = RulesEngine.leaveRoadMode(rulesContext(), unitId);
-    el("moveModeSelect").value = "normal";
-    logEvent("leave_road_mode", `${unitId} 退出道路模式`, result.details);
-    renderState();
-    setOutput("moveOutput", result);
+    setPlannedMoveMode("road");
   });
+  el("leaveRoadModeBtn").addEventListener("click", leaveCurrentRoadMode);
   el("exitWestBtn").addEventListener("click", () => {
     const unitId = el("moveUnitSelect").value;
     const result = exitWestUnit(unitId, "manual");
@@ -8049,7 +10328,7 @@ function initControls() {
     setOutput("saveOutput", { slots: saveSlots().map(slotLabel) });
   });
   el("saveSlotSelect")?.addEventListener("change", () => {
-    const slot = saveSlots().find((item) => item.id === el("saveSlotSelect").value);
+    const slot = activeSaveSlots().find((item) => item.id === el("saveSlotSelect").value);
     if (slot && el("saveSlotNameInput")) el("saveSlotNameInput").value = slot.name || "";
     renderActionControls();
   });
@@ -8060,40 +10339,7 @@ function initControls() {
     renderState();
   });
 
-  el("applyMoveBtn").addEventListener("click", () => {
-    const unitId = el("moveUnitSelect").value;
-    const path = parsePathInput(el("movePathInput").value);
-    const verdict = checkMove(unitId, path, moveOptions());
-    if (verdict.legal) {
-      pushHistory("move");
-      const fromHex = normalizeHex(state.units[unitId].hex);
-      state.units[unitId].hex = normalizeHex(path[path.length - 1]);
-      state.units[unitId].road_mode = moveOptions().mode === "road";
-      state.units[unitId].road_facing = path.length > 1 ? hexDirection(path[path.length - 2], path[path.length - 1]) : state.units[unitId].road_facing;
-      state.units[unitId].facing = state.units[unitId].road_facing;
-      state.units[unitId].state = "spent";
-      state.units[unitId].temporary_overstack = false;
-      if (verdict.details?.repaired_temporary_overstack) {
-        for (const hex of [fromHex, state.units[unitId].hex]) {
-          const stackOk = RulesEngine.checkStacking(rulesContext(), state, { hexes: [hex] });
-          if (!stackOk.legal) continue;
-          for (const candidate of Object.values(state.units || {})) {
-            if (candidate.hex && normalizeHex(candidate.hex) === hex) candidate.temporary_overstack = false;
-          }
-        }
-      }
-      if (isEngineer({ id: unitId, ...state.units[unitId] }) && phaseKind() === "initial_movement" && enemyMinesAt(state.units[unitId].side, state.units[unitId].hex).length) {
-        RulesEngine.clearMine(rulesContext(), unitId, state.units[unitId].hex);
-      }
-      selectedUnitId = unitId;
-      movePathDraft = [state.units[unitId].hex];
-      syncMovePathInput();
-      logEvent("move", `移动 ${unitId}：${fromHex} -> ${state.units[unitId].hex}`, { unit: unitId, path, mode: moveOptions().mode, verdict });
-      renderState();
-    }
-    renderAutoJudge();
-    setOutput("moveOutput", verdict);
-  });
+  el("applyMoveBtn").addEventListener("click", executeCurrentMove);
   el("undoRouteBtn").addEventListener("click", () => {
     if (movePathDraft.length > 1) movePathDraft.pop();
     syncMovePathInput();
@@ -8113,7 +10359,7 @@ function initControls() {
     setOutput("aiOutput", aiSuggestion || "没有找到合法 AI 动作");
     renderActionControls();
   });
-  el("aiApplyBtn").addEventListener("click", () => {
+  el("aiApplyBtn").addEventListener("click", async () => {
     if (!aiSuggestion) {
       setOutput("aiOutput", "请先点击“建议一步”生成 AI 动作");
       return;
@@ -8122,9 +10368,17 @@ function initControls() {
       setOutput("aiOutput", { error: aiSuggestion.error || "AI 没有返回最终动作", suggestion: aiSuggestion });
       return;
     }
-    const action = aiSuggestion.action || aiSuggestion;
-    const result = applyAiAction(action);
-    setOutput("aiOutput", { applied: result, suggestion: aiSuggestion });
+    const suggestion = aiSuggestion;
+    const action = normalizeAiAction(suggestion.action || suggestion);
+    const result = await executeAiActionWithPlayback(action);
+    setOutput("aiOutput", result.awaiting_player_retreat
+      ? {
+        status: "等待玩家撤退",
+        reason: "AI 战斗已经裁定，请在地图或战斗面板中选择己方单位的撤退路线。",
+        applied: result,
+        suggestion
+      }
+      : { applied: result, suggestion });
     aiSuggestion = null;
     renderActionControls();
   });
