@@ -728,6 +728,66 @@ test("defender advance after attacker retreat is optional and explicit", () => {
   assert.equal(state.units.d.hex, "0202");
 });
 
+test("attacker does not advance unless the combat action explicitly requests it", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      a: { side: "axis", hex: "0202", state: "fresh", attack: 7, defense: 7, movement: 4, kind: "ground" },
+      d: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" }
+    }
+  });
+  const result = Rules.resolveCombat(ctx(state), { attackers: ["a"], defender_hexes: ["0302"], die: 1 });
+  assert.equal(result.legal, true, result.reason);
+  assert.equal(result.details.outcome, "De");
+  assert.equal(result.details.effects.advanced, null);
+  assert.equal(state.units.a.hex, "0202");
+});
+
+test("attacker remains in place when the defender retreats without an advance choice", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      a: { side: "axis", hex: "0202", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      d: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" }
+    }
+  });
+  const result = Rules.resolveCombat(ctx(state), { attackers: ["a"], defender_hexes: ["0302"], die: 1 });
+  assert.equal(result.legal, true, result.reason);
+  assert.equal(result.details.outcome, "D1");
+  assert.equal(result.details.effects.retreated.retreated.includes("d"), true);
+  assert.notEqual(state.units.d.hex, "0302");
+  assert.equal(result.details.effects.advanced, null);
+  assert.equal(state.units.a.hex, "0202");
+});
+
+test("player may explicitly choose which participating attacker advances", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      a: { side: "axis", hex: "0202", state: "fresh", attack: 4, defense: 4, movement: 4, kind: "ground" },
+      b: { side: "axis", hex: "0402", state: "fresh", attack: 3, defense: 3, movement: 4, kind: "ground" },
+      d: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" }
+    }
+  });
+  const context = ctx(state);
+  const action = { attackers: ["a", "b"], defender_hexes: ["0302"], die: 1 };
+  const choices = Rules.combatAdvanceOptions(context, action);
+  assert.equal(choices.available, true);
+  assert.deepEqual(choices.options, [
+    { unit: "a", target: "0302" },
+    { unit: "b", target: "0302" }
+  ]);
+
+  const result = Rules.resolveCombat(context, {
+    ...action,
+    advance_attacker: { unit: "b", target: "0302" }
+  });
+  assert.equal(result.legal, true, result.reason);
+  assert.deepEqual(result.details.effects.advanced, { unit: "b", to: "0302" });
+  assert.equal(state.units.a.hex, "0202");
+  assert.equal(state.units.b.hex, "0302");
+});
+
 test("attacker advance is limited to a vacated defender hex", () => {
   const state = baseState({
     phase: "axis_combat",

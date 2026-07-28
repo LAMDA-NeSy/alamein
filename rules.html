@@ -5,38 +5,146 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="Cache-Control" content="no-store">
     <meta http-equiv="Pragma" content="no-cache">
-    <title>El Alamein 权威规则原文</title>
-    <link rel="stylesheet" href="./styles.css?v=20260728-120">
+    <title>El Alamein 游戏规则书</title>
+    <link rel="stylesheet" href="./styles.css?v=20260728-126">
   </head>
-  <body class="rules-source-page">
-    <header class="rules-source-header">
-      <div>
-        <span>EL ALAMEIN · AUTHORITATIVE RULE SOURCE</span>
-        <h1>规则原文</h1>
-        <p>本项目只以你提供的中文翻译稿为规则依据。运行时配置、裁判与 AI 均须服从这份原文；文末“给 Codex 实现时建议抽象的数据结构”是实现建议，不属于正式规则。</p>
+  <body class="rules-page">
+    <main class="rules-shell rules-shell-wide">
+      <header class="rules-hero rules-hero-game">
+        <div class="rules-hero-main">
+          <span>El Alamein · Digital Game Manual</span>
+          <h1>游戏规则书</h1>
+          <p>面向实际游玩的规则手册。保留原文中影响操作、合法性与结算的规则，省略仅用于实体桌游准备、整理和纸面记录的说明。</p>
+          <nav class="rules-actions" aria-label="规则页操作">
+            <a href="./index.html?v=20260728-123">返回游戏</a>
+            <a href="./counters.html?v=20260728-123">棋子图册</a>
+            <a href="#section-4">回合顺序</a>
+            <a href="#section-9">战斗规则</a>
+            <a href="#section-17">胜利条件</a>
+            <a href="./docs/el_alamein_rules_cn_translation.md" download>下载规则原文</a>
+          </nav>
+        </div>
+        <aside class="rules-command-panel" aria-label="规则来源速览">
+          <div>
+            <b>唯一规则来源</b>
+            <strong>中文翻译稿</strong>
+          </div>
+          <div>
+            <b>正式规则</b>
+            <strong>1.0–18.0</strong>
+          </div>
+          <div>
+            <b>规则附录</b>
+            <strong>附录 A / B / D</strong>
+          </div>
+          <div>
+            <b>勘误处理</b>
+            <strong>保留原文勘误</strong>
+          </div>
+        </aside>
+      </header>
+
+      <section class="rules-source-notice" aria-label="规则来源说明">
+        <div>
+          <b>判定规则与原文同步</b>
+          <span id="ruleSourceStatus">正在载入 el_alamein_rules_cn_translation.md...</span>
+        </div>
+        <p>仅省略盒装组件、纸面图表、手工摆放与整理等实体说明；移动、战斗、撤退、堆叠、补给和胜利条件等判定规则保持原意。</p>
+      </section>
+
+      <section class="rules-play-strip" aria-label="规则章节速览">
+        <a href="#section-1">
+          <span>1.0–3.0</span>
+          <b>战场与单位</b>
+          <small>引言、游戏总体流程、地图、单位与状态。</small>
+        </a>
+        <a href="#section-4">
+          <span>4.0–8.0</span>
+          <b>顺序与移动</b>
+          <small>游戏顺序、移动、道路模式、控制区与堆叠。</small>
+        </a>
+        <a href="#section-9">
+          <span>9.0–12.0</span>
+          <b>战斗与雷区</b>
+          <small>战斗、战斗结果表、雷区与工兵单位。</small>
+        </a>
+        <a href="#section-13">
+          <span>13.0–18.0</span>
+          <b>补给与胜利</b>
+          <small>补给、孤立、道路、地图边缘、胜利条件与场景。</small>
+        </a>
+      </section>
+
+      <div class="rules-layout rules-layout-game">
+        <nav id="rulesToc" class="rules-toc rules-toc-game" aria-label="规则目录">
+          <div class="rules-toc-head">
+            <span>RULE INDEX</span>
+            <b>游戏规则目录</b>
+          </div>
+          <a class="glossary" href="#counter-guide"><span>GUIDE</span><b>如何看棋子</b></a>
+          <span class="rules-loading-line">正在生成目录...</span>
+        </nav>
+
+        <article class="rules-content">
+          <section id="counter-guide" class="rules-section rules-section-feature">
+            <div class="rules-section-head">
+              <span>GUIDE</span>
+              <h2>如何看棋子</h2>
+            </div>
+            <p>地图上的棋子代表部队或规则状态。先看阵营与兵种，再看底部的战斗强度和移动力；道路模式、补给、孤立和雷区等状态会进一步改变单位表现。</p>
+            <div class="counter-reading-panel">
+              <figure class="counter-reading-figure">
+                <div class="counter-diagram" aria-label="第 7 装甲单位棋子标注图">
+                  <div class="counter-diagram-piece">
+                    <img src="./mod_images/7-panzer.png" alt="第 7 装甲单位棋子，底部数值为 6-10">
+                    <i class="counter-mark counter-mark-name" aria-hidden="true"></i>
+                    <i class="counter-mark counter-mark-type" aria-hidden="true"></i>
+                    <i class="counter-mark counter-mark-combat" aria-hidden="true"></i>
+                    <i class="counter-mark counter-mark-move" aria-hidden="true"></i>
+                  </div>
+                  <span class="counter-leader counter-leader-name" aria-hidden="true"></span>
+                  <span class="counter-leader counter-leader-type" aria-hidden="true"></span>
+                  <span class="counter-leader counter-leader-combat" aria-hidden="true"></span>
+                  <span class="counter-leader counter-leader-move" aria-hidden="true"></span>
+                  <div class="counter-callout counter-callout-name"><b>番号 / 名称</b><small>第 7 装甲</small></div>
+                  <div class="counter-callout counter-callout-type"><b>兵种符号</b><small>装甲单位</small></div>
+                  <div class="counter-callout counter-callout-combat"><b>6</b><small>战斗强度</small></div>
+                  <div class="counter-callout counter-callout-move"><b>10</b><small>移动力</small></div>
+                </div>
+                <figcaption>装甲单位示例</figcaption>
+              </figure>
+              <div>
+                <dl>
+                  <div><dt>番号 / 名称</dt><dd>识别具体历史部队，例如第 7 装甲。</dd></div>
+                  <div><dt>兵种符号</dt><dd>决定单位适用装甲、侦察、步兵、工兵或补给等哪类规则。</dd></div>
+                  <div><dt>6（左侧）</dt><dd>战斗强度。攻击或防御时计入总战斗强度，并可能受到补给、地形、雷区和道路模式修正。</dd></div>
+                  <div><dt>10（右侧）</dt><dd>移动力。表示单位在一次移动阶段中最多可以花费的移动点。</dd></div>
+                </dl>
+              </div>
+            </div>
+            <div class="rules-counter-strip rules-counter-strip-guide">
+              <figure><img src="./mod_images/7-panzer.png" alt="装甲单位"><figcaption>机械化战斗单位</figcaption></figure>
+              <figure><img src="./mod_images/5-Ind-inf.png" alt="步兵单位"><figcaption>非机械化战斗单位</figcaption></figure>
+              <figure><img src="./mod_images/axis-engineers.png" alt="工兵单位"><figcaption>工兵</figcaption></figure>
+              <figure><img src="./mod_images/Axis-Supply-1.png" alt="补给单位"><figcaption>补给单位</figcaption></figure>
+              <figure><img src="./mod_images/mines-allies.png" alt="雷区标记"><figcaption>雷区状态</figcaption></figure>
+              <figure><img src="./mod_images/Axis-Road-Mode.png" alt="道路模式标记"><figcaption>道路模式状态</figcaption></figure>
+            </div>
+            <a class="rules-section-action" href="./counters.html?v=20260728-123">查看完整棋子图册</a>
+          </section>
+
+          <div id="rulesContent" class="rules-content rules-source-rendered" aria-live="polite">
+            <section class="rules-section rules-loading-card">
+              <div class="rules-section-head">
+                <span>LOADING</span>
+                <h2>正在载入游戏规则</h2>
+              </div>
+              <p>规则正文载入后会按原编号分章显示。</p>
+            </section>
+          </div>
+        </article>
       </div>
-      <nav aria-label="规则页操作">
-        <a href="./index.html?v=20260728-120">返回游戏</a>
-        <a href="./docs/el_alamein_rules_cn_translation.md" download>下载原文</a>
-      </nav>
-    </header>
-    <main class="rules-source-shell">
-      <div class="rules-source-status" id="ruleSourceStatus">正在载入权威规则原文...</div>
-      <pre id="ruleSource" class="rules-source-content" aria-live="polite"></pre>
     </main>
-    <script>
-      fetch("./docs/el_alamein_rules_cn_translation.md?v=20260728-120", { cache: "no-store" })
-        .then((response) => {
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          return response.text();
-        })
-        .then((source) => {
-          document.getElementById("ruleSource").textContent = source;
-          document.getElementById("ruleSourceStatus").textContent = "唯一权威来源 · el_alamein_rules_cn_translation.md";
-        })
-        .catch((error) => {
-          document.getElementById("ruleSourceStatus").textContent = `规则原文载入失败：${error.message}`;
-        });
-    </script>
+    <script src="./rules.js?v=20260728-126"></script>
   </body>
 </html>

@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-store">
     <meta http-equiv="Pragma" content="no-cache">
     <title>Alamein Judge Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=20260728-120">
+    <link rel="stylesheet" href="./styles.css?v=20260728-123">
   </head>
   <body>
     <section id="setupScreen" class="setup-screen" aria-label="开局配置">
@@ -33,7 +33,7 @@
           </div>
           <div class="setup-badge">
             <span>Judge Studio</span>
-            <strong id="setupVersionText">v2026.07.28.120</strong>
+            <strong id="setupVersionText">v2026.07.28.123</strong>
           </div>
         </div>
 
@@ -104,7 +104,7 @@
                   </select>
                 </label>
                 <section id="setupScenarioCard" class="setup-scenario-card"></section>
-                <a id="setupRulesBtn" class="setup-rules-button" href="./rules.html?v=20260728-120" target="_blank" rel="noopener">查看规则原文</a>
+                <a id="setupRulesBtn" class="setup-rules-button" href="./rules.html?v=20260728-126" target="_blank" rel="noopener">查看规则书</a>
                 <div class="setup-debug-fields" hidden>
                   <input id="setupTurnInput" type="number" min="1" value="1">
                   <select id="setupPhaseSelect"></select>
@@ -176,11 +176,11 @@
         <div class="topbar-brand">
           <h1 title="Alamein Judge Studio">Alamein</h1>
           <span class="topbar-theater">WESTERN DESERT · HQ</span>
-          <p><span id="appVersionText" class="version-pill">v2026.07.28.120</span></p>
+          <p><span id="appVersionText" class="version-pill">v2026.07.28.123</span></p>
         </div>
         <div class="top-actions">
           <button id="returnHomeBtn" class="topbar-home-button" type="button" aria-label="保存并返回首页" title="保存当前对局并返回首页"><span aria-hidden="true">←</span><b>首页</b></button>
-          <a class="topbar-rule-link" href="./rules.html?v=20260728-120" target="_blank" rel="noopener">查看规则原文</a>
+          <a class="topbar-rule-link" href="./rules.html?v=20260728-126" target="_blank" rel="noopener">查看规则书</a>
           <button id="sidePanelToggleBtn" class="icon-button" type="button" aria-label="收起右侧面板" title="收起右侧面板" aria-pressed="false"><span aria-hidden="true">◨</span></button>
           <button id="gameSettingsBtn" class="icon-button" type="button" aria-label="游戏设置" title="游戏设置"><span aria-hidden="true">⚙</span></button>
         </div>
@@ -341,8 +341,7 @@
             <div class="workflow">
               <section id="combatActionableUnits" class="actionable-units"></section>
               <section id="combatWorkflowCue" class="workflow-cue"></section>
-              <section id="latestCombatReport" class="latest-combat-report hidden" aria-live="assertive"></section>
-              <section class="workflow-step combat-command-strip">
+              <section id="combatCommandStrip" class="workflow-step combat-command-strip hidden">
                 <div id="combatSelectionSummary" class="combat-selection-summary empty"></div>
                 <section id="clearMineSection" class="mine-command-strip action-hidden" aria-live="polite">
                   <div class="mine-command-copy">
@@ -375,19 +374,13 @@
                 <div id="combatOutput" class="feedback-output"></div>
                 </section>
                 <div id="combatTargetList" class="combat-target-list"></div>
-                <details class="workflow-manual">
-                  <summary>手动战斗</summary>
-                  <label>攻击单位，空格或逗号分隔
-                    <input id="combatAttackersInput" placeholder="选择单位后可自动填入">
-                  </label>
-                  <label>防御格，空格或逗号分隔
-                    <input id="combatDefendersInput" placeholder="例如 0304">
-                  </label>
-                </details>
+                <input id="combatAttackersInput" type="hidden" value="">
+                <input id="combatDefendersInput" type="hidden" value="">
                 <div id="combatResolveSection" class="combat-resolution-area action-hidden">
                   <div id="combatCrtPreview" class="combat-crt-preview hidden"></div>
                   <div id="combatRollReveal" class="combat-roll-reveal hidden" aria-live="assertive"></div>
                   <div id="combatRetreatPlanner" class="combat-retreat-planner hidden" aria-live="polite"></div>
+                  <div id="combatAdvancePlanner" class="combat-advance-planner hidden" aria-live="polite"></div>
                   <input id="combatResolveDieSelect" type="hidden" value="">
                   <div class="button-row workflow-step-actions">
                     <button id="toggleCombatTableBtn" class="action-hidden secondary-action" type="button" aria-expanded="false">查看结果表</button>
@@ -395,11 +388,11 @@
                     <button id="undoActionBtn" class="action-hidden quiet-action">撤销最近动作</button>
                   </div>
                 </div>
-                <details id="combatReportDrawer" class="combat-report-drawer">
-                  <summary>战报记录 <span id="combatReportCount">0</span></summary>
-                  <div id="combatReportList" class="combat-report-list"></div>
-                </details>
               </section>
+              <details id="combatReportDrawer" class="combat-report-drawer">
+                <summary><b>战报记录</b><em id="combatReportLatest"></em><span id="combatReportCount">0</span></summary>
+                <div id="combatReportList" class="combat-report-list"></div>
+              </details>
             </div>
           </section>
 
@@ -823,8 +816,8 @@
       </div>
     </section>
 
-    <script src="./ai_config.js?v=20260728-120"></script>
-    <script src="./rule_engine.js?v=20260728-120"></script>
-    <script src="./app.js?v=20260728-120"></script>
+    <script src="./ai_config.js?v=20260728-123"></script>
+    <script src="./rule_engine.js?v=20260728-123"></script>
+    <script src="./app.js?v=20260728-123"></script>
   </body>
 </html>

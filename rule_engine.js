@@ -1487,17 +1487,69 @@
     return eliminated;
   }
 
-  function exchangeLosses(ctx, attackerIds, defenderIds) {
+  function exchangeAttackerLossIds(ctx, attackerIds, defenderIds) {
     const defenderStrength = defenderIds.reduce((sum, id) => sum + Number(ctx.state.units[id]?.defense || ctx.state.units[id]?.attack || 0), 0);
-    const eliminatedDefenders = eliminateUnits(ctx, defenderIds, "exchange");
     let removed = 0;
     const eliminatedAttackers = [];
     for (const id of [...attackerIds].sort((a, b) => Number(ctx.state.units[b]?.attack || 0) - Number(ctx.state.units[a]?.attack || 0))) {
       if (removed >= defenderStrength) break;
       removed += Number(ctx.state.units[id]?.attack || 0);
-      eliminatedAttackers.push(...eliminateUnits(ctx, [id], "exchange"));
+      eliminatedAttackers.push(id);
     }
+    return eliminatedAttackers;
+  }
+
+  function exchangeLosses(ctx, attackerIds, defenderIds) {
+    const eliminatedDefenders = eliminateUnits(ctx, defenderIds, "exchange");
+    const eliminatedAttackerIds = exchangeAttackerLossIds(ctx, attackerIds, defenderIds);
+    const eliminatedAttackers = eliminateUnits(ctx, eliminatedAttackerIds, "exchange");
     return { eliminated_attackers: eliminatedAttackers, eliminated_defenders: eliminatedDefenders };
+  }
+
+  function combatAdvanceOptions(ctx, action) {
+    const verdict = checkCombat(ctx, action);
+    if (!verdict.legal) return { legal: false, available: false, reason: verdict.reason, options: [] };
+    const outcome = verdict.details.outcome;
+    if (!/^D[123]$/.test(outcome || "") && outcome !== "De" && outcome !== "Ex") {
+      return { legal: true, available: false, reason: "本次战斗结果不允许进攻方战后推进", options: [] };
+    }
+
+    const eliminatedAttackers = outcome === "Ex"
+      ? new Set(exchangeAttackerLossIds(ctx, verdict.details.attackers, verdict.details.defenders))
+      : new Set();
+    const candidateIds = verdict.details.attackers.filter((id) => !eliminatedAttackers.has(id));
+    const options = [];
+    for (const target of verdict.details.defender_hexes) {
+      const tags = hexTags(ctx, target);
+      if (tags.includes("hill_or_ridge") || tags.includes("depression")) continue;
+      const side = ctx.state.units[candidateIds.find((id) => ctx.state.units[id])]?.side;
+      if (side && enemyMinesAt(ctx, side, target).length) continue;
+      for (const id of candidateIds) {
+        const unit = ctx.state.units[id];
+        if (!unit || unit.eliminated || !neighbors(unit.hex).includes(target)) continue;
+        const origin = normalizeHex(unit.hex);
+        const projected = clone(ctx.state);
+        for (const defenderId of verdict.details.defenders) {
+          if (projected.units[defenderId]) projected.units[defenderId].eliminated = true;
+        }
+        for (const attackerId of eliminatedAttackers) {
+          if (projected.units[attackerId]) projected.units[attackerId].eliminated = true;
+        }
+        projected.units[id].hex = normalizeHex(target);
+        projected.units[id].road_mode = false;
+        projected.units[id].road_facing = null;
+        projected.units[id].facing = null;
+        projected.units[id].temporary_overstack = false;
+        if (!checkStacking(ctx, projected, { hexes: [origin, target] }).legal) continue;
+        options.push({ unit: id, target: normalizeHex(target) });
+      }
+    }
+    return {
+      legal: true,
+      available: options.length > 0,
+      reason: options.length ? "可以选择一个参战单位战后推进" : "没有合法的战后推进选择",
+      options
+    };
   }
 
   function advanceAfterCombat(ctx, unitIds, targetHex, options = {}) {
@@ -1538,7 +1590,7 @@
     const target = side === "attacker"
       ? (action.advance_attacker_hex || action.attacker_advance_hex)
       : (action.advance_defender_hex || action.defender_advance_hex);
-    if (side === "defender" && !direct && !unit && !target) return { enabled: false };
+    if (!direct && !unit && !target) return { enabled: false };
     return { enabled: true, unit, target };
   }
 
@@ -1851,6 +1903,7 @@
     combatOddsColumn,
     adjacentCombats,
     checkCombat,
+    combatAdvanceOptions,
     resolveCombat,
     clearMine,
     legalRetreatHex,
