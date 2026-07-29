@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-store">
     <meta http-equiv="Pragma" content="no-cache">
     <title>Alamein Judge Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=20260728-123">
+    <link rel="stylesheet" href="./styles.css?v=20260729-136">
   </head>
   <body>
     <section id="setupScreen" class="setup-screen" aria-label="开局配置">
@@ -33,7 +33,7 @@
           </div>
           <div class="setup-badge">
             <span>Judge Studio</span>
-            <strong id="setupVersionText">v2026.07.28.123</strong>
+            <strong id="setupVersionText">v2026.07.29.128</strong>
           </div>
         </div>
 
@@ -149,9 +149,28 @@
               <div class="setup-actions">
                 <button id="setupStartBtn" class="primary-action">开始游戏</button>
                 <button id="setupBackHomeBtn">返回主菜单</button>
+                <p id="setupStartError" class="setup-start-error" role="alert" hidden></p>
               </div>
             </section>
           </div>
+        </div>
+
+        <div id="setupLoadPanel" class="setup-mode-panel hidden">
+          <section class="setup-load-shell" aria-label="选择存档">
+            <header class="setup-archive-head">
+              <div>
+                <span>Continue Campaign</span>
+                <h2>选择存档</h2>
+                <p>继续征程</p>
+              </div>
+              <button id="setupLoadBackBtn" type="button" class="secondary-action">返回主菜单</button>
+            </header>
+            <div id="setupLoadList" class="setup-load-list" aria-label="可加载的存档"></div>
+            <footer class="setup-load-actions">
+              <p id="setupLoadStatus" aria-live="polite">请选择一个存档。</p>
+              <button id="setupLoadConfirmBtn" type="button" class="primary-action" disabled>加载选中的存档</button>
+            </footer>
+          </section>
         </div>
 
         <div id="setupArchivePanel" class="setup-mode-panel hidden">
@@ -176,7 +195,7 @@
         <div class="topbar-brand">
           <h1 title="Alamein Judge Studio">Alamein</h1>
           <span class="topbar-theater">WESTERN DESERT · HQ</span>
-          <p><span id="appVersionText" class="version-pill">v2026.07.28.123</span></p>
+          <p><span id="appVersionText" class="version-pill">v2026.07.29.128</span></p>
         </div>
         <div class="top-actions">
           <button id="returnHomeBtn" class="topbar-home-button" type="button" aria-label="保存并返回首页" title="保存当前对局并返回首页"><span aria-hidden="true">←</span><b>首页</b></button>
@@ -818,6 +837,6 @@
 
     <script src="./ai_config.js?v=20260728-123"></script>
     <script src="./rule_engine.js?v=20260728-123"></script>
-    <script src="./app.js?v=20260728-123"></script>
+    <script src="./app.js?v=20260729-136"></script>
   </body>
 </html>

@@ -57,6 +57,7 @@ const DEFAULT_RULES = {
 };
 
 const FALLBACK_STATE = {
+  scenario: "july",
   turn: 1,
   phase: "axis_initial_movement",
   active_side: "axis",
@@ -96,8 +97,8 @@ const SETUP_SCENE_INTEL = {
   }
 };
 
-const APP_VERSION = "v2026.07.28.123";
-const ASSET_VERSION = "20260728-123";
+const APP_VERSION = "v2026.07.29.136";
+const ASSET_VERSION = "20260729-136";
 const SAVE_SLOTS_STORAGE_KEY = "alamein_judge_studio.save_slots.v1";
 const AI_PROFILES_STORAGE_KEY = "alamein_judge_studio.ai_profiles.v1";
 const SIDE_PANEL_COLLAPSED_KEY = "alamein_judge_studio.side_panel_collapsed.v1";
@@ -196,6 +197,8 @@ let aiVictoryImpactCache = null;
 let aiSupplyScorePhaseCache = null;
 let aiContextSupplyCache = null;
 let activeSaveSlotId = null;
+let selectedSetupSaveSlotId = null;
+const expandedSetupSaveCampaigns = new Set();
 
 const el = (id) => document.getElementById(id);
 const RulesEngine = globalThis.AlameinRules;
@@ -1005,6 +1008,58 @@ function scenarioDisplayName(scenario = state.scenario) {
     october: "October 18.3 - Second Battle"
   };
   return labels[scenario] || String(scenario || "Custom");
+}
+
+function standardScenario(value) {
+  const scenario = String(value || "").toLowerCase();
+  return SCENARIO_URLS[scenario] ? scenario : null;
+}
+
+function inferScenarioFromState(sourceState = {}) {
+  const direct = standardScenario(sourceState.scenario);
+  if (direct) return direct;
+  const unitIds = Object.keys(sourceState.units || {});
+  const prefixCounts = ["july", "september", "october"].map((scenario) => ({
+    scenario,
+    count: unitIds.filter((id) => String(id).toLowerCase().startsWith(`${scenario}-`)).length
+  })).sort((a, b) => b.count - a.count);
+  if (prefixCounts[0]?.count > 0) return prefixCounts[0].scenario;
+  const legacyJulyFallbackIds = ["axis-2307", "axis-2308", "axis-2713", "axis-2810"];
+  if (legacyJulyFallbackIds.filter((id) => unitIds.includes(id)).length >= 2) return "july";
+  const meta = sourceState.scenario_meta || {};
+  const searchable = [
+    sourceState.source,
+    meta.scenario,
+    meta.name,
+    meta.operation,
+    ...(sourceState.game_log || []).slice(0, 6).map((entry) => entry.summary)
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (/\boctober\b|18\.3|second battle|第二次阿拉曼/.test(searchable)) return "october";
+  if (/\bseptember\b|18\.2|alam.?halfa|阿拉姆哈勒法/.test(searchable)) return "september";
+  if (/\bjuly\b|18\.1|first battle|第一次阿拉曼/.test(searchable)) return "july";
+  const startingVp = Number(meta.starting_vp);
+  if (startingVp === -20 || Number(meta.final_turn) === 15 || Number(sourceState.turn) > 7) return "october";
+  if (startingVp === 35) return "september";
+  if (startingVp === 25) return "july";
+  return "custom";
+}
+
+function saveSlotCampaign(slot = {}) {
+  return standardScenario(slot.campaign)
+    || standardScenario(slot.scenario)
+    || inferScenarioFromState(slot.state || {});
+}
+
+function saveSlotIsCustom(slot = {}) {
+  return !standardScenario(slot.scenario);
+}
+
+function saveSlotDisplayName(slot, campaign = saveSlotCampaign(slot)) {
+  const fallback = `${scenarioShortName(campaign)} Turn ${slot.turn || 1}`;
+  const name = slot.name || fallback;
+  if (!saveSlotIsCustom(slot) || campaign === "custom") return name;
+  if (/^custom\b/i.test(name)) return name.replace(/^custom\b/i, scenarioShortName(campaign));
+  return `${scenarioShortName(campaign)} · 自定义 · ${name}`;
 }
 
 function victoryStatusSummary() {
@@ -5283,15 +5338,19 @@ function returnToHome() {
 function renderSetupHero() {
   const home = setupMode === "home";
   const archive = setupMode === "archive";
-  if (el("setupHeroTitle")) el("setupHeroTitle").textContent = home ? "Alamein" : archive ? "战役档案" : "开局配置";
+  const load = setupMode === "load";
+  if (el("setupHeroTitle")) el("setupHeroTitle").textContent = home ? "Alamein" : archive ? "战役档案" : load ? "选择存档" : "开局配置";
   if (el("setupHeroSubtitle")) {
     el("setupHeroSubtitle").textContent = home
       ? "North African Campaign"
       : archive
       ? "After Action Records"
+      : load
+      ? "Continue Campaign"
       : "战役、阶段、双方角色";
   }
-  syncSetupSceneIntel(el("setupScenarioSelect")?.value || state.scenario || "july");
+  const selectedSlot = activeSaveSlots().find((slot) => slot.id === selectedSetupSaveSlotId);
+  syncSetupSceneIntel(selectedSlot?.scenario || el("setupScenarioSelect")?.value || state.scenario || "july");
 }
 
 function openSetupScenario(scenario) {
@@ -5300,8 +5359,13 @@ function openSetupScenario(scenario) {
   select.value = scenario;
   if (el("setupTurnInput")) el("setupTurnInput").value = setupScenarioTurnDefault(scenario);
   if (el("setupPhaseSelect")) el("setupPhaseSelect").value = setupScenarioPhaseDefault(scenario);
+  setSetupStartError();
   setSetupMode("new");
   renderSetupSummary();
+}
+
+function openNewGameSetup() {
+  openSetupScenario("july");
 }
 
 function scheduleGameMapPreload() {
@@ -5318,18 +5382,22 @@ function scheduleGameMapPreload() {
 }
 
 function setSetupMode(mode) {
-  setupMode = mode === "new" ? "new" : mode === "archive" ? "archive" : "home";
+  setupMode = mode === "new" ? "new" : mode === "load" ? "load" : mode === "archive" ? "archive" : "home";
   el("setupHomePanel")?.classList.toggle("hidden", setupMode !== "home");
   el("setupNewGamePanel")?.classList.toggle("hidden", setupMode !== "new");
+  el("setupLoadPanel")?.classList.toggle("hidden", setupMode !== "load");
   el("setupArchivePanel")?.classList.toggle("hidden", setupMode !== "archive");
+  if (el("setupScreen")) el("setupScreen").dataset.mode = setupMode;
   renderSetupHero();
   if (setupMode === "new") scheduleGameMapPreload();
+  if (setupMode === "load") renderSetupLoadList();
   if (setupMode === "archive") renderSetupArchive();
 }
 
 function syncSetupControls() {
   setSetupMode(setupMode);
   renderSetupLatestSave();
+  renderSetupLoadList();
   renderSetupArchive();
   if (el("setupScenarioSelect")) el("setupScenarioSelect").value = state.scenario || el("scenarioSelect")?.value || "july";
   if (el("setupTurnInput")) el("setupTurnInput").value = state.turn || setupScenarioTurnDefault(el("setupScenarioSelect")?.value || "july");
@@ -5374,6 +5442,13 @@ function applySetupOptionsToState() {
   syncAiAutoControls();
 }
 
+function setSetupStartError(message = "") {
+  const target = el("setupStartError");
+  if (!target) return;
+  target.textContent = message;
+  target.hidden = !message;
+}
+
 async function startFromSetup() {
   const startButton = el("setupStartBtn");
   if (startButton?.disabled) return;
@@ -5384,8 +5459,9 @@ async function startFromSetup() {
   }
   await new Promise((resolve) => requestAnimationFrame(resolve));
   const scenario = el("setupScenarioSelect")?.value || "july";
+  setSetupStartError();
   try {
-    const nextState = await loadJson(SCENARIO_URLS[scenario] || SCENARIO_URLS.july, FALLBACK_STATE);
+    const nextState = await loadScenarioState(scenario);
     applyStateDefaults(nextState);
     applySetupOptionsToState();
     logEvent("setup", `开局配置：${scenarioDisplayName(scenario)} T${state.turn} ${phaseDisplayName(state.phase)}`, { scenario, player_control: state.player_control, ai_autoplay: state.ai_autoplay });
@@ -5405,6 +5481,10 @@ async function startFromSetup() {
     hideSetupScreen();
     focusOpeningView({ phaseTab: true });
     scheduleAiAutoplay();
+  }
+  catch (error) {
+    console.error(`Unable to start scenario ${scenario}`, error);
+    setSetupStartError(`无法载入${scenarioDisplayName(scenario)}。请检查场景文件后重试；游戏未进入测试局面。`);
   }
   finally {
     if (startButton) {
@@ -5464,7 +5544,8 @@ function writeSaveSlots(slots) {
 }
 
 function autoSaveSlotName() {
-  return `${scenarioShortName(state.scenario)} 自动存档`;
+  const campaign = inferScenarioFromState(state);
+  return campaign === "custom" ? "未识别战役存档" : `${scenarioShortName(campaign)} 自动存档`;
 }
 
 function buildSaveSlot(id, name, options = {}) {
@@ -5472,6 +5553,8 @@ function buildSaveSlot(id, name, options = {}) {
   const savedAt = new Date().toISOString();
   const victory = state.final_victory?.final ? state.final_victory : checkVictory();
   const archived = options.archived ?? previous.archived ?? (!!state.game_completed || !!victory.final);
+  const snapshot = structuredClone(state);
+  const campaign = inferScenarioFromState(snapshot);
   return {
     ...previous,
     id,
@@ -5480,12 +5563,16 @@ function buildSaveSlot(id, name, options = {}) {
     created_at: previous.created_at || savedAt,
     saved_at: savedAt,
     scenario: state.scenario || "custom",
+    campaign,
     turn: Number(state.turn || 1),
     phase: state.phase,
+    victory_points: standardScenario(state.scenario)
+      ? Number(victory.victory_points || 0)
+      : saveSlotVictoryPoints({ scenario: state.scenario, campaign, state: snapshot }),
     archived,
     completed_at: archived ? (state.completed_at || previous.completed_at || savedAt) : null,
     victory: archived ? structuredClone(victory) : null,
-    state: structuredClone(state)
+    state: snapshot
   };
 }
 
@@ -5519,16 +5606,18 @@ function saveCurrentGameOnExit() {
 function slotLabel(slot) {
   if (!slot) return "";
   const when = slot.saved_at ? new Date(slot.saved_at).toLocaleString() : "";
-  const title = slot.name || `${scenarioDisplayName(slot.scenario)} Turn ${slot.turn || 1}`;
-  return `${title} · ${scenarioDisplayName(slot.scenario)} T${slot.turn || 1} · ${phaseDisplayName(slot.phase)}${when ? ` · ${when}` : ""}`;
+  const campaign = saveSlotCampaign(slot);
+  const title = saveSlotDisplayName(slot, campaign);
+  return `${title} · ${scenarioDisplayName(campaign)} T${slot.turn || 1} · ${phaseDisplayName(slot.phase)}${when ? ` · ${when}` : ""}`;
 }
 
 function latestSaveSummary() {
   const latest = activeSaveSlots()[0];
   if (!latest) return "暂无本地存档，进入游戏后可在设置里保存。";
   const when = latest.saved_at ? new Date(latest.saved_at).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
-  const title = latest.name || `${scenarioShortName(latest.scenario)} Turn ${latest.turn || 1}`;
-  return `最近：${title} · ${scenarioDisplayName(latest.scenario)} · T${latest.turn || 1} · ${phaseShortLabel(latest.phase)}${when ? ` · ${when}` : ""}`;
+  const campaign = saveSlotCampaign(latest);
+  const title = saveSlotDisplayName(latest, campaign);
+  return `最近：${title} · ${scenarioDisplayName(campaign)} · T${latest.turn || 1} · ${phaseShortLabel(latest.phase)}${when ? ` · ${when}` : ""}`;
 }
 
 function renderSetupLatestSave() {
@@ -5541,10 +5630,155 @@ function renderSetupLatestSave() {
     button.disabled = !hasSaves;
     button.classList.toggle("disabled", !hasSaves);
     button.classList.toggle("load-available", hasSaves);
-    if (latest) button.dataset.saveScenario = latest.scenario || "july";
+    if (latest) button.dataset.saveScenario = saveSlotCampaign(latest);
     else delete button.dataset.saveScenario;
-    button.title = hasSaves ? "读取最近保存的局面" : "暂无可加载的本地存档";
+    button.title = hasSaves ? "选择一个存档继续游戏" : "暂无可加载的本地存档";
   }
+}
+
+function setupSaveTimestamp(slot) {
+  if (!slot?.saved_at) return "保存时间未知";
+  const savedAt = new Date(slot.saved_at);
+  if (Number.isNaN(savedAt.getTime())) return "保存时间未知";
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${savedAt.getFullYear()}.${pad(savedAt.getMonth() + 1)}.${pad(savedAt.getDate())} · ${pad(savedAt.getHours())}:${pad(savedAt.getMinutes())}`;
+}
+
+function saveSlotVictoryPoints(slot) {
+  if (Number.isFinite(Number(slot?.victory_points))) return Number(slot.victory_points);
+  if (!slot?.state) return 0;
+  try {
+    const scoreState = structuredClone(slot.state);
+    const campaign = saveSlotCampaign(slot);
+    if (standardScenario(campaign)) scoreState.scenario = campaign;
+    const victory = RulesEngine.checkVictory(RulesEngine.createContext({ state: scoreState, rules, terrain }));
+    return Number(victory.victory_points || 0);
+  }
+  catch {
+    return Number(slot.state?.victory_points || 0);
+  }
+}
+
+function setupLoadGroupMeta(campaign) {
+  const groups = {
+    july: { short: "JUL", title: "第一次阿拉曼战役", subtitle: "July 18.1" },
+    september: { short: "SEP", title: "阿拉姆哈勒法战役", subtitle: "September 18.2" },
+    october: { short: "OCT", title: "第二次阿拉曼战役", subtitle: "October 18.3" },
+    custom: { short: "OTHER", title: "未识别战役", subtitle: "需要检查存档来源" }
+  };
+  return groups[campaign] || groups.custom;
+}
+
+function setupLoadControllerLabel(value) {
+  if (value === "heuristic_ai") return "简单 AI";
+  if (value === "rules_ai") return "复杂 AI";
+  if (value === "external_ai") return "模型 AI";
+  return "玩家";
+}
+
+function renderSetupLoadCard(slot, latestId) {
+  const campaign = saveSlotCampaign(slot);
+  const selected = slot.id === selectedSetupSaveSlotId;
+  const controls = slot.state?.player_control || {};
+  const badge = `${scenarioShortName(campaign)}${slot.id === latestId ? " · 最新" : ""}`;
+  const phaseSide = String(slot.phase || "").startsWith("axis_")
+    ? "Axis"
+    : String(slot.phase || "").startsWith("allies_")
+    ? "Allies"
+    : "";
+  return `
+    <button type="button" class="setup-load-card ${escapeHtml(campaign)} ${selected ? "selected" : ""}" data-setup-load-slot="${escapeHtml(slot.id)}" aria-pressed="${selected}">
+      <span class="setup-load-card-main">
+        <small>${escapeHtml(badge)}</small>
+        <strong>${escapeHtml(saveSlotDisplayName(slot, campaign))}</strong>
+        <em>${escapeHtml(setupSaveTimestamp(slot))}</em>
+      </span>
+      <span class="setup-load-card-facts">
+        <span class="setup-load-score"><b>${escapeHtml(saveSlotVictoryPoints(slot))}</b> Axis VP</span>
+        <span><b>T${escapeHtml(slot.turn || 1)}</b>回合</span>
+        <span><b>${escapeHtml(phaseShortLabel(slot.phase))}</b>${phaseSide ? `${escapeHtml(phaseSide)} · ` : ""}阶段</span>
+        <span class="setup-load-controller-row">
+          <span class="axis"><small>AXIS</small><b>${escapeHtml(setupLoadControllerLabel(controls.axis || "human"))}</b></span>
+          <span class="allies"><small>ALLIES</small><b>${escapeHtml(setupLoadControllerLabel(controls.allies || "human"))}</b></span>
+        </span>
+      </span>
+    </button>
+  `;
+}
+
+function renderSetupLoadList() {
+  const slots = activeSaveSlots();
+  const list = el("setupLoadList");
+  const confirm = el("setupLoadConfirmBtn");
+  const status = el("setupLoadStatus");
+  if (!list) return;
+  if (selectedSetupSaveSlotId && !slots.some((slot) => slot.id === selectedSetupSaveSlotId)) {
+    selectedSetupSaveSlotId = null;
+  }
+  if (!slots.length) {
+    list.innerHTML = `
+      <div class="setup-archive-empty">
+        <b>暂无可加载的存档</b>
+        <span>开始一场战役后，游戏会在返回首页时自动保存。</span>
+      </div>
+    `;
+  }
+  else {
+    const latestId = slots[0]?.id;
+    const groups = new Map(["july", "september", "october", "custom"].map((campaign) => [campaign, []]));
+    for (const slot of slots) groups.get(saveSlotCampaign(slot) || "custom").push(slot);
+    list.innerHTML = [...groups.entries()].filter(([campaign, groupSlots]) => campaign !== "custom" || groupSlots.length).map(([campaign, groupSlots]) => {
+      const meta = setupLoadGroupMeta(campaign);
+      const hasMore = groupSlots.length > 3;
+      const expanded = hasMore && expandedSetupSaveCampaigns.has(campaign);
+      const visibleSlots = expanded ? groupSlots : groupSlots.slice(0, 3);
+      const hiddenCount = Math.max(0, groupSlots.length - visibleSlots.length);
+      return `
+        <section class="setup-load-group ${escapeHtml(campaign)}">
+          <header class="setup-load-group-head">
+            <span>${escapeHtml(meta.short)}</span>
+            <strong>${escapeHtml(meta.title)}</strong>
+            <small>${escapeHtml(meta.subtitle)} · ${groupSlots.length ? `${groupSlots.length} 个存档` : "暂无存档"}</small>
+          </header>
+          <div class="setup-load-group-grid">${groupSlots.length
+            ? `${visibleSlots.map((slot) => renderSetupLoadCard(slot, latestId)).join("")}${hasMore
+              ? `<button type="button" class="setup-load-more" data-setup-load-more="${escapeHtml(campaign)}" aria-expanded="${expanded}">${expanded ? "收起" : `更多 ${hiddenCount} 个存档`}</button>`
+              : ""}`
+            : `<div class="setup-load-group-empty">暂无该战役存档。开始该战役后，返回首页时会自动保存。</div>`}
+          </div>
+        </section>
+      `;
+    }).join("");
+  }
+  if (confirm) confirm.disabled = !selectedSetupSaveSlotId;
+  if (status) {
+    const selected = slots.find((slot) => slot.id === selectedSetupSaveSlotId);
+    status.textContent = selected ? `已选择：${slotLabel(selected)}` : slots.length ? "请选择一个存档。" : "当前没有可加载的存档。";
+  }
+}
+
+function openSetupLoad() {
+  if (!activeSaveSlots().length) return;
+  selectedSetupSaveSlotId = null;
+  expandedSetupSaveCampaigns.clear();
+  setSetupMode("load");
+}
+
+function toggleSetupLoadCampaign(campaign) {
+  if (!campaign) return;
+  const list = el("setupLoadList");
+  const scrollTop = list?.scrollTop || 0;
+  if (expandedSetupSaveCampaigns.has(campaign)) expandedSetupSaveCampaigns.delete(campaign);
+  else expandedSetupSaveCampaigns.add(campaign);
+  renderSetupLoadList();
+  if (list) list.scrollTop = scrollTop;
+}
+
+function selectSetupSaveSlot(id) {
+  if (!activeSaveSlots().some((slot) => slot.id === id)) return;
+  selectedSetupSaveSlotId = id;
+  renderSetupLoadList();
+  renderSetupHero();
 }
 
 function archivedVictory(slot) {
@@ -5635,10 +5869,11 @@ function renderSettingsLatestSave() {
     return;
   }
   const when = latest.saved_at ? new Date(latest.saved_at).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+  const campaign = saveSlotCampaign(latest);
   target.innerHTML = `
     <span>最近存档</span>
-    <b>${escapeHtml(latest.name || `${scenarioShortName(latest.scenario)} Turn ${latest.turn || 1}`)}</b>
-    <small>${escapeHtml(scenarioDisplayName(latest.scenario))} · T${escapeHtml(latest.turn || 1)} · ${escapeHtml(phaseDisplayName(latest.phase))}${when ? ` · ${escapeHtml(when)}` : ""}</small>
+    <b>${escapeHtml(saveSlotDisplayName(latest, campaign))}</b>
+    <small>${escapeHtml(scenarioDisplayName(campaign))} · T${escapeHtml(latest.turn || 1)} · ${escapeHtml(phaseDisplayName(latest.phase))}${when ? ` · ${escapeHtml(when)}` : ""}</small>
     <button id="loadLatestSlotBtn" type="button" class="secondary-action">读取最近存档</button>
   `;
 }
@@ -5684,7 +5919,7 @@ function renderSaveSlotSelect(selectId, emptyLabel = "新存档槽") {
 
 function renderSaveSlots(options = {}) {
   renderSaveSlotSelect("saveSlotSelect", "新存档槽");
-  renderSaveSlotSelect("setupSaveSlotSelect", "选择一个存档");
+  renderSetupLoadList();
   if (activeSaveSlotId && el("saveSlotSelect") && activeSaveSlots().some((slot) => slot.id === activeSaveSlotId)) {
     el("saveSlotSelect").value = activeSaveSlotId;
   }
@@ -5697,7 +5932,9 @@ function renderSaveSlots(options = {}) {
 }
 
 function currentSaveSlotName() {
-  return el("saveSlotNameInput")?.value.trim() || `${scenarioShortName(state.scenario)} Turn ${state.turn || 1} ${phaseDisplayName(state.phase)}`;
+  const campaign = inferScenarioFromState(state);
+  const scenario = scenarioShortName(campaign);
+  return el("saveSlotNameInput")?.value.trim() || `${scenario} Turn ${state.turn || 1} ${phaseDisplayName(state.phase)}`;
 }
 
 function saveCurrentSlot() {
@@ -5741,11 +5978,15 @@ function loadLatestSlot() {
 function loadSetupSelectedSlot() {
   const slots = activeSaveSlots();
   if (!slots.length) {
-    alert("还没有可加载的存档。进入游戏后可在设置页保存局面。");
+    renderSetupLoadList();
     return;
   }
-  const selectedId = el("setupSaveSlotSelect")?.value || slots[0].id;
-  loadSlotById(selectedId, { outputId: "setupSaveOutput", hideSetup: true });
+  if (!selectedSetupSaveSlotId) {
+    renderSetupLoadList();
+    return;
+  }
+  loadSlotById(selectedSetupSaveSlotId, { outputId: "saveOutput", hideSetup: true });
+  selectedSetupSaveSlotId = null;
 }
 
 function deleteSelectedSlot() {
@@ -9948,13 +10189,32 @@ async function autoPlayAi(maxSteps = 80) {
 
 async function loadJson(url, fallback) {
   try {
-    const response = await fetch(versionedLocalUrl(url), { cache: "no-store" });
-    if (!response.ok) throw new Error(response.statusText);
-    return await response.json();
+    return await fetchJson(url);
   }
-  catch {
+  catch (error) {
+    console.warn(`Unable to load ${url}; using bundled defaults`, error);
     return structuredClone(fallback);
   }
+}
+
+async function fetchJson(url) {
+  const response = await fetch(versionedLocalUrl(url), { cache: "no-store" });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`.trim());
+  return await response.json();
+}
+
+async function loadScenarioState(name) {
+  const scenario = SCENARIO_URLS[name] ? name : "july";
+  const nextState = await fetchJson(SCENARIO_URLS[scenario]);
+  const unitIds = Object.keys(nextState?.units || {});
+  const valid = nextState
+    && nextState.scenario === scenario
+    && Number.isFinite(Number(nextState.turn))
+    && typeof nextState.phase === "string"
+    && unitIds.length > 0
+    && unitIds.some((id) => id.startsWith(`${scenario}-`));
+  if (!valid) throw new Error(`Invalid ${scenario} scenario data`);
+  return nextState;
 }
 
 function applyStateDefaults(nextState) {
@@ -10055,15 +10315,21 @@ function syncSettingsInputs() {
 }
 
 async function loadScenario(name) {
-  const nextState = await loadJson(SCENARIO_URLS[name] || SCENARIO_URLS.july, FALLBACK_STATE);
-  applyStateDefaults(nextState);
-  logEvent("load_scenario", `加载战役场景：${state.scenario || name}`, { scenario: state.scenario || name });
-  el("scenarioSelect").value = state.scenario || name;
-  renderState();
-  renderDataOutput();
-  focusOpeningView({ phaseTab: true });
-  renderAutoJudge();
-  scheduleAiAutoplay();
+  try {
+    const nextState = await loadScenarioState(name);
+    applyStateDefaults(nextState);
+    logEvent("load_scenario", `加载战役场景：${state.scenario || name}`, { scenario: state.scenario || name });
+    el("scenarioSelect").value = state.scenario || name;
+    renderState();
+    renderDataOutput();
+    focusOpeningView({ phaseTab: true });
+    renderAutoJudge();
+    scheduleAiAutoplay();
+  }
+  catch (error) {
+    console.error(`Unable to load scenario ${name}`, error);
+    setOutput("saveOutput", { legal: false, reason: "场景文件载入失败，当前局面未被替换" });
+  }
 }
 
 async function initData() {
@@ -10242,9 +10508,20 @@ function initControls() {
   el("deleteAiProfileBtn")?.addEventListener("click", deleteAiProfile);
   el("returnHomeBtn")?.addEventListener("click", returnToHome);
   el("openSetupBtn")?.addEventListener("click", showSetupScreen);
-  el("setupModeNewBtn")?.addEventListener("click", () => setSetupMode("new"));
-  el("setupModeLoadBtn")?.addEventListener("click", loadSetupSelectedSlot);
+  el("setupModeNewBtn")?.addEventListener("click", openNewGameSetup);
+  el("setupModeLoadBtn")?.addEventListener("click", openSetupLoad);
   el("setupModeArchiveBtn")?.addEventListener("click", () => setSetupMode("archive"));
+  el("setupLoadBackBtn")?.addEventListener("click", () => setSetupMode("home"));
+  el("setupLoadConfirmBtn")?.addEventListener("click", loadSetupSelectedSlot);
+  el("setupLoadList")?.addEventListener("click", (event) => {
+    const moreButton = event.target.closest("[data-setup-load-more]");
+    if (moreButton) {
+      toggleSetupLoadCampaign(moreButton.dataset.setupLoadMore);
+      return;
+    }
+    const button = event.target.closest("[data-setup-load-slot]");
+    if (button) selectSetupSaveSlot(button.dataset.setupLoadSlot);
+  });
   el("setupArchiveBackBtn")?.addEventListener("click", () => setSetupMode("home"));
   el("setupBackHomeBtn")?.addEventListener("click", () => setSetupMode("home"));
   el("setupStartBtn")?.addEventListener("click", startFromSetup);
@@ -10273,14 +10550,6 @@ function initControls() {
       }
       renderSetupSummary();
     });
-  });
-  el("setupRefreshSlotsBtn")?.addEventListener("click", () => {
-    renderSaveSlots();
-    setOutput("setupSaveOutput", { slots: saveSlots().map(slotLabel) });
-  });
-  el("setupSaveSlotSelect")?.addEventListener("change", () => {
-    const slot = activeSaveSlots().find((item) => item.id === el("setupSaveSlotSelect").value);
-    setOutput("setupSaveOutput", slot ? { selected: slotLabel(slot) } : { reason: "请选择一个存档槽" });
   });
   el("sidePanelToggleBtn")?.addEventListener("click", toggleSidePanel);
   el("gameSettingsBtn")?.addEventListener("click", () => switchTab("settings", { expandPanel: true }));
@@ -10552,6 +10821,12 @@ async function main() {
 
 globalThis.AlameinStudioDebug = {
   getState: () => structuredClone(state),
+  saveSlotPreview: (slot) => ({
+    campaign: saveSlotCampaign(slot),
+    custom: saveSlotIsCustom(slot),
+    name: saveSlotDisplayName(slot),
+    victory_points: saveSlotVictoryPoints(slot)
+  }),
   aiStateSummary: () => aiStateSummary(),
   externalAiPayload: (toolResults = []) => externalAiPayload(toolResults),
   checkVictory: () => checkVictory(),
