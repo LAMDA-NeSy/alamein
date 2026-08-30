@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-store">
     <meta http-equiv="Pragma" content="no-cache">
     <title>Alamein Judge Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=20260729-136">
+    <link rel="stylesheet" href="./styles.css?v=20260729-138">
   </head>
   <body>
     <section id="setupScreen" class="setup-screen" aria-label="开局配置">
@@ -123,7 +123,7 @@
                 <select id="setupAxisRoleSelect">
                   <option value="human">玩家</option>
                   <option value="heuristic_ai">简单规则 AI</option>
-                  <option value="rules_ai">复杂规则 AI</option>
+                  <option value="rules_ai" selected>复杂规则 AI</option>
                   <option value="external_ai">模型指挥官 AI</option>
                 </select>
                 <p>1942 年，隆美尔率领德意联军横越北非沙漠。指挥装甲矛头突破阿拉曼防线，在燃料与补给耗尽前夺取胜利。</p>
@@ -136,7 +136,7 @@
                 <select id="setupAlliesRoleSelect">
                   <option value="human">玩家</option>
                   <option value="heuristic_ai">简单规则 AI</option>
-                  <option value="rules_ai">复杂规则 AI</option>
+                  <option value="rules_ai" selected>复杂规则 AI</option>
                   <option value="external_ai">模型指挥官 AI</option>
                 </select>
                 <p>指挥英军第八集团军及英联邦部队守卫埃及门户。依托雷区和纵深阵地拖住敌军，积蓄力量发动决定性反攻。</p>
@@ -399,6 +399,7 @@
                   <div id="combatCrtPreview" class="combat-crt-preview hidden"></div>
                   <div id="combatRollReveal" class="combat-roll-reveal hidden" aria-live="assertive"></div>
                   <div id="combatRetreatPlanner" class="combat-retreat-planner hidden" aria-live="polite"></div>
+                  <div id="combatExchangePlanner" class="combat-exchange-planner hidden" aria-live="polite"></div>
                   <div id="combatAdvancePlanner" class="combat-advance-planner hidden" aria-live="polite"></div>
                   <input id="combatResolveDieSelect" type="hidden" value="">
                   <div class="button-row workflow-step-actions">
@@ -581,7 +582,7 @@
                   <li>掷 1d6，得到 A1/A2/A3/D1/D2/D3/Ae/De/Ex。</li>
                   <li>执行撤退、消灭、交换损失、战后前进。</li>
                 </ol>
-                <p>结果含义：A 表示攻击方撤退，D 表示防御方撤退，数字为撤退格数；Ae/De 表示攻击方/防御方消灭；Ex 表示交换损失。</p>
+                <p>结果含义：A 表示攻击方撤退，D 表示防御方撤退，数字为撤退格数；Ae/De 表示攻击方/防御方消灭；Ex 表示交换损失，由攻击方选择损失单位，其正面战斗强度总和至少达到被消灭防御单位的总强度。</p>
               </div>
             </details>
 
@@ -751,7 +752,7 @@
                   <select id="axisPlayerSelect">
                     <option value="human">玩家</option>
                     <option value="heuristic_ai">简单规则 AI</option>
-                    <option value="rules_ai">复杂规则 AI</option>
+                    <option value="rules_ai" selected>复杂规则 AI</option>
                     <option value="external_ai">模型指挥官 AI</option>
                   </select>
                 </label>
@@ -759,7 +760,7 @@
                   <select id="alliesPlayerSelect">
                     <option value="human">玩家</option>
                     <option value="heuristic_ai">简单规则 AI</option>
-                    <option value="rules_ai">复杂规则 AI</option>
+                    <option value="rules_ai" selected>复杂规则 AI</option>
                     <option value="external_ai">模型指挥官 AI</option>
                   </select>
                 </label>
@@ -835,8 +836,7 @@
       </div>
     </section>
 
-    <script src="./ai_config.js?v=20260728-123"></script>
-    <script src="./rule_engine.js?v=20260728-123"></script>
-    <script src="./app.js?v=20260729-136"></script>
+    <script src="./rule_engine.js?v=20260729-138"></script>
+    <script type="module" src="./ai/core/browser_config_loader.mjs?v=20260806-4"></script>
   </body>
 </html>

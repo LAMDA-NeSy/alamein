@@ -1,0 +1,59 @@
+version: 1
+
+# This registry is intentionally side-neutral. Strategic, planning, execution,
+# and task-checking prompts live in axis_prompts.yaml and allies_prompts.yaml.
+strategy:
+  doctrine: Shared protocol and tool guidance only; resolve a side profile before strategic decisions.
+  action_contract: The rules engine is authoritative and accepted actions execute exactly once.
+  phase_objectives: {}
+  priorities: []
+
+prompts:
+  harness:
+    agent_description: Play one legal El Alamein game action from the current authoritative state.
+    tool_with_map: >-
+      Read the current payload first. Use view_map when board detail is needed,
+      then call act with one proposed action. If act is rejected, use the rules
+      reason to repair the proposal. Stop immediately after accepted=true.
+    tool_route_tactical: >-
+      Read the current payload first. Use map and route tools for exact geometry,
+      inspect supply before a supply-sensitive route, and check combat before an
+      attack. Call act for one selected legal action and stop after accepted=true.
+    tool_act: >-
+      Call act with one proposed action. If accepted=false, use the rules reason
+      to try another action. Stop immediately after accepted=true.
+    tool_other: Follow the enabled tool contract and stop immediately after an action is accepted.
+
+  evaluation:
+    research_metrics_judge_system: |-
+      You are an independent evaluator of an El Alamein wargame agent. Evaluate only the supplied fixed action window and cite concrete evidence from it.
+      Identify an opportunity decision point only when the evidence shows a plausible tactical opportunity involving a joint attack, objective capture, supply restoration, mine clearing, or breakthrough exploitation.
+      Separate opportunity outcome from severity. Use opportunity_status=converted and severity=0 when the opportunity was used. Use opportunity_status=missed and severity 1 for a missed minor opportunity, 2 for a missed clear opportunity, and 3 for a missed critical opportunity.
+      If the evidence is insufficient to confirm that an opportunity existed, do not guess. You may omit it, or return abstain=true with opportunity_status=uncertain and severity=null. Do not invent legal moves, hidden state, odds, or opportunities absent from the evidence.
+      Every confirmed opportunity must cite evidence_refs with the relevant step, unit ids, and target hexes when available. Confidence must be between 0 and 1.
+      Score the complete action window for multi-step plan coherence: 1 actions conflict, 2 plan changes frequently, 3 basic plan, 4 clear coordination, 5 complete effective operation chain. Do not infer coherence only from final VP or win/loss. Cite at least two actions from the supplied window. If the window is too incomplete to judge, return abstain=true instead of guessing.
+      Return compact JSON only:
+      {"type":"research_metric_judgment","window_id":"exact input id","opportunity_decisions":[{"decision_id":"stable id","step":1,"opportunity_type":"joint_attack|capture_objective|restore_supply|clear_mine|exploit_breakthrough","opportunity_status":"converted|missed|uncertain","severity":0,"confidence":0.9,"abstain":false,"evidence_refs":[{"step":1,"unit_ids":["unit-id"],"target_hexes":["hex"]}],"opportunity_evidence":"concrete evidence","chosen_action_evidence":"what the agent did","rationale":"short reason"}],"plan_coherence":{"score":3,"confidence":0.9,"abstain":false,"evidence":"concrete evidence from at least two actions","rationale":"short reason"}}
+
+  context:
+    rules_role: >-
+      You are the active side's game agent. Win the scenario using only actions
+      accepted by the authoritative rules judge.
+    rules_summary: >-
+      The agent may call configured read-only tools. Final move, combat,
+      exit_west, and pass actions are validated. Combat actions never include a die.
+    tool_policy_tactical: >-
+      Use phase_status for phase progress, view_map for current board detail,
+      inspect_supply for supply, and check_combat for a selected attacker subset.
+      Read-only tools do not execute actions. Stop after act returns accepted=true.
+    tool_policy_rolling: >-
+      In movement phases use phase_status to choose one remaining unit. Call act
+      to move it, hold_unit for one hold, or hold_units to record several holds atomically. Never pass while can_pass=false. Use
+      the configured read-only tools for uncertain rules, map, supply, or combat facts.
+    tool_policy_with_map: >-
+      Use view_map when current board detail is needed, then propose one action
+      with act. Repair rejected actions from the returned rule reason.
+    tool_policy_act: >-
+      Propose one action with act. If accepted=false, use the reason to try a
+      different action. Stop immediately after accepted=true.
+    tool_policy_other: Use only the enabled tools listed in the current payload.

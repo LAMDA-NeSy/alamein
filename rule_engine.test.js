@@ -713,6 +713,59 @@ test("engineer uses printed (1)4 values, defends, and cannot attack", () => {
   assert.equal(defense.details.defense, 1);
 });
 
+test("Exchange requires an explicit attacker loss choice with enough printed strength", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    active_side: "axis",
+    units: {
+      a: { side: "axis", hex: "0202", state: "fresh", attack: 10, defense: 10, movement: 4, kind: "ground" },
+      b: { side: "axis", hex: "0402", state: "fresh", attack: 2, defense: 2, movement: 4, kind: "ground" },
+      d: { side: "allies", hex: "0302", state: "fresh", attack: 3, defense: 3, movement: 4, kind: "ground" }
+    }
+  });
+  const context = ctx(state);
+  const action = { attackers: ["a", "b"], defender_hexes: ["0302"], die: 1 };
+  const requirement = Rules.combatExchangeOptions(context, action);
+  assert.equal(requirement.available, true);
+  assert.equal(requirement.complete, false);
+  assert.equal(requirement.required_strength, 3);
+  assert.deepEqual(requirement.automatic_loss_ids, ["a"]);
+
+  const result = Rules.resolveCombat(context, { ...action, exchange_loss_ids: ["b"] });
+  assert.equal(result.legal, false);
+  assert.match(result.reason, /尚未达到/);
+  assert.equal(state.units.a.eliminated, undefined);
+  assert.equal(state.units.b.eliminated, undefined);
+  assert.equal(state.units.d.eliminated, undefined);
+});
+
+test("Exchange applies the attacker's chosen losses and advances only a survivor", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    active_side: "axis",
+    units: {
+      a: { side: "axis", hex: "0202", state: "fresh", attack: 7, defense: 7, movement: 4, kind: "ground" },
+      b: { side: "axis", hex: "0402", state: "fresh", attack: 5, defense: 5, movement: 4, kind: "ground" },
+      d: { side: "allies", hex: "0302", state: "fresh", attack: 3, defense: 3, movement: 4, kind: "ground" }
+    }
+  });
+  const result = Rules.resolveCombat(ctx(state), {
+    attackers: ["a", "b"],
+    defender_hexes: ["0302"],
+    die: 1,
+    exchange_loss_ids: ["b"],
+    advance_attacker: { unit: "a", target: "0302" }
+  });
+  assert.equal(result.legal, true, result.reason);
+  assert.equal(result.details.outcome, "Ex");
+  assert.deepEqual(result.details.effects.exchange.eliminated_attackers, ["b"]);
+  assert.deepEqual(result.details.effects.exchange.eliminated_defenders, ["d"]);
+  assert.equal(state.units.a.eliminated, undefined);
+  assert.equal(state.units.a.hex, "0302");
+  assert.equal(state.units.b.eliminated, true);
+  assert.equal(state.units.d.eliminated, true);
+});
+
 test("defender advance after attacker retreat is optional and explicit", () => {
   const state = baseState({
     phase: "axis_combat",
@@ -872,4 +925,40 @@ test("October west exits score as off-map withdrawals without elimination or a m
   const result = Rules.calculateVictoryPoints(ctx(state));
   assert.equal(result.victory_points, Rules.SCENARIO_META.october.starting_vp + 4);
   assert.equal(result.breakdown.some((item) => item.id === "october_combat_exited_west"), true);
+});
+
+test("engineer must be inside enemy mine hex to clear it (rule 12.12)", () => {
+  const state = baseState({
+    phase: "axis_initial_movement",
+    units: {
+      eng: { side: "axis", hex: "0202", state: "fresh", attack: 0, defense: 1, movement: 4, kind: "engineer" },
+      mine: { side: "allies", hex: "0302", kind: "mine" }
+    }
+  });
+  // Engineer at 0202 is merely adjacent to the mine at 0302; rule 12.12 requires entering the mine hex.
+  const adjacent = Rules.clearMine(ctx(state), "eng", "0302");
+  assert.equal(adjacent.legal, false);
+  assert.match(adjacent.reason, /进|位于|雷区内/);
+  assert.equal(state.units.mine.eliminated === true, false);
+  // Once the engineer actually enters the mine hex, clearing is legal.
+  state.units.eng.hex = "0302";
+  const inside = Rules.clearMine(ctx(state), "eng", "0302");
+  assert.equal(inside.legal, true, inside.reason);
+  assert.equal(state.units.mine.eliminated, true);
+  assert.equal(state.units.mine.cleared_by_side, "axis");
+});
+
+test("friendly combat unit inside enemy minefield counts as supplied when an adjacent hex traces supply (rule 11.41)", () => {
+  const state = baseState({
+    phase: "axis_initial_movement",
+    units: {
+      f0: { side: "axis", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      mine: { side: "allies", hex: "0302", kind: "mine" }
+    }
+  });
+  const context = ctx(state, { hexes: { "0302": ["clear"] }, edges: {} });
+  // Hex 0302 is the friendly unit's location AND an enemy minefield; supply must be traceable TO it,
+  // even though the supply-line BFS treats enemy-mine hexes as blocking transit (rule 11.41).
+  assert.equal(Rules.supplyState(context, "f0"), "supplied");
+  assert.notEqual(Rules.supplyState(context, "f0"), "isolated");
 });

@@ -1,0 +1,31 @@
+version: 1
+
+complete_game:
+  statuses: [final_victory]
+  require_final_victory_flag: true
+
+judge:
+  model_profile: deepseek_flash
+  temperature: 0
+  max_output_tokens: 6000
+  timeout_ms: 120000
+  protocol_retries: 2
+  protocol_retry_delay_ms: 1000
+  window: external_side_turn
+  opportunity_types:
+    - joint_attack
+    - capture_objective
+    - restore_supply
+    - clear_mine
+    - exploit_breakthrough
+  missed_opportunity_scale:
+    0: no missed opportunity
+    1: missed minor opportunity
+    2: missed clear opportunity
+    3: missed critical opportunity
+  plan_coherence_scale:
+    1: actions conflict with one another
+    2: plan changes frequently
+    3: a basic plan is present
+    4: actions form clear coordination
+    5: actions form a complete and effective operation chain

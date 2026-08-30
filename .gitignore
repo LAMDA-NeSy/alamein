@@ -4,7 +4,12 @@ node_modules/
 .env
 .env.*
 coverage/
+.venv/
+__pycache__/
+*.egg-info/
 last_*.json
 vassal/
 *.vmod
 convert_vmod.py
+ai_results/
+log/

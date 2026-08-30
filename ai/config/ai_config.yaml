@@ -1,0 +1,44 @@
+provider: deepseek
+
+api:
+  kind: chat_completions
+  url: https://api.deepseek.com/chat/completions
+  localProxyUrl: http://127.0.0.1:8787/chat/completions
+  model: deepseek-v4-flash
+  apiKey: ""
+  timeoutSeconds: 30
+  maxToolRounds: 4
+  temperature: 0.25
+  maxTokens: 3600
+  repairMaxTokens: 900
+  responseFormat:
+    type: json_object
+
+transport:
+  stepFallbackReserveMs: 0
+  pauseOnCircuitOpen: true
+
+context:
+  phaseStrategyMaxTokens: 3000
+  maxLegalActions: 180
+  maxCandidateActions: 48
+  opportunityAware:
+    minimumCombatOdds: "2-1"
+    rejectNegativeExpectedCombat: true
+    allowNegativeExpectedPrimaryObjective: false
+    mineRiskPenalty: 45
+    enemyZocPenalty: 14
+    friendlyCrowdingPenalty: 18
+    noProgressPenalty: 16
+    supplyImprovementBonus: 24
+    primaryObjectiveBonus: 70
+  maxRecentLogItems: 24
+  maxToolResults: 12
+  maxUnitsPerSide: 96
+  maxUnitIndexPerSide: 320
+  maxMapIntelHexes: 48
+  maxFrontlineUnits: 24
+  maxNearbyEnemiesPerUnit: 6
+  maxNearbyEnemyDetailUnitsPerSide: 48
+  maxReachableHexesPerCandidateUnit: 160
+  includeFullStateSummary: false

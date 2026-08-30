@@ -1,0 +1,208 @@
+version: 1
+
+defaults:
+  decision_policy: direct
+  harness: opencode_harness
+  tool_profile: map_and_action
+  model_profile: deepseek_flash
+  max_calls_per_step: 6
+  step_timeout_ms: 180000
+
+tool_profiles:
+  map_and_action:
+    id: map_and_action
+    version: 1
+    tools: [view_map, act]
+    max_calls_per_step: 6
+    parallel_tool_calls: false
+    stop_on_accepted: true
+
+  map_tactical_action:
+    id: map_tactical_action
+    version: 1
+    tools: [view_map, check_combat, inspect_supply, phase_status, act]
+    max_calls_per_step: 10
+    parallel_tool_calls: false
+    stop_on_accepted: true
+
+  map_route_tactical:
+    id: map_route_tactical
+    version: 1
+    tools: [view_map, plan_route, evaluate_maneuver, inspect_supply, check_combat, act]
+    max_calls_per_step: 12
+    parallel_tool_calls: false
+    stop_on_accepted: true
+
+  rolling_unit_tactical:
+    id: rolling_unit_tactical
+    version: 1
+    tools: [phase_status, view_map, inspect_supply, check_combat, hold_units, hold_unit, act]
+    max_calls_per_step: 20
+    parallel_tool_calls: false
+    stop_on_accepted: true
+
+  rolling_unit_rules_tactical:
+    id: rolling_unit_rules_tactical
+    version: 1
+    tools: [phase_status, inspect_rules, view_map, inspect_supply, check_combat, hold_units, hold_unit, act]
+    max_calls_per_step: 20
+    parallel_tool_calls: false
+    stop_on_accepted: true
+
+  single_action:
+    id: single_action
+    version: 1
+    tools: [act]
+    max_calls_per_step: 6
+    parallel_tool_calls: false
+    stop_on_accepted: true
+
+  inspect_then_act:
+    id: inspect_then_act
+    version: 1
+    tools: [inspect, act]
+    max_calls_per_step: 6
+    parallel_tool_calls: false
+    stop_on_accepted: true
+
+  legacy_three_tool:
+    id: legacy_three_tool
+    version: 1
+    tools: [inspect, evaluate_action, submit_action]
+    max_calls_per_step: 6
+    parallel_tool_calls: false
+    stop_on_accepted: true
+
+methods:
+  candidates:
+    category: decision_policy
+    decision_policy: candidates
+    harness: manual_single_action
+    tool_profile: map_and_action
+    tools: [view_map, act]
+    max_calls_per_step: 6
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000
+
+  intent:
+    category: decision_policy
+    decision_policy: intent
+    harness: manual_single_action
+    tool_profile: map_and_action
+    tools: [view_map, act]
+    max_calls_per_step: 6
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000
+
+  hybrid:
+    category: decision_policy
+    decision_policy: hybrid
+    harness: manual_single_action
+    tool_profile: map_and_action
+    tools: [view_map, act]
+    max_calls_per_step: 6
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000
+
+  opportunity_aware_hybrid:
+    category: decision_policy
+    decision_policy: opportunity_aware_hybrid
+    harness: manual_single_action
+    tool_profile: map_and_action
+    tools: [view_map, act]
+    max_calls_per_step: 6
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000
+
+  unit_plan_hybrid:
+    category: decision_policy
+    decision_policy: unit_plan_hybrid
+    harness: manual_single_action
+    tool_profile: rolling_unit_tactical
+    tools: [phase_status, view_map, inspect_supply, check_combat, hold_units, hold_unit, act]
+    max_calls_per_step: 20
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000
+    rolling_unit_protocol: v1
+    phase_status_first: true
+    execution_order: model_tool_call_order
+    accepted_actions_per_replay_step: 1
+
+  hierarchical_sae:
+    category: decision_policy
+    decision_policy: hierarchical_sae
+    harness: manual_single_action
+    tool_profile: rolling_unit_rules_tactical
+    tools: [phase_status, inspect_rules, view_map, inspect_supply, check_combat, hold_units, hold_unit, act]
+    max_calls_per_step: 20
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000
+    strategic_plan_protocol: side-aware-goal-v2
+    goal_management: open_grounded
+    goal_protocol: side-aware-goal-v2
+    force_allocation_protocol: sae-v1
+    dispatch_protocol: rolling-unit-action-v1
+    task_management: multi_task
+    task_protocol: side-aware-task-v2
+    max_child_tasks: 6
+    max_active_child_tasks: 3
+    task_checker_enabled: true
+    task_checker_model_profile: deepseek_flash_checker
+    task_checker_timeout_ms: 60000
+    task_checker_max_calls_per_turn: 4
+    no_progress_replan_threshold: 3
+    blocked_replan_threshold: 2
+    supply_worsened_replan_threshold: 2
+    low_odds_replan_threshold: 2
+    passive_hold_replan_threshold: 3
+    replan_cooldown_actions: 3
+
+  direct:
+    category: decision_policy
+    decision_policy: direct
+    harness: manual_single_action
+    tool_profile: map_and_action
+    tools: [view_map, act]
+    max_calls_per_step: 6
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000
+
+  strategy_execute:
+    category: decision_policy
+    decision_policy: strategy_execute
+    harness: manual_single_action
+    tool_profile: map_and_action
+    tools: [view_map, act]
+    max_calls_per_step: 6
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000
+
+  opencode_harness:
+    category: harness
+    decision_policy: direct
+    harness: opencode_harness
+    tool_profile: map_and_action
+    tools: [view_map, act]
+    max_calls_per_step: 6
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000
+
+  langgraph_harness:
+    category: harness
+    decision_policy: direct
+    harness: langgraph_harness
+    tool_profile: map_and_action
+    tools: [view_map, act]
+    max_calls_per_step: 6
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000
+
+  pydanticai_harness:
+    category: harness
+    decision_policy: direct
+    harness: pydanticai_harness
+    tool_profile: map_and_action
+    tools: [view_map, act]
+    max_calls_per_step: 6
+    model_profile: deepseek_flash
+    step_timeout_ms: 180000

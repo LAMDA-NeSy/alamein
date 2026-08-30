@@ -5861,6 +5861,134 @@ html[data-effects="off"] .unit-action-flash {
   display: none;
 }
 
+.combat-exchange-planner {
+  display: grid;
+  gap: 8px;
+  margin-top: 9px;
+  border: 1px solid rgb(159 103 18 / 0.5);
+  border-left: 4px solid #a96b12;
+  border-radius: 7px;
+  background: #fff8e9;
+  padding: 9px;
+}
+
+.combat-exchange-planner.hidden {
+  display: none;
+}
+
+.combat-exchange-planner.complete {
+  border-color: rgb(54 121 81 / 0.48);
+  border-left-color: #367951;
+  background: #f2f8f3;
+}
+
+.combat-exchange-head,
+.combat-exchange-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.combat-exchange-head span {
+  color: #7b5316;
+  font-size: 11px;
+  font-weight: 950;
+}
+
+.combat-exchange-head b {
+  color: #302b25;
+  font-size: 13px;
+}
+
+.combat-exchange-planner p {
+  margin: 0;
+  color: #5c5141;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.combat-exchange-status {
+  border-top: 1px solid rgb(159 103 18 / 0.2);
+  padding-top: 7px;
+}
+
+.combat-exchange-status strong {
+  color: #49350f;
+  font-size: 12px;
+}
+
+.combat-exchange-status small {
+  color: #74623f;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.combat-exchange-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 6px;
+}
+
+.combat-exchange-option {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 56px;
+  border: 2px solid #c7ad7a;
+  border-radius: 5px;
+  background: #fff;
+  color: #3f3523;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.combat-exchange-option:hover:not(:disabled) {
+  border-color: #a96b12;
+  background: #fff3d3;
+}
+
+.combat-exchange-option.selected {
+  border-color: #9b5c08;
+  background: #ffebba;
+  box-shadow: inset 0 0 0 1px rgb(155 92 8 / 0.2);
+}
+
+.combat-exchange-option img {
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+}
+
+.combat-exchange-option span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.combat-exchange-option strong,
+.combat-exchange-option small {
+  overflow-wrap: anywhere;
+}
+
+.combat-exchange-option strong {
+  font-size: 12px;
+}
+
+.combat-exchange-option small {
+  color: #756442;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.combat-exchange-option b {
+  color: #82510a;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .combat-advance-planner {
   display: grid;
   gap: 8px;

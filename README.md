@@ -35,6 +35,12 @@ The player rule page at `rules.html` displays that source directly. `rules_el_al
 - `rules_el_alamein.json`: runtime rule configuration derived from the authoritative translation.
 - `terrain.json`: map terrain, coast, road, and edge data.
 - `scenarios/`: July, September, and October scenario states.
+- `ai/config/`: model, method, tool-profile, and browser AI configuration.
+- `ai/core/`: shared model runtime, context, tools, rule bridge, and comparison contract.
+- `ai/harnesses/`: OpenCode, LangGraph, and PydanticAI implementations.
+- `ai/experiments/`: full games, batch runs, audits, quality checks, and summaries.
+- `ai/tests/`: AI-focused Node and Python tests.
+- `log/`: generated experiment transcripts and reports; excluded from Git.
 - `docs/`: authoritative rules and project progress documents.
 - `mod_images/`: counter and interface artwork used by the web app.
 - `rule_engine.test.js`: rule-engine regression tests.
@@ -44,7 +50,15 @@ The player rule page at `rules.html` displays that source directly. `rules_el_al
 Run the available tests with the bundled Node runtime or a local Node.js installation:
 
 ```bash
-node --test rule_engine.test.js external_ai_transcript.test.js
+pnpm test
+```
+
+PydanticAI 的 Python 环境使用 `uv` 管理：
+
+```bash
+uv sync --locked --group dev
+uv run --locked --group dev pytest ai/tests
+pnpm run test:pydanticai
 ```
 
 The test suite covers stacking limits, engineer handling, movement, supply, combat, retreat priorities, temporary overstack repair, and elimination when repair is impossible.

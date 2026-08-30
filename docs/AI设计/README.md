@@ -1,9 +1,43 @@
 # 阿拉曼裁判工作室 AI 设计文档
 
 **对应版本：** v2026.07.12.95  
-**更新日期：** 2026 年 7 月 26 日
+**更新日期：** 2026 年 8 月 18 日
 
 本目录把三种 AI 分开说明。它们共享同一套游戏状态、动作协议和规则裁判，但决策方法并不相同。
+
+## 代码目录
+
+```text
+ai/
+├── config/       模型、方法和工具配置
+├── core/         模型网关、上下文、工具桥和比较合同
+├── harnesses/    OpenCode、LangGraph、PydanticAI
+├── prompt/       Prompt Engineering 统一注册表
+├── experiments/  完整对局、批量实验、审计、质量检查和汇总
+└── tests/        AI 自动测试
+```
+
+详细入口和命令见项目根目录的 `ai/README.md`。
+
+## 运行配置
+
+- `ai/config/agent_methods.yaml`：统一配置 Candidates/A、Intent/B、Hybrid、Opportunity-Aware Hybrid、Unit-Plan Hybrid、Direct、OpenCode、LangGraph 和 PydanticAI 使用的工具、每步最大工具调用次数、默认模型与步骤超时。
+- `ai/config/agent_tools.yaml`：使用 `name`、`description` 和 `parameters` 统一定义工具及动作参数；所有 Harness 从这里加载，不在适配代码中重复维护描述。
+- `ai/config/ai_models.yaml`：独立配置 DeepSeek、Mock 以及后续模型的 Adapter、模型名、地址、凭据环境变量、上下文/输出限制、能力、温度、超时和重试。
+- CLI 参数优先级高于 YAML，例如 `--model-profile`、`--tool-profile`、`--decision-policy` 和 `--step-timeout-ms` 可覆盖单次实验。
+- `ai/config/ai_config.yaml`：配置浏览器 AI 和传统回放共用的 API 默认值与上下文边界。
+- `ai/prompt/prompts.yaml`：统一保存战略、阶段目标、系统 Prompt、步骤模板、阶段意图、浏览器和上下文压缩 Prompt；运行记录包含版本与哈希。
+- `ai/config/agent_tool_profiles.schema.yaml`：描述工具 Profile 的结构约束。工具 Profile 本体位于 `agent_methods.yaml`。
+- 配置目录只保留 YAML；Node、Python sidecar 和浏览器均直接解析同一套 YAML 数据，不再维护 JSON/JavaScript 镜像。
+- 所有 AI 回放、Harness、批量实验、质量检查和上下文审计默认写入项目根目录的 `log/`；`--out` 或 `--out-dir` 可以覆盖单次运行的保存位置。
+
+## 网络稳定性与比较口径
+
+- DeepSeek 请求使用单次完成共享的总超时；重试不会为每次尝试重新获得完整超时。默认只重试连接故障、429、502、503 和 504，400 不重试。
+- 模型网关连续出现 3 次可重试故障后开启 30 秒熔断，避免网络异常时持续堆积请求。每个游戏步骤允许模型使用完整的 180 秒；达到硬上限后立即停止请求，尚未接受有效动作时执行本地 fallback。
+- OpenCode、LangGraph、PydanticAI 统一记录 `transport_failures`、`protocol_failures`、`fallback_reason_class`、`phase_plan_ms` 和 `prepare_ms`，网络故障不计入动作拒绝率。
+- `single-action-comparison-v7.7` 使用 `scenario-scoring-v3`：模型能看到场景精确计分公式、当前 VP breakdown、下一计分列、下一胜利等级差值、场景感知地图目标和动作预计 VP 增量。July 移动评价会投影移动后的补给，断供推进不再获得虚假 VP 奖励；Opportunity-Aware 在意图匹配攻击被风险过滤后回填其他合法攻击；不可重试 4xx 会立即触发单步 fallback。合同同时固定规则完整移动、滚动单位行动协议、请求超时、重试、熔断、fallback 策略、规则桥版本、执行请求的 `tool_choice` 和 thinking 模式。`hierarchical_sae` 在 `single-action-comparison-v7.10` 中额外固定规划阶段关闭 DeepSeek thinking、计分前沿目标解析、替代路线反馈和自适应重规划，并记录规划响应来自 `content` 还是 `reasoning_content`。旧 v4-v7.6 与 v7.8-v7.9 实验不得与新契约直接合并。
+- 有未恢复传输故障、熔断、Harness 错误或部分输出的对局保留原始 VP，但从战术 VP 排名中排除。
 
 ## 文档导航
 
@@ -49,6 +83,12 @@
 - 移动和战斗分别输出什么；
 - 模型能不能指定骰点或绕过规则；
 - 输出错误时系统如何修正和停止。
+
+### 4. 兵棋 Agent 进展汇报
+
+[兵棋agent进展汇报](./兵棋agent进展汇报.md)
+
+汇总游戏画面、复杂规则 AI、模型指挥官 Hybrid 上下文管理、固定随机种子实验结果和后续 Todo，作为对外汇报的单一文档。
 
 ## 三种 AI 的直接区别
 

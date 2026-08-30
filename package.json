@@ -1,0 +1,24 @@
+{
+  "name": "alamein-judge-studio",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test rule_engine.test.js ai/tests/*.test.js",
+    "ai:full-game": "node ai/experiments/external_ai_full_game_transcript.js",
+    "ai:opencode": "node ai/harnesses/opencode_harness.mjs",
+    "ai:langgraph": "node ai/harnesses/langgraph_harness.mjs",
+    "ai:pydanticai": "node ai/harnesses/pydanticai_harness.mjs",
+    "ai:batch": "node ai/experiments/run_ai_experiments.js",
+    "ai:metrics": "node ai/experiments/evaluate_research_metrics.js",
+    "test:pydanticai": "uv run --locked --group dev pytest ai/tests"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.4",
+    "@langchain/langgraph": "^1.4.9",
+    "@langchain/openai": "^1.5.5",
+    "@opencode-ai/plugin": "1.18.13",
+    "@opencode-ai/sdk": "1.18.13",
+    "opencode-ai": "1.18.13",
+    "yaml": "2.9.0"
+  }
+}

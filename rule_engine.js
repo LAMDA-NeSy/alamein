@@ -1067,15 +1067,30 @@
     if (ctx.state.scenario === "july" && unit.side === "allies" && hexTags(ctx, unit.hex).includes("alamein_box")) return "supplied";
     const net = network || buildSupplyNetwork(ctx, unit.side);
     const start = normalizeHex(unit.hex);
-    const distance = net.distances.get(start);
+    // 规则 11.41: 友军单位位于敌方雷区中时，补给线可追踪到该 hex，但不能穿越该雷区。
+    // BFS 把敌方雷区 hex 列为 blocked 不会到达这里；改用相邻 hex 的距离 +1 来模拟「追踪到」。
+    const mineAtStart = enemyMinesAt(ctx, unit.side, start).length > 0;
+    function distanceThrough(map) {
+      if (!map) return null;
+      const direct = map.get(start);
+      if (direct != null) return direct;
+      if (!mineAtStart) return null;
+      let best = Infinity;
+      for (const nb of neighbors(start)) {
+        const d = map.get(nb);
+        if (d != null && d < best) best = d;
+      }
+      return Number.isFinite(best) ? best + 1 : null;
+    }
+    const distance = distanceThrough(net.distances);
     if (distance == null) return "isolated";
     const roadRange = isSupplyUnit(unit) ? 4 : 6;
     const genericRange = isSupplyUnit(unit) ? 4 : Number(unit.attack_supply_range || 6);
-    const edgeDistance = net.edgeDistances?.get(start);
+    const edgeDistance = distanceThrough(net.edgeDistances);
     if (edgeDistance != null && edgeDistance <= 4) return "supplied";
-    const roadDistance = net.roadDistances?.get(start);
+    const roadDistance = distanceThrough(net.roadDistances);
     if (roadDistance != null && roadDistance <= roadRange) return "supplied";
-    const unitDistance = net.unitDistances?.get(start);
+    const unitDistance = distanceThrough(net.unitDistances);
     if (unitDistance != null && unitDistance <= genericRange) return "supplied";
     if (
       (edgeDistance != null && edgeDistance <= 8) ||
@@ -1499,9 +1514,58 @@
     return eliminatedAttackers;
   }
 
-  function exchangeLosses(ctx, attackerIds, defenderIds) {
+  function exchangeSelection(ctx, attackerIds, defenderIds, requestedIds = []) {
+    if (!Array.isArray(requestedIds)) {
+      return { legal: false, complete: false, reason: "交换损失必须提交攻击方参战单位列表" };
+    }
+    const selectedIds = [...new Set(requestedIds)];
+    if (selectedIds.length !== requestedIds.length) {
+      return { legal: false, complete: false, reason: "交换损失单位不能重复选择" };
+    }
+    if (selectedIds.some((id) => !attackerIds.includes(id))) {
+      return { legal: false, complete: false, reason: "交换损失只能选择本次参战的攻击单位" };
+    }
+    const requiredStrength = defenderIds.reduce((sum, id) => sum + Number(ctx.state.units[id]?.defense || ctx.state.units[id]?.attack || 0), 0);
+    const attackerStrength = attackerIds.reduce((sum, id) => sum + Number(ctx.state.units[id]?.attack || 0), 0);
+    const selectedStrength = selectedIds.reduce((sum, id) => sum + Number(ctx.state.units[id]?.attack || 0), 0);
+    const allAttackersSelected = selectedIds.length === attackerIds.length && attackerIds.every((id) => selectedIds.includes(id));
+    const complete = selectedStrength >= requiredStrength || allAttackersSelected;
+    return {
+      legal: true,
+      complete,
+      reason: complete
+        ? "交换损失选择有效"
+        : `所选攻击单位战斗强度 ${selectedStrength}，尚未达到防御方的 ${requiredStrength}`,
+      required_strength: requiredStrength,
+      attacker_strength: attackerStrength,
+      selected_strength: selectedStrength,
+      selected_ids: selectedIds,
+      all_attackers_selected: allAttackersSelected
+    };
+  }
+
+  function combatExchangeOptions(ctx, action) {
+    const verdict = checkCombat(ctx, action);
+    if (!verdict.legal) return { legal: false, available: false, complete: false, reason: verdict.reason, options: [] };
+    if (verdict.details.outcome !== "Ex") {
+      return { legal: true, available: false, complete: true, reason: "本次战斗不是交换损失", options: [] };
+    }
+    const selectedIds = action.exchange_loss_ids == null ? [] : action.exchange_loss_ids;
+    const selection = exchangeSelection(ctx, verdict.details.attackers, verdict.details.defenders, selectedIds);
+    if (!selection.legal) return { ...selection, available: true, options: [] };
+    return {
+      ...selection,
+      available: true,
+      options: verdict.details.attackers.map((id) => ({
+        unit: id,
+        strength: Number(ctx.state.units[id]?.attack || 0)
+      })),
+      automatic_loss_ids: exchangeAttackerLossIds(ctx, verdict.details.attackers, verdict.details.defenders)
+    };
+  }
+
+  function exchangeLosses(ctx, attackerIds, defenderIds, eliminatedAttackerIds) {
     const eliminatedDefenders = eliminateUnits(ctx, defenderIds, "exchange");
-    const eliminatedAttackerIds = exchangeAttackerLossIds(ctx, attackerIds, defenderIds);
     const eliminatedAttackers = eliminateUnits(ctx, eliminatedAttackerIds, "exchange");
     return { eliminated_attackers: eliminatedAttackers, eliminated_defenders: eliminatedDefenders };
   }
@@ -1514,9 +1578,11 @@
       return { legal: true, available: false, reason: "本次战斗结果不允许进攻方战后推进", options: [] };
     }
 
-    const eliminatedAttackers = outcome === "Ex"
-      ? new Set(exchangeAttackerLossIds(ctx, verdict.details.attackers, verdict.details.defenders))
-      : new Set();
+    const exchange = outcome === "Ex" ? combatExchangeOptions(ctx, action) : null;
+    if (exchange?.available && (!exchange.legal || !exchange.complete)) {
+      return { legal: true, available: false, reason: exchange.reason || "请先完成交换损失选择", options: [], exchange };
+    }
+    const eliminatedAttackers = new Set(exchange?.selected_ids || []);
     const candidateIds = verdict.details.attackers.filter((id) => !eliminatedAttackers.has(id));
     const options = [];
     for (const target of verdict.details.defender_hexes) {
@@ -1610,6 +1676,14 @@
     const outcome = verdict.details.outcome;
     const attackerIds = verdict.details.attackers;
     const defenderIds = verdict.details.defenders;
+    const exchange = outcome === "Ex" ? combatExchangeOptions(ctx, action) : null;
+    if (exchange?.available && (!exchange.legal || !exchange.complete)) {
+      return {
+        legal: false,
+        reason: exchange.reason || "请先选择攻击方交换损失单位",
+        details: { ...verdict.details, exchange }
+      };
+    }
     const retreatIds = /^A[123]$/.test(outcome) ? attackerIds : /^D[123]$/.test(outcome) ? defenderIds : [];
     const retreatCount = retreatIds.length ? Number(outcome.slice(1)) : 0;
     let explicitRetreatPlan = null;
@@ -1661,7 +1735,7 @@
       effects.advanced = advanceAfterCombatChoice(ctx, attackerIds, verdict.details.defender_hexes[0], action, "attacker", { allowedTargets: verdict.details.defender_hexes });
     }
     else if (outcome === "Ex") {
-      effects.exchange = exchangeLosses(ctx, attackerIds, defenderIds);
+      effects.exchange = exchangeLosses(ctx, attackerIds, defenderIds, exchange.selected_ids);
       effects.advanced = advanceAfterCombatChoice(ctx, attackerIds.filter((id) => !ctx.state.units[id].eliminated), verdict.details.defender_hexes[0], action, "attacker", { allowedTargets: verdict.details.defender_hexes });
     }
     return { legal: true, reason: `战斗已结算：${outcome}`, details: { ...verdict.details, effects } };
@@ -1679,7 +1753,7 @@
     if (full.mine_cleared_this_turn || full.cleared_mine_this_turn) return { legal: false, reason: "该单位本回合已清雷" };
     if (isEngineer(full)) {
       if (phaseKind(ctx.state.phase) !== "initial_movement") return { legal: false, reason: "工兵清雷应在初始移动阶段进入雷区时发生" };
-      if (![normalizeHex(full.hex), ...neighbors(full.hex)].includes(hex)) return { legal: false, reason: "工兵必须在雷区内或相邻 hex" };
+      if (normalizeHex(full.hex) !== hex) return { legal: false, reason: "工兵必须进入敌方雷区才能清雷（必须位于雷区 hex）" };
     }
     else {
       if (!isCombatUnit(full)) return { legal: false, reason: "只有工兵或战斗单位可以清雷" };
@@ -1903,6 +1977,7 @@
     combatOddsColumn,
     adjacentCombats,
     checkCombat,
+    combatExchangeOptions,
     combatAdvanceOptions,
     resolveCombat,
     clearMine,

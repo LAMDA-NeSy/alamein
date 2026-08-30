@@ -1,0 +1,421 @@
+version: 1
+catalog_version: v7
+
+action_schema: &action_schema
+  type: object
+  description: >-
+    One canonical game action. Prefer move_intent for movement. Combat must use
+    attackers and defender_hexes; never include a die result.
+  additionalProperties: false
+  required: [type]
+  properties:
+    type:
+      type: string
+      enum: [move_intent, move, combat, exit_west, pass]
+      description: Action type.
+    unit:
+      type: string
+      description: Exact unit id for move_intent, move, or exit_west.
+    destination:
+      type: string
+      description: Destination hex for move_intent or move.
+    mode:
+      type: string
+      enum: [auto, normal, extended]
+      description: Use auto with move_intent.
+    path:
+      type: array
+      items:
+        type: string
+      description: Exact hex path for a full move action only.
+    attackers:
+      type: array
+      minItems: 1
+      items:
+        type: string
+      description: Exact attacking unit ids for combat.
+    defender_hexes:
+      type: array
+      minItems: 1
+      items:
+        type: string
+      description: >-
+        Exact target hexes for combat. This field name is required; do not use
+        target, target_hex, defender, or hex.
+    reason:
+      type: string
+      description: Short reason, especially for pass.
+
+tools:
+  inspect_rules:
+    name: inspect_rules
+    description: >-
+      Read a compact authoritative rule section without changing game state.
+      Use scoring for victory and VP rules, movement for movement costs and
+      ZOC, combat for odds and CRT conditions, supply for tracing and isolation,
+      phase for phase order and ending conditions, or stacking for stacking limits.
+    parameters:
+      type: object
+      additionalProperties: false
+      properties:
+        topic:
+          type: string
+          enum: [overview, scoring, movement, combat, supply, phase, stacking]
+          description: Rule section to inspect. Defaults to overview.
+
+  view_map:
+    name: view_map
+    description: >-
+      Read the current board without changing game state. Use overview for the
+      strategic picture, frontline for contacts, region for a connected local
+      topology, or focus on one unit or hex. This tool does not return a
+      legal-action candidate list.
+    parameters:
+      type: object
+      additionalProperties: false
+      properties:
+        focus:
+          type: string
+          enum: [overview, frontline, region, unit, hex]
+          description: Map detail to return. Defaults to overview.
+        target:
+          type: string
+          minLength: 1
+          description: Required unit id for focus=unit, hex id for focus=hex, or center hex for focus=region.
+        radius:
+          type: integer
+          minimum: 1
+          maximum: 4
+          description: Region radius in graph steps. Used only with focus=region.
+
+  plan_route:
+    name: plan_route
+    description: >-
+      Read-only route planning for one unit and target hex. Returns a legal
+      current-phase route when available and small multi-phase topology previews.
+      It never changes the board.
+    parameters:
+      type: object
+      additionalProperties: false
+      required: [unit, target]
+      properties:
+        unit:
+          type: string
+          minLength: 1
+          description: Exact unit id.
+        target:
+          type: string
+          minLength: 1
+          description: Destination hex.
+        mode:
+          type: string
+          enum: [normal, extended, auto]
+          description: Movement mode for the current-phase route.
+        avoid_enemy_zoc:
+          type: boolean
+          description: Prefer routes avoiding enemy ZOC. Defaults to true.
+        avoid_minefield:
+          type: boolean
+          description: Prefer routes avoiding uncleared enemy minefields. Defaults to true.
+        max_routes:
+          type: integer
+          minimum: 1
+          maximum: 3
+          description: Maximum route choices to return.
+
+  evaluate_maneuver:
+    name: evaluate_maneuver
+    description: >-
+      Read-only evaluation of a multi-group maneuver. Checks group positions,
+      supply, attack contact, and target escape routes. It does not execute actions.
+    parameters:
+      type: object
+      additionalProperties: false
+      required: [maneuver]
+      properties:
+        maneuver:
+          type: object
+          description: Named groups, each with active-side units and target_hex.
+          additionalProperties:
+            type: object
+            additionalProperties: false
+            required: [units, target_hex]
+            properties:
+              units:
+                type: array
+                minItems: 1
+                items: { type: string }
+                description: Active-side units assigned to this group.
+              target_hex:
+                type: string
+                description: Group rendezvous or contact hex.
+        attack_target:
+          type: string
+          description: Optional enemy target hex for encirclement evaluation.
+
+  check_combat:
+    name: check_combat
+    description: >-
+      Calculate one proposed combat with the authoritative rules without
+      changing game state. Returns legality, force comparison, odds, terrain,
+      supply, and combat-table information.
+    parameters:
+      type: object
+      additionalProperties: false
+      required: [attackers, defender_hexes]
+      properties:
+        attackers:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: Exact attacking unit ids to test, including joint attacks.
+        defender_hexes:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: Exact defender hexes to test.
+
+  inspect_supply:
+    name: inspect_supply
+    description: >-
+      Read the current supply state and trace the authoritative supply path for
+      one unit without changing game state.
+    parameters:
+      type: object
+      additionalProperties: false
+      required: [unit]
+      properties:
+        unit:
+          type: string
+          minLength: 1
+          description: Exact unit id whose supply status and route to inspect.
+
+  phase_status:
+    name: phase_status
+    description: >-
+      Read the authoritative current phase status without changing game state.
+      Returns phase-start eligible units, units already handled, remaining
+      actionable units, mandatory repairs, and whether ending the phase is safe.
+      In combat phases it groups enemy targets and lists the friendly units that
+      can attack each target. Any subset of the listed attackers may be selected
+      for a joint attack; it does not enumerate every attacker combination.
+    parameters:
+      type: object
+      additionalProperties: false
+
+  hold_unit:
+    name: hold_unit
+    description: >-
+      Mark one remaining eligible unit as held for the current movement phase.
+      This changes only phase bookkeeping, not the board, and does not end the
+      phase. Do not use it for a mandatory stack-repair unit.
+    parameters:
+      type: object
+      additionalProperties: false
+      required: [unit, reason]
+      properties:
+        unit:
+          type: string
+          minLength: 1
+          description: Exact remaining eligible unit id to hold.
+        reason:
+          type: string
+          minLength: 1
+          description: Short tactical reason for keeping the unit in place.
+
+  hold_units:
+    name: hold_units
+    description: >-
+      Atomically mark several remaining eligible units as held for the current
+      movement phase. This changes only phase bookkeeping. If any order is
+      invalid or names a mandatory stack-repair unit, no hold is applied.
+    parameters:
+      type: object
+      additionalProperties: false
+      required: [orders]
+      properties:
+        orders:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            required: [unit, reason]
+            properties:
+              unit:
+                type: string
+                minLength: 1
+                description: Exact remaining eligible unit id to hold.
+              reason:
+                type: string
+                minLength: 1
+                description: Short tactical reason for keeping this unit in place.
+
+  act:
+    name: act
+    description: >-
+      Propose one game action. The authoritative rules engine accepts it or
+      returns a reason without changing the game state. Stop when accepted=true.
+    parameters:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action: *action_schema
+
+  inspect:
+    name: inspect
+    description: >-
+      Inspect one current unit, hex, or unit supply route. Current state is
+      authoritative.
+    parameters:
+      type: object
+      additionalProperties: false
+      required: [kind, target]
+      properties:
+        kind:
+          type: string
+          enum: [unit, hex, supply]
+          description: Information category to inspect.
+        target:
+          type: string
+          minLength: 1
+          description: Exact unit id or hex coordinate.
+
+  evaluate_action:
+    name: evaluate_action
+    description: Evaluate one proposed game action with the authoritative local rules.
+    parameters:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action: *action_schema
+
+  submit_action:
+    name: submit_action
+    description: Submit a proposal_id returned by evaluate_action. Stop after acceptance.
+    parameters:
+      type: object
+      additionalProperties: false
+      required: [proposal_id]
+      properties:
+        proposal_id:
+          type: string
+          minLength: 1
+          description: Proposal id returned by evaluate_action in the current step.
+
+tool_docs:
+  inspect_rules:
+    purpose: Read one authoritative rule section without changing the game state.
+    input_guide: topic is one of overview, scoring, movement, combat, supply, phase, or stacking. Omit it for the general rule summary.
+    output_guide: Returns the selected rule section, the authoritative source, the current phase, and the rules that apply to the current scenario.
+    decision_effect: Use the returned rules to update the decision policy; never replace a returned rule with a remembered rule.
+    examples:
+      - '{"topic":"scoring"} before deciding whether a distant advance creates VP'
+      - '{"topic":"movement"} when a path, ZOC, or movement cost is uncertain'
+
+  view_map:
+    purpose: Inspect the current board without changing the game state.
+    input_guide: focus=overview gives the global picture; frontline gives contacts and mines; region requires a center hex and optional radius 1-4; hex requires one hex; unit requires one unit id.
+    output_guide: Returns current units, objectives, phase-eligible units, terrain, control, mines, ZOC, and for hex or region requests the exact neighbor and connection information.
+    decision_effect: Use overview to choose an operational axis, region to understand local movement geometry, hex to verify adjacency, and unit to inspect a unit before acting.
+    examples:
+      - '{"focus":"overview"} at the start of a turn or when the global position is unclear'
+      - '{"focus":"region","target":"3511","radius":2} before a local flank maneuver'
+      - '{"focus":"hex","target":"3716"} before checking contact or an escape route'
+
+  plan_route:
+    purpose: Find a legal route for one unit toward a target hex and preview longer multi-phase routes.
+    input_guide: unit and target are required; mode is normal, extended, or auto; avoid_enemy_zoc and avoid_minefield request safer routes; max_routes is 1-3.
+    output_guide: Returns the start, target, route choices, path hexes, steps, current-phase legality, supply status, risks, and a recommended route.
+    decision_effect: Use the current-phase route for an immediate act; use a topology preview as a direction for later phases and query again after the board changes.
+    examples:
+      - '{"unit":"unit-id","target":"3716","avoid_enemy_zoc":true,"avoid_minefield":true}'
+
+  evaluate_maneuver:
+    purpose: Evaluate whether several unit groups can coordinate a remote maneuver or encirclement.
+    input_guide: maneuver is an object of named groups; each group requires units and target_hex. attack_target is optional and identifies the intended enemy target.
+    output_guide: Returns each group's route, position, contact, supply, readiness, eligible attackers, open escape routes, satisfied conditions, missing conditions, and a recommendation.
+    decision_effect: Do not launch the final joint attack until the required synchronization, supply, contact, and escape-route conditions are satisfied.
+    examples:
+      - '{"maneuver":{"north":{"units":["unit-a"],"target_hex":"3815"},"south":{"units":["unit-b"],"target_hex":"3817"}},"attack_target":"3716"}'
+
+  check_combat:
+    purpose: Calculate the authoritative legality and expected combat information for one attack, including a joint attack.
+    input_guide: attackers is a non-empty list of active-side unit ids; defender_hexes is a non-empty list of exact target hexes. Select only the attackers that should participate.
+    output_guide: Returns legality, attack and defense strength, odds column, terrain, supply, mine effects, CRT information, retreat options, and combat risk details.
+    decision_effect: Use the result to decide whether to attack, add or remove attackers, change the target, or pass. It does not execute combat.
+    examples:
+      - '{"attackers":["unit-a","unit-b"],"defender_hexes":["3716"]} for a selective joint attack'
+
+  inspect_supply:
+    purpose: Trace one unit's current supply route using the authoritative supply rules.
+    input_guide: unit is the exact unit id whose supply state and route should be inspected.
+    output_guide: Returns supply_state, the traced supply path, blocked status, and blocking hexes when no valid route exists.
+    decision_effect: Use the result before a scoring advance, remote maneuver, or attack. Avoid actions that make a key unit isolated unless the tactical gain is decisive.
+    examples:
+      - '{"unit":"unit-id"} before moving a spearhead across the scoring frontier'
+
+  phase_status:
+    purpose: Read authoritative phase progress and determine which units or combat opportunities remain.
+    input_guide: This tool takes no parameters.
+    output_guide: Returns phase-start eligible units, acted units, held units, remaining units, mandatory repairs, pass eligibility, and in combat phases grouped targets with eligible attackers.
+    decision_effect: Use it to choose the next unit, avoid ending a phase early, and select any useful subset for a joint attack.
+    examples:
+      - "{} at the beginning of a rolling movement or combat phase"
+
+  hold_unit:
+    purpose: Mark one remaining eligible unit as intentionally held for the current movement phase.
+    input_guide: unit is the exact remaining eligible unit id; reason is a short tactical explanation. Do not use it for mandatory stack-repair units.
+    output_guide: Returns whether the hold was accepted and the updated phase status; the board position does not change.
+    decision_effect: Holding consumes that unit's phase decision without ending the phase. Continue with other remaining units until pass is legal.
+    examples:
+      - '{"unit":"unit-id","reason":"reserve the flank and avoid harmful crowding"}'
+
+  hold_units:
+    purpose: Mark several remaining eligible units as intentionally held with one atomic bookkeeping call.
+    input_guide: orders is a non-empty list of unit and reason objects. Every unit must be currently eligible and none may require mandatory stack repair.
+    output_guide: Returns accepted units and updated phase_status. If one order is invalid, accepted=false and no unit is held.
+    decision_effect: Prefer this over repeated hold_unit calls when two or more units should remain in place; then continue with an actionable unit or pass when phase_status permits.
+    examples:
+      - '{"orders":[{"unit":"unit-a","reason":"hold blocking line"},{"unit":"unit-b","reason":"retain mobile reserve"}]}'
+
+  act:
+    purpose: Submit exactly one proposed game action to the authoritative rules bridge.
+    input_guide: >-
+      action must use the canonical schema: move_intent or move for movement,
+      combat with attackers and defender_hexes, exit_west when legal, or pass.
+    output_guide: Returns accepted, canonical_action, legality or rejection reason, normalized evaluation, victory impact, and whether tool calls must stop.
+    decision_effect: accepted=true changes the replay-owned game state exactly once and ends the current model step; accepted=false leaves the state unchanged and provides a repair reason.
+    examples:
+      - '{"action":{"type":"move_intent","unit":"unit-id","destination":"3511","mode":"auto"}}'
+      - '{"action":{"type":"combat","attackers":["unit-a"],"defender_hexes":["3716"]}}'
+      - '{"action":{"type":"pass","reason":"no useful legal action remains"}}'
+
+  inspect:
+    purpose: Legacy read-only inspection of one unit, hex, or supply route.
+    input_guide: kind is unit, hex, or supply; target is the exact unit id or hex coordinate.
+    output_guide: Returns the corresponding current unit, hex, or supply information without changing the board.
+    decision_effect: Use only with the legacy inspection profile; prefer the more explicit view_map and inspect_supply tools in new experiments.
+    examples:
+      - '{"kind":"hex","target":"3511"}'
+
+  evaluate_action:
+    purpose: Legacy pre-validation of a proposed action before submission.
+    input_guide: action uses the canonical action schema and must be a concrete proposed action.
+    output_guide: Returns legality, normalized action, evaluation, candidate match, and a current-step proposal_id.
+    decision_effect: Use only with the legacy three-tool profile; a valid proposal must be submitted through submit_action in the same step.
+    examples:
+      - '{"action":{"type":"move","unit":"unit-id","path":["3510","3511"],"mode":"normal"}}'
+
+  submit_action:
+    purpose: Legacy submission of the proposal_id most recently accepted by evaluate_action.
+    input_guide: proposal_id must belong to this session and the current step; it cannot be reused after another action or step.
+    output_guide: Returns final acceptance, canonical action, evaluation, and stop instruction.
+    decision_effect: A successful submission executes the validated action once and ends the step; it cannot be used to submit an unvalidated action.
+    examples:
+      - '{"proposal_id":"proposal-from-evaluate_action"}'
