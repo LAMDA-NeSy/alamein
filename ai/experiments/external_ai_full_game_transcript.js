@@ -35,6 +35,11 @@ const {
 const { agentMethodDefaults, resolveAgentMethod } = require("../core/agent_method_config.js");
 const { LOG_DIR } = require("../core/experiment_log.js");
 const { createContextStore, sha256 } = require("../core/context_store.js");
+const {
+  createReasoningMemory,
+  responseMessageFromResult,
+  toolMessageFromRecord
+} = require("../core/reasoning_memory.js");
 const { createPhaseIntentPlanner } = require("../core/phase_intent_runtime.js");
 const { createSaeRuntime, deriveActionEffect } = require("../core/sae_runtime.js");
 const { createTaskCheckerRuntime } = require("../core/task_checker_runtime.js");
@@ -52,7 +57,7 @@ const ROOT = PROJECT_ROOT;
 // thinking mode. The application-level parser below still requires exactly
 // one enabled tool call, so the provider can use its compatible `auto` mode.
 const EXECUTION_TOOL_CHOICE = "auto";
-const CONTEXT_POLICY = "stable_static_prefix_plus_compact_current_state_v3";
+const CONTEXT_POLICY = "stable_static_prefix_plus_compact_current_state_with_reasoning_memory_v4";
 const TOOL_FEEDBACK_PROFILE = "compact_tool_feedback_v1";
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -88,7 +93,10 @@ function parseJsonFromResult(result) {
 
 async function callModel(config, runtime, client, messages, label, options = {}) {
   const result = await client.complete({
-    messages,
+    // The execution loop mutates its in-step message chain after each response.
+    // Clone here so transport records and test clients capture the exact request
+    // that was sent rather than a later version of the same array.
+    messages: clone(messages),
     temperature: Number(runtime.profile.defaults.temperature ?? config.api.temperature ?? 0.25),
     max_tokens: Math.min(Number(options.maxTokens || config.api.maxTokens || 3600), runtime.profile.limits.output),
     response_format: !options.tools && runtime.profile.capabilities.structured_output
@@ -116,7 +124,11 @@ function parseProfileToolCall(result, toolProfile) {
     };
   }
   try {
-    return { tool: name, arguments: JSON.parse(calls[0].function.arguments || "{}") };
+    return {
+      tool: name,
+      call_id: calls[0].id || "",
+      arguments: JSON.parse(calls[0].function.arguments || "{}")
+    };
   }
   catch (error) {
     return { error: `invalid ${name} arguments: ${error.message}` };
@@ -497,10 +509,21 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
   const sessionId = options.sessionId || `manual-${runtime.run_id}`;
   const stepTimeoutMs = Number(options.timeoutMs || methodConfig.step_timeout_ms);
   const contextStore = options.contextStore || null;
+  const reasoningMemory = options.reasoningMemory || createReasoningMemory({
+    config: options.reasoningMemoryConfig || config.context?.reasoning_memory || {},
+    initial: contextStore?.memory?.().reasoning_memory || null
+  });
   let openingContextMessage = null;
   const phasePlanner = createPhaseIntentPlanner({ config, runtime, client, decisionPolicy });
   const saeRuntime = decisionPolicy === "hierarchical_sae"
-    ? createSaeRuntime({ config, runtime, client, taskChecker: options.taskChecker, decisionPolicy })
+    ? createSaeRuntime({
+      config,
+      runtime,
+      client,
+      taskChecker: options.taskChecker,
+      decisionPolicy,
+      reasoningMemory
+    })
     : null;
   const pendingApplications = new Map();
 
@@ -575,6 +598,16 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
     if (typeof bridge.submittedNextIntent === "function") {
       stepRecord.next_intent = bridge.submittedNextIntent();
     }
+    stepRecord.reasoning = {
+      policy: reasoningMemory.config,
+      response_rounds: (stepRecord.rounds || []).filter((round) => round.model_output).length,
+      reasoning_rounds: (stepRecord.rounds || []).filter((round) => {
+        const message = responseMessageFromResult({ response_json: round.model_output });
+        return typeof message?.reasoning_content === "string" && message.reasoning_content.trim();
+      }).length
+    };
+    stepRecord.reasoning_memory_entry = reasoningMemory.recordStep(stepRecord, input);
+    stepRecord.reasoning_memory_stats = reasoningMemory.stats();
     stepRecord.provider_result = {
       provider: runtime.profile.provider,
       model: runtime.profile.model,
@@ -672,6 +705,10 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         ...clone(stepRecord.task_observation)
       }]);
     }
+    reasoningMemory.recordActionEffect(stepRecord, pending.input || {});
+    stepRecord.reasoning_memory_entry = reasoningMemory.latest();
+    stepRecord.reasoning_memory_state = reasoningMemory.export();
+    stepRecord.reasoning_memory_stats = reasoningMemory.stats();
     if (options.taskChecker?.metadata) transcript.task_checker = options.taskChecker.metadata();
     if (contextStore && afterState) contextStore.recordModelStep(stepRecord, pending.input?.state || null, {
       context_policy: CONTEXT_POLICY,
@@ -690,6 +727,7 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       ? { phaseIntent: null, record: null, localFastPass: false }
       : await phasePlanner.plan(input, { deadline: stepDeadline });
     const saePlan = saeRuntime ? await saeRuntime.plan(input, { deadline: stepDeadline }) : null;
+    if (!saeRuntime) reasoningMemory.begin(input);
     const phasePlanMs = Date.now() - phasePlanStarted;
     const phaseIntent = saePlan?.phaseIntent || phasePlan.phaseIntent;
 
@@ -737,6 +775,8 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         recent_strategic_events: durableMemory.recent_strategic_events
       };
     }
+    const reasoningMemoryPayload = reasoningMemory.forPrompt(input);
+    if (reasoningMemoryPayload) context.reasoning_memory = reasoningMemoryPayload;
     if (!openingContextMessage) {
       openingContextMessage = JSON.stringify(staticMapContext(prepared.public_payload));
     }
@@ -764,6 +804,7 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       context_profile: CONTEXT_PROFILE_ID,
       context_policy: CONTEXT_POLICY,
       tool_feedback_profile: TOOL_FEEDBACK_PROFILE,
+      reasoning_memory: reasoningMemoryPayload,
       phase_plan_ms: phasePlanMs,
       prepare_ms: prepareMs,
       rounds: [],
@@ -814,6 +855,14 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
     }
 
     const toolResults = [];
+    const stepConversation = [
+      { role: "system", content: systemMessage },
+      ...(openingContextMessage ? [{ role: "user", content: openingMessage }] : []),
+      {
+        role: "user",
+        content: `CURRENT_STATE\n${JSON.stringify(projectedPayload)}\n\nTOOL_RESULTS_FROM_THIS_STEP\n[]`
+      }
+    ];
     let timedOut = false;
     const fallbackReserveMs = Math.max(0, Number(config.transport?.stepFallbackReserveMs ?? 0));
     const deadline = stepDeadline;
@@ -827,32 +876,19 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       let result;
       let parsed;
       try {
-        const compactFeedback = toolResults.map(compactToolFeedback);
-        const feedbackText = JSON.stringify(compactFeedback);
-        const currentContextMessage = `CURRENT_STATE\n${JSON.stringify(projectedPayload)}\n\nTOOL_RESULTS_FROM_THIS_STEP\n${feedbackText}`;
+        const feedbackText = JSON.stringify(toolResults.map(compactToolFeedback));
         const currentEffectiveBytes = systemContextBytes
           + staticContextBytes
-          + Buffer.byteLength(currentContextMessage, "utf8");
+          + Buffer.byteLength(JSON.stringify(stepConversation), "utf8");
         stepRecord.tool_feedback_bytes = Buffer.byteLength(feedbackText, "utf8");
         stepRecord.effective_context_bytes = Math.max(stepRecord.effective_context_bytes, currentEffectiveBytes);
-        const sessionMessages = [
-          { role: "system", content: systemMessage }
-        ];
-        if (openingContextMessage) {
-          sessionMessages.push({
-            role: "user",
-            content: openingMessage
-          });
-        }
-        sessionMessages.push({ role: "user", content: currentContextMessage });
         const requestOptions = {
           tools: modelTools,
           toolChoice: EXECUTION_TOOL_CHOICE,
           timeoutMs: Math.min(runtime.profile.defaults.timeout_ms, Math.max(1, remainingStepMs - fallbackReserveMs))
         };
-        result = await callModel(config, runtime, client, [
-          ...sessionMessages
-        ], `step_${input.step}_act_${attempt}`, requestOptions);
+        result = await callModel(config, runtime, client, stepConversation,
+          `step_${input.step}_act_${attempt}`, requestOptions);
         if (result.ok && result.recovered_after_retry) {
           stepRecord.recovered_transport_failures.push({
             attempts: result.attempts,
@@ -873,6 +909,12 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         parsed_output: parsed
       };
       stepRecord.rounds.push(round);
+      const assistantMessage = result?.ok
+        ? responseMessageFromResult(result, {
+          includeReasoning: reasoningMemory.config.enabled && reasoningMemory.config.within_step === "full"
+        })
+        : null;
+      if (assistantMessage) stepConversation.push(assistantMessage);
       if (parsed.error) {
         if (parsed.failure_type === "transport") {
           consecutiveTransportFailureRounds += 1;
@@ -885,6 +927,12 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         }
         else {
           stepRecord.protocol_failures.push({ round: attempt + 1, reason: parsed.error });
+        }
+        if (assistantMessage) {
+          stepConversation.push({
+            role: "user",
+            content: `The previous response was not executable: ${parsed.error}. Return exactly one enabled tool call.`
+          });
         }
         if (deadline - Date.now() <= fallbackReserveMs) {
           timedOut = true;
@@ -905,8 +953,17 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       }
       consecutiveTransportFailureRounds = 0;
       const toolResult = bridge.executeTool(parsed.tool, parsed.arguments, sessionId);
-      round.tool_result = { tool: parsed.tool, arguments: parsed.arguments, result: toolResult };
+      round.tool_result = {
+        tool: parsed.tool,
+        tool_call_id: parsed.call_id,
+        arguments: parsed.arguments,
+        result: toolResult
+      };
       toolResults.push(round.tool_result);
+      stepConversation.push(toolMessageFromRecord(
+        round.tool_result,
+        JSON.stringify(compactToolFeedback(round.tool_result))
+      ));
       if (parsed.tool !== "act") continue;
       const actionAttempt = {
         attempt: stepRecord.action_attempts.length + 1,
@@ -1319,7 +1376,8 @@ async function main() {
       bridge: createRuleBridge(config, { toolProfile: toolProfile.id }),
       taskChecker: taskCheckers[side] || null,
       contextStore: contextStores[side] || contextStore,
-      contextManifest: contextManifests[side] || contextManifest
+      contextManifest: contextManifests[side] || contextManifest,
+      reasoningMemoryConfig: methodConfig.reasoning_memory || undefined
     });
     const externalProviders = Object.fromEntries(
       externalSides.map((side) => [side, makeSingleActionProvider(config, runtimeBySide[side] || runtime, transcript, providerOptions(side))])

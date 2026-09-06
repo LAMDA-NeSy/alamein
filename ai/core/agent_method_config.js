@@ -69,6 +69,19 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
       replan_cooldown_actions: Math.max(0, Number(raw.replan_cooldown_actions || 3))
     })
     : null;
+  const reasoningMemory = raw.reasoning_memory && typeof raw.reasoning_memory === "object"
+    ? Object.freeze({
+      enabled: raw.reasoning_memory.enabled !== false,
+      within_step: String(raw.reasoning_memory.within_step || "full"),
+      cross_step: String(raw.reasoning_memory.cross_step || "summary_plus_excerpt"),
+      max_recent_entries: Math.max(1, Math.min(8, Number(raw.reasoning_memory.max_recent_entries || 4))),
+      max_excerpt_tokens: Math.max(0, Math.min(1600, Number(raw.reasoning_memory.max_excerpt_tokens ?? 800))),
+      max_summary_tokens: Math.max(100, Math.min(2400, Number(raw.reasoning_memory.max_summary_tokens || 1200))),
+      retain_rejected_options: raw.reasoning_memory.retain_rejected_options !== false,
+      reset_on_phase_change: raw.reasoning_memory.reset_on_phase_change !== false,
+      reset_on_replanning: raw.reasoning_memory.reset_on_replanning !== false
+    })
+    : null;
   if (taskManagement && !["hierarchical-task-v1", "side-aware-task-v2"].includes(taskManagement.protocol)) {
     throw new Error(`agent method ${methodId} task_protocol must be hierarchical-task-v1 or side-aware-task-v2`);
   }
@@ -80,6 +93,12 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
   }
   if (taskManagement && taskManagement.task_switching !== "existing_tasks_only") {
     throw new Error(`agent method ${methodId} task_switching must be existing_tasks_only`);
+  }
+  if (reasoningMemory && !["full", "none"].includes(reasoningMemory.within_step)) {
+    throw new Error(`agent method ${methodId} reasoning_memory.within_step must be full or none`);
+  }
+  if (reasoningMemory && !["none", "summary_only", "summary_plus_excerpt"].includes(reasoningMemory.cross_step)) {
+    throw new Error(`agent method ${methodId} reasoning_memory.cross_step is invalid`);
   }
   if (rollingUnitSettings && rollingUnitSettings.protocol !== "v1") {
     throw new Error(`agent method ${methodId} rolling_unit_protocol must be v1`);
@@ -101,7 +120,8 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
     model_profile: model.profile_id,
     step_timeout_ms: timeoutMs,
     rolling_unit: rollingUnitSettings,
-    task_management: taskManagement
+    task_management: taskManagement,
+    reasoning_memory: reasoningMemory
   });
 }
 

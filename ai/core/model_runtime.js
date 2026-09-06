@@ -309,7 +309,7 @@ function defaultMockResponse(runtime, body) {
   const messages = body.messages || [];
   const lastUserIndex = messages.reduce((latest, message, index) => message.role === "user" ? index : latest, -1);
   const lastUserContent = String(messages[lastUserIndex]?.content || "");
-  const lastTool = [...messages.slice(lastUserIndex + 1)].reverse().find((message) => message.role === "tool");
+  const lastTool = [...messages].reverse().find((message) => message.role === "tool");
   let toolPayload = null;
   try { toolPayload = lastTool ? JSON.parse(lastTool.content) : null; }
   catch {}
@@ -438,7 +438,12 @@ function defaultMockResponse(runtime, body) {
         : ["hold_unit", "hold_units"].includes(record.tool)
           ? record.result?.phase_status
           : null
-    )).find(Boolean);
+    )).find(Boolean)
+      || (lastTool?.name === "phase_status"
+        ? (toolPayload?.result || toolPayload)
+        : ["hold_unit", "hold_units"].includes(lastTool?.name)
+          ? (toolPayload?.result?.phase_status || toolPayload?.phase_status)
+          : null);
     if (!latestStatus) {
       message = {
         role: "assistant",

@@ -694,7 +694,7 @@ function operationState(intent, allocation, input, built, taskPlan = null, feedb
   };
 }
 
-function createSaeRuntime({ config, runtime, client, taskChecker = null, decisionPolicy = "hierarchical_sae" }) {
+function createSaeRuntime({ config, runtime, client, taskChecker = null, decisionPolicy = "hierarchical_sae", reasoningMemory = null }) {
   const cache = new Map();
   const replanReasons = new Map();
   const taskManager = config.task_management === "multi_task"
@@ -786,6 +786,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     const fingerprintChanged = (!!cached?.battlefield_fingerprint && cached.battlefield_fingerprint !== currentFingerprint)
       || (!!lastPlan?.battlefield_fingerprint && lastPlan.battlefield_fingerprint !== currentFingerprint);
     const replanReason = replanReasons.get(key) || taskReplanReason || (fingerprintChanged ? "enemy_state_changed" : "");
+    reasoningMemory?.begin(input, { replanned: !!replanReason, reason: replanReason });
     if (replanReason) {
       cache.delete(key);
       replanReasons.delete(key);
@@ -854,6 +855,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     }));
     const payload = publicPayload(config, built.publicContext, []);
     const strategicPayload = compactAgentPayload(payload, { includeInitialMap: false });
+    if (reasoningMemory) strategicPayload.context.reasoning_memory = reasoningMemory.forPrompt(input);
     // Planning has no rule-inspection tool, so retain the compact rules brief.
     strategicPayload.context.rules_brief = built.publicContext.rules_brief;
     if (openGoalEnabled) {
@@ -902,6 +904,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       planning_request: "force_allocation",
       strategic_intent: intent,
       goal_plan: goalPlan,
+      reasoning_memory: reasoningMemory?.forPrompt(input) || null,
       current_state: built.publicContext.game,
       units: compactAllocationUnits(built.publicContext.unit_index),
       victory: built.publicContext.victory,

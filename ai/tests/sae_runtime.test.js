@@ -184,7 +184,7 @@ test("SAE caches a turn-side plan and records separate planner fallbacks", async
   assert.equal(Object.hasOwn(strategicPayload, "forces"), false);
   assert.equal(JSON.parse(requests[1].messages.at(-1).content).forces, undefined);
   assert.ok(Array.isArray(JSON.parse(requests[1].messages.at(-1).content).units.active));
-  assert.equal(first.record.context_profile, "compact_current_state_v3");
+  assert.equal(first.record.context_profile, "compact_current_state_v4_reasoning_memory");
   assert.ok(first.record.strategic_context_bytes < first.record.strategic_raw_context_bytes);
   const nextPhase = await sae.plan({ ...input, phase: "axis_combat", step: 3 });
   assert.equal(calls, 2);

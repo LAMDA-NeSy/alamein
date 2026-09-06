@@ -86,6 +86,8 @@ test("comparison contract is harness-independent but changes when a controlled f
     assert.equal(taskSae.contract.supply_assignment_grounding_version, "executable-supply-v1");
     assert.equal(taskSae.contract.task_management, "multi_task");
     assert.equal(taskSae.contract.task_protocol, "side-aware-task-v2");
+    assert.equal(taskSae.contract.reasoning_memory_protocol, "reasoning-memory-v1");
+    assert.equal(taskSae.contract.reasoning_memory_policy.within_step, "full");
   assert.equal(taskSae.contract.task_checker_model_profile, "mock_secondary");
     assert.equal(taskSae.contract.task_progress_version, "evidence-grounded-model-task-progress-v6");
     assert.equal(taskSae.contract.strategic_movement_guard_version, "goal-grounded-movement-v1");

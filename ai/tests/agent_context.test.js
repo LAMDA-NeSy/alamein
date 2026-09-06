@@ -43,7 +43,7 @@ test("shared context projection preserves execution controls and bounds repeated
     }
   };
   const compact = compactAgentPayload(payload);
-  assert.equal(CONTEXT_PROFILE_ID, "compact_current_state_v3");
+  assert.equal(CONTEXT_PROFILE_ID, "compact_current_state_v4_reasoning_memory");
   assert.equal(compact.context.forces, undefined);
   assert.equal(compact.context.battlefield_summary, undefined);
   assert.equal(compact.context.map_intel.key_hexes.length, 8);
@@ -55,6 +55,28 @@ test("shared context projection preserves execution controls and bounds repeated
   assert.equal(compact.context.game_overview.player_goal.side, "axis");
   assert.match(compact.context.game_overview.player_goal.win_condition, /scoring frontier/);
   assert.ok(contextBytes(compact) < contextBytes(payload));
+});
+
+test("dynamic projection carries bounded reasoning memory instead of full transcript history", () => {
+  const compact = compactAgentPayload({
+    context: {
+      reasoning_memory: {
+        protocol: "reasoning-memory-v1",
+        policy: { cross_step: "summary_plus_excerpt" },
+        current: { turn: 2, phase: "axis_combat", side: "axis" },
+        recent_decisions: Array.from({ length: 8 }, (_, index) => ({
+          step: index + 1,
+          summary: `decision ${index}`,
+          reasoning_excerpt: "x".repeat(500),
+          unneeded: "must not reach the model"
+        })),
+        instructions: ["revalidate"]
+      }
+    }
+  }, { includeInitialMap: false, includeStableContext: false });
+  assert.equal(compact.context.reasoning_memory.recent_decisions.length, 4);
+  assert.equal(compact.context.reasoning_memory.recent_decisions[0].unneeded, undefined);
+  assert.equal(compact.context.reasoning_memory.instructions[0], "revalidate");
 });
 
 test("dynamic projection omits the opening map and repeated operation copies", () => {

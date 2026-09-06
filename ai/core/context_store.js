@@ -135,6 +135,7 @@ function createContextStore(options = {}) {
     force_allocation: null,
     operation_state: null,
     task_plan: null,
+    reasoning_memory: null,
     supply_risks: [],
     recent_strategic_events: []
   };
@@ -145,7 +146,7 @@ function createContextStore(options = {}) {
   }
 
   function updateMemory(update = {}) {
-    for (const key of ["player_goal_summary", "strategic_intent", "goal_plan", "force_allocation", "operation_state", "task_plan"]) {
+    for (const key of ["player_goal_summary", "strategic_intent", "goal_plan", "force_allocation", "operation_state", "task_plan", "reasoning_memory"]) {
       if (update[key] !== undefined) memory[key] = clone(update[key]);
     }
     if (Array.isArray(update.supply_risks)) memory.supply_risks = clone(update.supply_risks).slice(-12);
@@ -185,6 +186,8 @@ function createContextStore(options = {}) {
       operation_state: step.operation_state || null,
       task_plan: taskPlan || null,
       task_observation: step.task_observation || null,
+      reasoning_memory_entry: step.reasoning_memory_entry || null,
+      reasoning_memory_stats: step.reasoning_memory_stats || null,
       context_policy: metadata.context_policy || "current_state_plus_durable_memory",
       map_reference_hash: metadata.map_reference_hash || null,
       tool_calls: (step.rounds || []).filter((round) => round.tool_result).map((round) => round.tool_result),
@@ -199,6 +202,7 @@ function createContextStore(options = {}) {
       force_allocation: taskIsTerminal ? null : step.force_allocation,
       operation_state: durableOperationState,
       task_plan: taskPlan === undefined ? undefined : (taskIsTerminal ? null : taskPlan),
+      reasoning_memory: step.reasoning_memory_state || undefined,
       recent_strategic_events: [{ step: step.step, turn: step.turn, phase: step.phase, action: step.final_action || null }]
     });
   }

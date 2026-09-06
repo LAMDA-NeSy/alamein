@@ -1,6 +1,6 @@
 "use strict";
 
-const CONTEXT_PROFILE_ID = "compact_current_state_v3";
+const CONTEXT_PROFILE_ID = "compact_current_state_v4_reasoning_memory";
 
 function boundedList(value, limit) {
   return Array.isArray(value) ? value.slice(0, limit) : [];
@@ -213,6 +213,25 @@ function compactTools(tools) {
   return boundedList(tools, 32).map((tool) => ({ name: tool?.name })).filter((tool) => tool.name);
 }
 
+function compactReasoningMemory(memory) {
+  if (!memory || typeof memory !== "object") return memory;
+  const compactEntry = (entry) => pickDefined(entry, [
+    "step", "turn", "phase", "status", "action", "purpose", "summary",
+    "reasoning_excerpt", "tool_feedback", "rejected_options", "action_effect",
+    "task_progress_delta", "next_intent"
+  ]);
+  return {
+    protocol: memory.protocol || "reasoning-memory-v1",
+    policy: memory.policy,
+    current: memory.current,
+    recent_decisions: boundedList(memory.recent_decisions, 4).map(compactEntry),
+    previous_phase_decision: memory.previous_phase_decision
+      ? compactEntry(memory.previous_phase_decision) : null,
+    last_replan: memory.last_replan || null,
+    instructions: boundedList(memory.instructions, 4)
+  };
+}
+
 function compactAgentPayload(payload, options = {}) {
   const context = payload?.context || {};
   const mapIntel = context.map_intel || {};
@@ -263,6 +282,7 @@ function compactAgentPayload(payload, options = {}) {
   if (context.action_effect) compactContext.action_effect = context.action_effect;
   if (context.task_progress_delta) compactContext.task_progress_delta = context.task_progress_delta;
   if (context.next_intent) compactContext.next_intent = context.next_intent;
+  if (context.reasoning_memory) compactContext.reasoning_memory = compactReasoningMemory(context.reasoning_memory);
   if (Array.isArray(context.candidate_actions)) compactContext.candidate_actions = boundedList(context.candidate_actions, 6);
   if (Array.isArray(context.verified_action_options)) {
     compactContext.verified_action_options = boundedList(context.verified_action_options, 8).map(compactAlternative);

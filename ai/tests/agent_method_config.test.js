@@ -72,6 +72,17 @@ test("YAML config resolves every decision method and harness", () => {
       passive_hold_replan_threshold: 3,
       replan_cooldown_actions: 3
   });
+  assert.deepEqual(resolveAgentMethod("hierarchical_sae", { config }).reasoning_memory, {
+    enabled: true,
+    within_step: "full",
+    cross_step: "summary_plus_excerpt",
+    max_recent_entries: 4,
+    max_excerpt_tokens: 800,
+    max_summary_tokens: 1200,
+    retain_rejected_options: true,
+    reset_on_phase_change: true,
+    reset_on_replanning: true
+  });
 });
 
 test("configuration directory contains YAML documents only", () => {

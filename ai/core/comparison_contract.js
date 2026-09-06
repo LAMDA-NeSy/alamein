@@ -167,6 +167,10 @@ function createComparisonContract({
       step_fallback_reserve_ms: Math.max(0, Number(config.transport?.stepFallbackReserveMs ?? 0))
     },
     context_profile: contextProfile,
+    reasoning_memory_protocol: decisionPolicy === "hierarchical_sae"
+      ? "reasoning-memory-v1" : null,
+    reasoning_memory_policy: decisionPolicy === "hierarchical_sae"
+      ? (config.context?.reasoning_memory || null) : null,
     prompt_registry_version: promptRegistry.version,
     prompt_registry_hash: promptRegistry.hash,
     harness_prompt_version: harnessPrompt.version,
