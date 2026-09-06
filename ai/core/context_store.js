@@ -235,8 +235,10 @@ function createContextStore(options = {}) {
     };
     fs.writeFileSync(files.manifest, JSON.stringify(normalizedManifest, null, 2), "utf8");
     if (mapReference) fs.writeFileSync(files.mapReference, JSON.stringify(mapReference, null, 2), "utf8");
-    if (!fs.existsSync(files.stateSnapshots)) fs.writeFileSync(files.stateSnapshots, "", "utf8");
-    if (!fs.existsSync(files.modelSteps)) fs.writeFileSync(files.modelSteps, "", "utf8");
+    // initialize starts a new experiment; never append records from a prior
+    // run that happened to reuse the same output path.
+    fs.writeFileSync(files.stateSnapshots, "", "utf8");
+    fs.writeFileSync(files.modelSteps, "", "utf8");
     writeMemory();
     return normalizedManifest;
   }

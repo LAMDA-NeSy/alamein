@@ -72,3 +72,14 @@ test("context store clears terminal SAE task memory instead of replaying it", ()
   assert.equal(memory.operation_state, null);
   assert.equal(memory.task_plan, null);
 });
+
+test("context store initialization starts a fresh run when a directory is reused", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "alamein-context-reuse-"));
+  const store = createContextStore({ runId: "run-reuse", directory });
+  store.initialize({ scenario: "july", seed: 1 }, { layout: [] });
+  store.snapshot({ stage: "old", step: 1, state: { turn: 1 } });
+  store.recordModelStep({ step: 1, turn: 1, side: "axis", final_action: { type: "pass" }, rounds: [] }, { turn: 1 });
+  store.initialize({ scenario: "july", seed: 2 }, { layout: [] });
+  assert.equal(fs.readFileSync(store.files.stateSnapshots, "utf8"), "");
+  assert.equal(fs.readFileSync(store.files.modelSteps, "utf8"), "");
+});

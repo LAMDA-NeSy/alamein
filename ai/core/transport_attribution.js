@@ -12,9 +12,11 @@ const NETWORK_ERROR_CLASSES = new Set([
 ]);
 
 function failedTransportRecords(runtime, startIndex = 0) {
-  return (runtime?.transport || [])
-    .slice(startIndex)
-    .filter((record) => record.error_class && record.error_class !== "none");
+  const records = (runtime?.transport || []).slice(startIndex);
+  return records.filter((record) => (
+    record.error_class
+    && record.error_class !== "none"
+  ));
 }
 
 function transportFailureDetails(runtime, startIndex = 0) {
@@ -24,6 +26,19 @@ function transportFailureDetails(runtime, startIndex = 0) {
     attempts: Number(record.attempts || 0),
     elapsed_ms: Number(record.elapsed_ms || 0)
   }));
+}
+
+function recoveredTransportDetails(runtime, startIndex = 0) {
+  const records = (runtime?.transport || []).slice(startIndex);
+  return records
+    .filter((record) => record.recovered_after_retry)
+    .map((record) => ({
+      status: Number(record.status || 0),
+      attempts: Number(record.attempts || 0),
+      elapsed_ms: Number(record.elapsed_ms || 0),
+      retryable_failures: record.retryable_failures || [],
+      recovery: "gateway_retry"
+    }));
 }
 
 function hasNetworkFailure(records = []) {
@@ -63,6 +78,7 @@ module.exports = {
   fallbackReasonClass,
   hasNetworkFailure,
   isNonRetryableRequestStatus,
+  recoveredTransportDetails,
   stepBudget,
   transportFailureDetails
 };

@@ -189,18 +189,18 @@ function reviewStrategicMovement({ decisionMode, action, assessment, operationSt
   const primaryGoal = operationState?.goal_plan?.primary_goal || {};
   const scoringSupplyGoal = (primaryGoal.observable_conditions || [])
     .some((condition) => condition.kind === "scoring_frontier_at_least");
-  const targetColumn = Number(primaryGoal.target_column || operationState?.target_column || 0);
   const destinationColumn = Number(String(destination).slice(0, 2));
-  const role = operationState?.units?.[action.unit]?.role || "";
   const projectedSupply = String(impact.projected_supply_after_move || "").toLowerCase();
+  const currentFrontier = Number(operationState?.phase_dispatch?.frontier_breakthrough?.current_column || 0);
+  const extendsScoringFrontier = Number.isFinite(destinationColumn)
+    && currentFrontier > 0
+    && destinationColumn > currentFrontier;
   if (scoringSupplyGoal
-    && role === "spearhead"
+    && unit.side === "axis"
     && (unit.kind || "ground") === "ground"
-    && Number.isFinite(destinationColumn)
-    && targetColumn > 0
-    && destinationColumn >= targetColumn
+    && extendsScoringFrontier
     && !["supplied", "partially_supplied", "partial"].includes(projectedSupply)) {
-    issues.push(`spearhead would enter or pass scoring column ${targetColumn} with projected supply ${projectedSupply || "unknown"}; this does not satisfy the grounded scoring goal`);
+    issues.push(`move would extend the Axis scoring frontier beyond column ${currentFrontier} with projected supply ${projectedSupply || "unknown"}; it would not score and must be replaced by a supplied route or preparation action`);
   }
   return { accept: issues.length === 0, issues, warnings, exemptions };
 }
@@ -313,6 +313,18 @@ function bridgeToolDescriptions(profile) {
   }));
 }
 
+function normalizeNextIntent(value, operationState) {
+  if (!value || typeof value !== "object") return null;
+  const taskIds = new Set((operationState?.task_plan?.children || []).map((task) => task.id));
+  const taskId = String(value.task_id || "");
+  return {
+    task_id: taskId && taskIds.has(taskId) ? taskId : null,
+    purpose: String(value.purpose || "").trim().slice(0, 180),
+    preferred_follow_up: String(value.preferred_follow_up || value.preferredFollowUp || "").trim().slice(0, 180),
+    valid_task_reference: !taskId || taskIds.has(taskId)
+  };
+}
+
 function createActionRuleBridge(config, options = {}) {
   const profile = resolveToolProfile(options.toolProfile || "map_and_action", options.toolProfileOptions);
   const hasHoldTool = profile.tools.includes("hold_unit") || profile.tools.includes("hold_units");
@@ -328,7 +340,7 @@ function createActionRuleBridge(config, options = {}) {
 
   function prepareStep(input) {
     const decisionMode = input.decisionMode || input.decision_policy || "direct";
-    const built = buildContext(config, {
+    const buildOptions = {
       state: input.state,
       decisionMode,
       phaseIntent: input.phaseIntent,
@@ -337,7 +349,12 @@ function createActionRuleBridge(config, options = {}) {
       operationState: input.operationState,
       includeInitialMap: Number(input.step) === 1,
       privateCandidates: input.privateCandidates !== false
-    });
+    };
+    // SAE already built a rule context for its strategic request. Reuse that
+    // context for the execution payload so supply and victory caches survive
+    // the handoff without changing the current-state data.
+    if (input.builtContext?.ctx?.state) buildOptions.baseBuilt = input.builtContext;
+    const built = buildContext(config, buildOptions);
     const policyCandidates = built.publicContext.candidate_actions || built.candidatePool || [];
     const payload = publicPayload(config, built.publicContext, []);
     payload.context.protocol.tool_call_shape = { name: profile.tools.join("|"), arguments: "tool-specific JSON" };
@@ -396,6 +413,28 @@ function createActionRuleBridge(config, options = {}) {
     if (!phaseSnapshots.has(phaseKey)) phaseSnapshots.set(phaseKey, phaseEligibleUnits(built, current.side));
     if (!phaseHeldUnits.has(phaseKey)) phaseHeldUnits.set(phaseKey, new Map());
     payload.context.phase_status = phaseStatus();
+    // Refresh the bounded tactical summary from the same authoritative context
+    // used by the action bridge. This keeps the summary current without adding
+    // another model request or a second rules implementation.
+    if (decisionMode === "hierarchical_sae" || input.operationState?.tactical_summary) {
+      try {
+        const { buildTacticalSummary } = require("./sae_runtime.js");
+        payload.context.tactical_summary = buildTacticalSummary(
+          input,
+          built,
+          input.operationState?.task_plan || null,
+          input.forceAllocation || input.operationState?.force_allocation || {},
+          {
+            phaseStatus: payload.context.phase_status,
+            lastActionEffect: input.operationState?.tactical_summary?.last_action_effect || null,
+            lastTaskProgressDelta: input.operationState?.tactical_summary?.task_progress_delta || {}
+          }
+        );
+      }
+      catch {
+        payload.context.tactical_summary = input.operationState?.tactical_summary || null;
+      }
+    }
     payload.context.movement_memory = Object.fromEntries(actionableUnits()
       .map((unit) => [unit.id, {
         current_hex: unit.hex,
@@ -517,6 +556,11 @@ function createActionRuleBridge(config, options = {}) {
       for (const unit of adjacent) {
         const verdict = RulesEngine.checkCombat(ctx, { attackers: [unit.id], defender_hexes: [targetHex] });
         const indexed = unitIndex.get(unit.id) || {};
+        // checkCombat validates a complete attack and can therefore reject a
+        // one-unit probe because another eligible adjacent unit is mandatory
+        // under rule 9.25. phase_status describes unit eligibility, so that
+        // missing-attacker diagnostic must not hide the unit from the group.
+        const canAttack = eligibleSet.has(unit.id);
         const detail = {
           unit: unit.id,
           name: unit.name || unit.id,
@@ -527,13 +571,49 @@ function createActionRuleBridge(config, options = {}) {
           state: unit.state || "fresh",
           fresh: (unit.state || "fresh") === "fresh",
           adjacent: true,
-          can_attack: verdict.legal
+          can_attack: canAttack
         };
-        if (verdict.legal && eligibleSet.has(unit.id)) attackers.push(detail);
+        if (canAttack) attackers.push(detail);
         else unavailable.push({ unit: unit.id, hex: unit.hex, reason: verdict.legal ? reasonForUnavailable(unit) : verdict.reason || reasonForUnavailable(unit) });
       }
       const terrain = RulesEngine.hexTags(ctx, targetHex);
       const defense = defenders.reduce((sum, unit) => sum + Number(unit.defense || 0), 0);
+      const requiredDefenderHexes = (attackerIds) => {
+        const selected = attackerIds
+          .map((attackerId) => ({ ...(current.built.ctx.state.units?.[attackerId] || {}), id: attackerId }))
+          .filter((unit) => current.built.ctx.state.units?.[unit.id]);
+        return [...new Set([
+          targetHex,
+          ...RulesEngine.requiredDefenderHexes(current.built.ctx, selected)
+        ])].sort();
+      };
+      const rankedAttackers = attackers
+        .slice()
+        .sort((left, right) => Number(right.effective_attack || 0) - Number(left.effective_attack || 0)
+          || left.unit.localeCompare(right.unit));
+      let recommendation = null;
+      // Search only the strongest prefix. This gives the model a compact,
+      // rule-verified starting point while preserving its freedom to choose
+      // any other subset and re-check it before execution.
+      for (let count = 1; count <= rankedAttackers.length; count += 1) {
+        const selected = rankedAttackers.slice(0, count).map((item) => item.unit);
+        const defenderHexList = requiredDefenderHexes(selected);
+        let verdict;
+        try { verdict = RulesEngine.checkCombat(ctx, { attackers: selected, defender_hexes: defenderHexList }); }
+        catch { verdict = { legal: false, reason: "combat verification failed" }; }
+        const ratio = oddsIndex(verdict.details?.odds_column);
+        if (verdict.legal && ratio >= oddsIndex("2-1")) {
+          recommendation = {
+            recommended_attackers: selected,
+            recommended_defender_hexes: defenderHexList,
+            recommended_odds: verdict.details?.odds_column || "",
+            recommendation_reason: count === 1
+              ? "a single locally verified attacker reaches the strategic minimum"
+              : `the smallest strongest-attacker prefix reaching at least 2-1 uses ${count} attackers`
+          };
+          break;
+        }
+      }
       return {
         target_hex: targetHex,
         defenders,
@@ -542,6 +622,12 @@ function createActionRuleBridge(config, options = {}) {
         attackers_that_can_attack: attackers,
         unavailable_attackers: unavailable,
         joint_attack_rule: "Choose any subset or all of attackers_that_can_attack. Every chosen unit must remain adjacent, fresh, eligible, and pass the final act/check_combat validation. The final odds are calculated after the chosen subset is submitted.",
+        ...(recommendation || {
+          recommended_attackers: [],
+          recommended_defender_hexes: [targetHex],
+          recommended_odds: "",
+          recommendation_reason: "no locally verified attacker prefix reaches 2-1; preserve force or inspect another target"
+        }),
         has_attack: attackers.length > 0
       };
     });
@@ -773,6 +859,19 @@ function createActionRuleBridge(config, options = {}) {
     };
   }
 
+  function movementFallbackScore(ctx, action) {
+    const unit = ctx.state.units?.[action.unit];
+    if (!unit) return -100000;
+    const destination = action.destination || action.path?.at(-1) || "";
+    const startColumn = Number(String(unit.hex || "").slice(0, 2));
+    const destinationColumn = Number(String(destination).slice(0, 2));
+    const westWithdrawal = ctx.state.scenario === "october"
+      && unit.side === "axis"
+      && Number(ctx.state.turn || 1) > 10;
+    const direction = westWithdrawal ? startColumn - destinationColumn : destinationColumn - startColumn;
+    return direction * 100 - Number(action.spent || 0) * 0.1;
+  }
+
   function fallbackAction() {
     if (!current) return { type: "pass", reason: "local fallback" };
     if (!hasHoldTool) return clone(current.fallback);
@@ -806,14 +905,21 @@ function createActionRuleBridge(config, options = {}) {
       const reachable = RulesEngine.reachableHexes(current.built.ctx, remainingUnit.id, { mode: "normal", maxHexes: 120 });
       const target = [...reachable.entries()]
         .filter(([hex, item]) => hex !== remainingUnit.hex && item.path?.length > 1)
-        .sort((left, right) => Number(right[1].cost || 0) - Number(left[1].cost || 0))[0];
+        .map(([hex, item]) => ({
+          action: {
+            type: "move",
+            unit: remainingUnit.id,
+            path: item.path,
+            mode: "normal",
+            destination: hex,
+            spent: item.cost
+          }
+        }))
+        .sort((left, right) => movementFallbackScore(current.built.ctx, right.action) - movementFallbackScore(current.built.ctx, left.action))[0];
       if (target) {
         const generated = {
-          type: "move",
-          unit: remainingUnit.id,
-          path: clone(target[1].path),
-          mode: "normal",
-          destination: target[0],
+          ...target.action,
+          path: clone(target.action.path),
           reason: "local fallback: remaining eligible unit has a legal move"
         };
         const acceptedGenerated = acceptCandidate(generated);
@@ -1086,6 +1192,7 @@ function createActionRuleBridge(config, options = {}) {
       return { accepted: false, reason: "proposal_id is missing, stale, or was not accepted by evaluate_action" };
     }
     current.submitted = clone(current.proposals.get(proposalId));
+    current.next_intent = normalizeNextIntent(args.next_intent, current.operationState);
     recordAcceptedMovement(current.submitted);
     current.accepted_at_record = records.length;
     return { accepted: true, stop: true, action: clone(current.submitted), instruction: "Action accepted. Stop calling tools." };
@@ -1199,6 +1306,7 @@ function createActionRuleBridge(config, options = {}) {
       };
     }
     current.submitted = clone(canonicalAction);
+    current.next_intent = normalizeNextIntent(args.next_intent, current.operationState);
     recordAcceptedMovement(current.submitted);
     current.accepted_at_record = records.length;
     return {
@@ -1206,6 +1314,7 @@ function createActionRuleBridge(config, options = {}) {
       stop: true,
       action: clone(current.submitted),
       canonical_action: clone(current.submitted),
+      next_intent: current.next_intent,
       assessment,
       strategic_review: strategicReview,
       instruction: "Action accepted. Stop calling tools."
@@ -1353,6 +1462,7 @@ function createActionRuleBridge(config, options = {}) {
     prepareStep,
     phaseStatus: () => current ? clone(phaseStatus()) : null,
     submittedAction: () => current?.submitted ? clone(current.submitted) : null,
+    submittedNextIntent: () => current?.next_intent ? clone(current.next_intent) : null,
     fallbackAction,
     current: () => current,
     start,

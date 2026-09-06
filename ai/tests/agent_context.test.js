@@ -93,6 +93,31 @@ test("dynamic projection omits the opening map and repeated operation copies", (
   assert.equal(compact.context.phase_status.remaining_units[0], "u1");
 });
 
+test("dynamic operation projection preserves movement combat preparation", () => {
+  const compact = compactAgentPayload({
+    context: {
+      operation_state: {
+        phase_dispatch: {
+          phase_kind: "initial_movement",
+          upcoming_combat_opportunities: [{
+            target_hex: "3011",
+            approaching_units: ["axis-1", "axis-2"],
+            joint_attack_potential: true,
+            verified_combat: false
+          }],
+          preparation_actions: ["preserve supply while preparing contact"],
+          recommended_preparation_unit_ids: ["axis-1", "axis-2"]
+        }
+      }
+    }
+  }, { includeInitialMap: false });
+  const dispatch = compact.context.operation_state.phase_dispatch;
+  assert.equal(dispatch.upcoming_combat_opportunities[0].target_hex, "3011");
+  assert.equal(dispatch.upcoming_combat_opportunities[0].verified_combat, false);
+  assert.deepEqual(dispatch.recommended_preparation_unit_ids, ["axis-1", "axis-2"]);
+  assert.deepEqual(dispatch.preparation_actions, ["preserve supply while preparing contact"]);
+});
+
 test("stable opening fields can be removed from the per-step projection", () => {
   const compact = compactAgentPayload({
     provider: "provider",

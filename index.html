@@ -592,7 +592,7 @@
                 <ul>
                   <li><b>July：</b>有 Boxed Areas。Allied 起始在盒形区域内的单位通常不能主动离开，除非战斗、交换、消灭或撤退导致。Axis 进入后可使对应 boxed 区域失效。</li>
                   <li><b>September / Alam Halfa：</b>第一回合 Allied 跳过 Initial Movement，Axis 第一回合攻击力有特殊加成。</li>
-                  <li><b>October：</b>Allied 先手。前 10 回合 Axis 不能随意向西越过 Retreat Line；越线向东后，直到第 10 回合结束不能再向西退回。</li>
+                  <li><b>October：</b>Allied 先手。直到并包括第 10 回合，位于 Axis Retreat Line 与 Axis Start Line 之间的 Axis 单位不能向西移动；已在 Retreat Line 西侧的单位可在西侧自由移动，但向东越线后不能再向西跨回。</li>
                   <li><b>胜利：</b>以 Axis VP 计分。Axis 通过消灭 Allied 作战单位、使 Allied 孤立消灭、场景特殊目标等获得 VP。不同场景有不同初始 VP 和特殊得分。</li>
                 </ul>
               </div>
@@ -837,6 +837,7 @@
     </section>
 
     <script src="./rule_engine.js?v=20260729-138"></script>
+    <script src="./ai/core/rules_ai_controller.js?v=20260903-1"></script>
     <script type="module" src="./ai/core/browser_config_loader.mjs?v=20260806-4"></script>
   </body>
 </html>

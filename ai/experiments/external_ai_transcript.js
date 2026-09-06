@@ -13,13 +13,22 @@ const ROOT = PROJECT_ROOT;
 const OUT = defaultLogFile("last_external_ai_transcript.json");
 const CONTEXT_OUT = defaultLogFile("last_external_ai_context.json");
 const MOCK_OUT = defaultLogFile("last_external_ai_mock_transcript.json");
+const STATIC_JSON_CACHE = new Map();
+let MAP_HEX_TOPOLOGY_CACHE = null;
+const MAP_TOPOLOGY_SUMMARY_CACHE = new Map();
 
 function readConfig() {
   return { ...readConfigFile(path.join(CONFIG_DIR, "ai_config.yaml")), strategy: strategyConfig() };
 }
 
 function readJson(relativePath) {
-  return JSON.parse(fs.readFileSync(path.join(ROOT, relativePath), "utf8"));
+  const file = path.resolve(ROOT, relativePath);
+  const cacheable = file === path.join(ROOT, "rules_el_alamein.json")
+    || file === path.join(ROOT, "terrain.json");
+  if (cacheable && STATIC_JSON_CACHE.has(file)) return STATIC_JSON_CACHE.get(file);
+  const value = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (cacheable) STATIC_JSON_CACHE.set(file, value);
+  return value;
 }
 
 function cloneJson(value) {
@@ -102,7 +111,7 @@ function fixedAiTarget(ctx, side = ctx.state.active_side) {
 
 function scoringFrontier(ctx) {
   const scenario = ctx.state.scenario || "july";
-  const victory = RulesEngine.checkVictory(ctx);
+  const victory = cachedVictory(ctx);
   if (scenario === "july") {
     const advance = victory.breakdown?.find((item) => item.id === "july_east_of_3400");
     const currentColumn = Number(advance?.farthest_column || 34);
@@ -338,10 +347,15 @@ function alliedDefensiveImpactAfterMove(ctx, action, currentFarthestColumn) {
   };
 }
 
+function cachedVictory(ctx) {
+  if (!ctx) return null;
+  ctx.ai_victory_cache ||= RulesEngine.checkVictory(ctx);
+  return ctx.ai_victory_cache;
+}
+
 function currentJulyAdvanceColumn(ctx) {
   if (ctx.state.scenario !== "july") return 34;
-  ctx.ai_victory_impact_cache ||= RulesEngine.checkVictory(ctx);
-  const advance = ctx.ai_victory_impact_cache.breakdown?.find((item) => item.id === "july_east_of_3400");
+  const advance = cachedVictory(ctx)?.breakdown?.find((item) => item.id === "july_east_of_3400");
   return Number(advance?.farthest_column || 34);
 }
 
@@ -706,7 +720,20 @@ function decisionBrief(ctx, candidates, activeSide) {
   };
 }
 
-function intentBrief(ctx, activeUnits, activeSide) {
+function compactVerifiedAction(item) {
+  const action = item?.action || item || {};
+  const evaluation = item?.evaluation || {};
+  return {
+    action,
+    score: item?.score ?? null,
+    summary: evaluation.summary || "",
+    projected_supply: evaluation.victory_impact?.projected_supply_after_move || "",
+    estimated_vp_delta: Number(evaluation.victory_impact?.estimated_vp_delta || 0),
+    risks: (evaluation.risks || []).slice(0, 4)
+  };
+}
+
+function intentBrief(ctx, activeUnits, activeSide, verifiedCandidates = []) {
   const kind = phaseKind(ctx.state.phase);
   const movers = activeUnits
     .filter((unit) => unit.can_move_now && unit.mp > 0)
@@ -721,6 +748,10 @@ function intentBrief(ctx, activeUnits, activeSide) {
   const attackers = activeUnits
     .filter((unit) => unit.can_attack_now)
     .map((unit) => ({ unit: unit.id, hex: unit.hex, attack: unit.atk, supply: unit.supply }));
+  const verifiedActionOptions = verifiedCandidates
+    .filter((item) => item?.action?.type !== "pass")
+    .slice(0, 8)
+    .map(compactVerifiedAction);
   return {
     read_first: true,
     mode: "intent",
@@ -734,7 +765,10 @@ function intentBrief(ctx, activeUnits, activeSide) {
         : "Pass unless a legal action is explicitly available.",
     available_movers: movers,
     available_attackers: attackers,
-    candidate_policy: "No action candidates are provided. Form an operational intent from the board state, then use tools to validate it.",
+    verified_action_options: verifiedActionOptions,
+    candidate_policy: verifiedActionOptions.length
+      ? "These are locally verified options for the current snapshot. Prefer one of them, but a different action remains allowed if you validate it with the tools."
+      : "No verified non-pass option is currently available; inspect the board and validate a specific intent before passing.",
     tool_policy: "Use find_path before movement, check_combat before combat, and evaluate_action before any non-pass final action.",
     pass_policy: movers.length || attackers.length
       ? "Do not pass solely because no candidate list is present; inspect the board and validate an intent first."
@@ -995,7 +1029,7 @@ function scenarioScoringRules(scenario, alamein) {
     return {
       common,
       scenario_rules: [
-        "Start at 30 VP.",
+        "Start at 35 VP.",
         "Each Allied mine counter cleared by Axis adds 3 VP."
       ]
     };
@@ -1004,7 +1038,7 @@ function scenarioScoringRules(scenario, alamein) {
     return {
       common,
       scenario_rules: [
-        "Start at 30 VP.",
+        "Start at -20 VP.",
         "After Turn 10, each Axis supply unit legally exited through the west edge adds 10 VP.",
         "After Turn 10, each Axis ground combat unit legally exited west adds VP equal to its attack value, or defense value when attack is absent."
       ]
@@ -1072,7 +1106,7 @@ function victoryBrief(ctx) {
   const scenario = state.scenario || "july";
   const finalTurn = RulesEngine.scenarioFinalTurn(scenario);
   const alamein = rules.game?.alamein_hex || "3711";
-  const victory = RulesEngine.checkVictory(ctx);
+  const victory = cachedVictory(ctx);
   return {
     current_vp: Number(victory.victory_points || 0),
     current_level: victory.level || "",
@@ -1081,12 +1115,34 @@ function victoryBrief(ctx) {
     vp_scale: ["60+ Axis Decisive", "50-59 Axis Substantive", "40-49 Axis Marginal", "30-39 Draw", "20-29 Allied Marginal", "10-19 Allied Substantive", "0-9 Allied Decisive"],
     scoring_rules: scenarioScoringRules(scenario, alamein),
     current_scoring: currentScenarioScoring(ctx, victory),
-    side_goals: {
-      axis: scenario === "july"
-        ? [`Cross the next eastern scoring column with a supplied or partially supplied Axis ground combat unit; merely moving closer to ${alamein} does not score.`, "Destroy or isolate Allied ground combat units while preserving Axis supply." ]
-        : [`Increase VP according to scoring_rules while pressuring ${alamein}.`, "Destroy Allied combat units, isolate them, and preserve Axis supply."],
-      allies: [`Deny Axis VP, hold or contest ${alamein}, preserve units, and keep supply open.`, "Use terrain, mines, ZOC, and counterattacks to slow Axis tempo."]
-    }
+    side_goals: scenarioSideGoals(scenario, Number(state.turn || 1), alamein)
+  };
+}
+
+function scenarioSideGoals(scenario, turn, alamein) {
+  if (scenario === "july") {
+    return {
+      axis: [`Cross the next eastern scoring column with a supplied or partially supplied Axis ground combat unit; merely moving closer to ${alamein} does not score.`, "Destroy or isolate Allied ground combat units while preserving Axis supply."],
+      allies: [`Deny the next Axis scoring column, preserve Allied ground combat units, and keep supply open.`, "Use terrain, mines, ZOC, and counterattacks to slow Axis tempo."]
+    };
+  }
+  if (scenario === "september") {
+    return {
+      axis: ["Clear Allied minefield hexes for 3 VP each while preserving Axis combat power and supply.", "Destroy or isolate Allied ground combat units when the gain justifies the risk."],
+      allies: ["Protect Allied minefields from Axis clearance and preserve Allied ground combat units.", "Use terrain, ZOC, supply pressure, and counterattacks to delay Axis mine-clearing operations."]
+    };
+  }
+  if (scenario === "october") {
+    return {
+      axis: turn <= 10
+        ? ["Preserve valuable Axis combat and supply units and prepare an orderly westward withdrawal after Turn 10 without violating the pre-withdrawal movement restrictions.", "Limit Allied combat gains and keep viable routes to the west edge open."]
+        : ["Legally exit valuable Axis combat and supply units through the west map edge to recover VP.", "Protect withdrawal routes and avoid preventable combat, isolation, and blocked-retreat losses."],
+      allies: ["Prevent or reduce Axis west-edge withdrawal VP after Turn 10 while preserving Allied combat units.", "Disrupt Axis withdrawal routes and supply without accepting attacks that improve the Axis escape." ]
+    };
+  }
+  return {
+    axis: ["Increase Axis VP according to the authoritative scenario scoring rules."],
+    allies: ["Limit Axis VP according to the authoritative scenario scoring rules."]
   };
 }
 
@@ -1104,15 +1160,35 @@ function scenarioObjectives(ctx, victory) {
       alamein_role: "Important terrain landmark, but it has no separate July capture bonus."
     };
   }
+  if (ctx.state.scenario === "september") {
+    return {
+      axis_primary: "Clear Allied minefield hexes while preserving Axis combat power and supply",
+      axis_primary_type: "mine_clearance",
+      allies_primary: "Protect Allied minefields and preserve Allied ground combat units",
+      allies_primary_type: "minefield_defense"
+    };
+  }
+  if (ctx.state.scenario === "october") {
+    const withdrawalOpen = Number(ctx.state.turn || 1) > 10;
+    return {
+      axis_primary: withdrawalOpen
+        ? "Exit valuable Axis combat and supply units through the west edge"
+        : "Preserve Axis forces and prepare west-edge withdrawal routes without moving west illegally",
+      axis_primary_type: withdrawalOpen ? "west_edge_withdrawal" : "withdrawal_preparation",
+      allies_primary: withdrawalOpen
+        ? "Reduce Axis west-edge withdrawal VP"
+        : "Disrupt Axis withdrawal preparation while preserving Allied combat power",
+      allies_primary_type: "deny_axis_withdrawal"
+    };
+  }
   return {
-    axis_primary: alamein,
-    allies_primary: alamein,
-    alamein,
-    alamein_role: "Scenario landmark and operational objective."
+    axis_primary: "Follow the authoritative scenario scoring rules",
+    allies_primary: "Limit Axis VP under the authoritative scenario scoring rules"
   };
 }
 
-function initialMapReference2d(ctx) {
+function mapHexTopology() {
+  if (MAP_HEX_TOPOLOGY_CACHE) return MAP_HEX_TOPOLOGY_CACHE;
   const hexes = [];
   for (let column = 1; column <= 50; column += 1) {
     for (let row = 1; row <= 50; row += 1) {
@@ -1125,9 +1201,19 @@ function initialMapReference2d(ctx) {
     const row = Number(hex.slice(2, 4));
     byRow.set(row, [...(byRow.get(row) || []), hex]);
   }
-  const layoutRows = [...byRow.entries()].sort((a, b) => a[0] - b[0]).map(([row, values]) => ({
+  const edges = new Set();
+  for (const hex of hexes) {
+    for (const neighbor of RulesEngine.neighbors(hex)) edges.add(RulesEngine.normalizeEdge(hex, neighbor));
+  }
+  MAP_HEX_TOPOLOGY_CACHE = { hexes, byRow, edges: [...edges] };
+  return MAP_HEX_TOPOLOGY_CACHE;
+}
+
+function initialMapReference2d(ctx) {
+  const topology = mapHexTopology();
+  const layoutRows = [...topology.byRow.entries()].sort((a, b) => a[0] - b[0]).map(([row, values]) => ({
     row,
-    hexes: values.sort((a, b) => Number(a.slice(0, 2)) - Number(b.slice(0, 2)))
+    hexes: [...values].sort((a, b) => Number(a.slice(0, 2)) - Number(b.slice(0, 2)))
   }));
   const keyHexes = new Set([
     "3208",
@@ -1245,35 +1331,27 @@ function renderConnectionMap(ctx, hexes) {
 }
 
 function mapTopologySummary(ctx) {
-  const hexes = [];
-  for (let column = 1; column <= 50; column += 1) {
-    for (let row = 1; row <= 50; row += 1) {
-      const hex = `${String(column).padStart(2, "0")}${String(row).padStart(2, "0")}`;
-      if (RulesEngine.onMap(hex)) hexes.push(hex);
-    }
-  }
-  const edges = new Set();
+  const topology = mapHexTopology();
+  const roadSignature = [...(ctx.roadEdges || [])].sort().join(",");
+  const cached = MAP_TOPOLOGY_SUMMARY_CACHE.get(roadSignature);
+  if (cached) return { ...cached };
   let roadEdges = 0;
-  for (const hex of hexes) {
-    for (const neighbor of RulesEngine.neighbors(hex)) {
-      const edge = RulesEngine.normalizeEdge(hex, neighbor);
-      if (edges.has(edge)) continue;
-      edges.add(edge);
-      if (RulesEngine.edgeTags(ctx, edge).includes("road")) roadEdges += 1;
-    }
-  }
+  for (const edge of topology.edges) if (RulesEngine.edgeTags(ctx, edge).includes("road")) roadEdges += 1;
+  const hexes = topology.hexes;
   const columns = [...new Set(hexes.map((hex) => Number(hex.slice(0, 2))))];
   const rows = [...new Set(hexes.map((hex) => Number(hex.slice(2, 4))))];
-  return {
+  const summary = {
     authority: "RulesEngine.neighbors and RulesEngine.onMap",
     hex_count: hexes.length,
     column_range: [Math.min(...columns), Math.max(...columns)],
     row_range: [Math.min(...rows), Math.max(...rows)],
-    connection_count: edges.size,
+    connection_count: topology.edges.length,
     road_connection_count: roadEdges,
     full_hex_details_available_via: "view_map focus=region or focus=hex",
     full_map_details_not_included_in_every_step: true
   };
+  MAP_TOPOLOGY_SUMMARY_CACHE.set(roadSignature, summary);
+  return { ...summary };
 }
 
 function topologyPath(ctx, unit, target, options = {}, excludedFirstSteps = new Set()) {
@@ -1742,8 +1820,7 @@ function victoryImpact(ctx, action = {}) {
   const finalTurn = RulesEngine.scenarioFinalTurn(ctx.state.scenario || "july");
   const turnsRemaining = Math.max(0, finalTurn - Number(ctx.state.turn || 1) + 1);
   const alamein = ctx.rules.game?.alamein_hex || "3711";
-  ctx.ai_victory_impact_cache ||= RulesEngine.checkVictory(ctx);
-  const victory = ctx.ai_victory_impact_cache;
+  const victory = cachedVictory(ctx);
   const base = {
     turns_remaining: turnsRemaining,
     final_turn: finalTurn,
@@ -1886,7 +1963,7 @@ function actionEvaluation(ctx, action, allUnits) {
       defensive_effect: alliedCombatDefensiveEffect(
         ctx,
         action,
-        Number(ctx.ai_victory_impact_cache?.breakdown?.find((item) => item.id === "july_east_of_3400")?.farthest_column || 34)
+        Number(cachedVictory(ctx)?.breakdown?.find((item) => item.id === "july_east_of_3400")?.farthest_column || 34)
       ),
       attackers,
       targets: targetIntel,
@@ -2296,17 +2373,18 @@ function buildContext(config, options = {}) {
   const scenarioPath = /\.json$/i.test(String(scenarioInput))
     ? String(scenarioInput)
     : `scenarios/${String(scenarioInput)}.json`;
-  const state = options.state ? cloneJson(options.state) : readJson(scenarioPath);
+  const baseBuilt = options.baseBuilt?.ctx?.state ? options.baseBuilt : null;
+  const state = baseBuilt?.ctx?.state || (options.state ? cloneJson(options.state) : readJson(scenarioPath));
   if (options.phase) state.phase = options.phase;
   if (options.activeSide) state.active_side = options.activeSide;
   if (options.turn != null) state.turn = Number(options.turn);
   for (const [unitId, patch] of Object.entries(options.unitPatches || {})) {
     if (state.units?.[unitId]) state.units[unitId] = { ...state.units[unitId], ...patch };
   }
-  const rules = readJson("rules_el_alamein.json");
-  const terrain = readJson("terrain.json");
-  RulesEngine.applyStateDefaults(state);
-  const ctx = RulesEngine.createContext({ state, rules, terrain });
+  const rules = baseBuilt?.ctx?.rules || readJson("rules_el_alamein.json");
+  const terrain = baseBuilt?.ctx?.terrain || readJson("terrain.json");
+  RulesEngine.applyStateDefaults(state, { terrain });
+  const ctx = baseBuilt?.ctx || RulesEngine.createContext({ state, rules, terrain });
   const firstPhase = rules.turn_sequence?.[0] || "axis_initial_movement";
   const includeInitialMap = options.includeInitialMap === true
     || (options.includeInitialMap == null && options.state && !options.phase)
@@ -2324,7 +2402,7 @@ function buildContext(config, options = {}) {
     .map((unit) => compactUnit(unit.id, ctx.state.units[unit.id], ctx, allUnits, { includeNearby: false }));
   const kind = phaseKind(state.phase);
   const candidateMode = ["candidates", "hybrid", "opportunity_aware_hybrid"].includes(decisionMode);
-  const buildPrivateCandidates = candidateMode || options.privateCandidates === true;
+  const buildPrivateCandidates = candidateMode || options.privateCandidates === true || options.exposeVerifiedActions === true;
   let candidateActions = buildPrivateCandidates
     ? kind === "combat"
       ? combatCandidates(ctx, allUnits)
@@ -2333,7 +2411,13 @@ function buildContext(config, options = {}) {
         : []
     : [];
   if (buildPrivateCandidates) {
-    candidateActions = [...candidateActions, ...exitWestCandidates(ctx, allUnits)];
+    const exits = exitWestCandidates(ctx, allUnits);
+    // Immediate withdrawal VP must remain visible when the ordinary movement
+    // pool is larger than the context limit.
+    candidateActions = [
+      ...exits,
+      ...candidateActions.filter((item) => !exits.some((exit) => sameProbeAction(exit.action, item.action)))
+    ];
   }
   const passAction = { type: "pass", reason: "No useful legal action" };
   const passCandidate = { score: -999, action: passAction, evaluation: actionEvaluation(ctx, passAction, allUnits) };
@@ -2378,7 +2462,7 @@ function buildContext(config, options = {}) {
     game_overview: gameOverview(ctx, { includeInitialMap }),
     decision_mode: decisionMode,
     decision_brief: ["direct", "intent", "strategy_execute"].includes(decisionMode) || (["hybrid", "opportunity_aware_hybrid", "unit_plan_hybrid", "hierarchical_sae"].includes(decisionMode) && !options.phaseIntent)
-      ? intentBrief(ctx, activeUnits, activeSide)
+      ? intentBrief(ctx, activeUnits, activeSide, options.exposeVerifiedActions ? selectedCandidates : [])
       : decisionBrief(ctx, selectedCandidates, activeSide),
     mission: {
       identity: "game_agent",
@@ -2415,6 +2499,12 @@ function buildContext(config, options = {}) {
     tools: [],
     tool_results: []
   };
+  if (options.exposeVerifiedActions) {
+    publicContext.verified_action_options = selectedCandidates
+      .filter((item) => item.action?.type !== "pass")
+      .slice(0, 8)
+      .map(compactVerifiedAction);
+  }
   if (decisionMode === "hybrid") {
     publicContext.phase_intent_catalog = phaseIntentCatalog(state);
     if (options.phaseIntent) {

@@ -1,6 +1,7 @@
 version: 1
-default_profile: deepseek_flash
-task_checker_profile: deepseek_flash_checker
+# Public runs are offline by default. Select a real profile explicitly.
+default_profile: mock_primary
+task_checker_profile: mock_secondary
 
 models:
   deepseek_flash:
@@ -116,16 +117,99 @@ models:
       parallel_tool_calls: false
       prompt_cache: true
     defaults:
-      temperature: 1
+      temperature: 0.25
       top_p: 0.95
-      reasoning_effort: max
-      thinking: disabled
+      reasoning_effort: low
+      # GLM-5.3-Flash always reasons; disabling thinking is rejected with API 1210.
+      thinking: omitted
       timeout_ms: 120000
       retries: 2
       retry_statuses: [429, 502, 503, 504]
       retry_delays_ms: [10000, 30000]
       circuit_breaker_failures: 3
       circuit_breaker_cooldown_ms: 60000
+
+  glm_53_flash_api_checker:
+    adapter: openai_compatible
+    provider: zhipu
+    model: glm-5.3-flash
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    api_key_env: ZHIPU_API_KEY
+    access:
+      billing_channel: metered_api
+    limits:
+      context: 1000000
+      output: 6000
+    capabilities:
+      tool_calling: true
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: true
+    defaults:
+      temperature: 0
+      top_p: 0.95
+      reasoning_effort: low
+      thinking: omitted
+      timeout_ms: 120000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [10000, 30000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 60000
+
+  glm_53_flash:
+    adapter: openai_compatible
+    provider: zhipu_coding_plan
+    model: glm-5.3-flash
+    base_url: https://open.bigmodel.cn/api/coding/paas/v4
+    api_key_env: ZHIPU_CODING_API_KEY
+    access:
+      billing_channel: coding_plan
+    limits:
+      context: 200000
+      output: 6000
+    capabilities:
+      tool_calling: true
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: true
+    defaults:
+      temperature: 0.25
+      reasoning_effort: low
+      thinking: omitted
+      timeout_ms: 60000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [2000, 5000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 30000
+
+  glm_53_flash_checker:
+    adapter: openai_compatible
+    provider: zhipu_coding_plan
+    model: glm-5.3-flash
+    base_url: https://open.bigmodel.cn/api/coding/paas/v4
+    api_key_env: ZHIPU_CODING_API_KEY
+    access:
+      billing_channel: coding_plan
+    limits:
+      context: 200000
+      output: 6000
+    capabilities:
+      tool_calling: true
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: true
+    defaults:
+      temperature: 0
+      reasoning_effort: low
+      thinking: omitted
+      timeout_ms: 60000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [2000, 5000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 30000
 
   glm_53_flash_coding_plan:
     adapter: openai_compatible
@@ -144,10 +228,11 @@ models:
       parallel_tool_calls: false
       prompt_cache: true
     defaults:
-      temperature: 1
+      temperature: 0.25
       top_p: 0.95
-      reasoning_effort: max
-      thinking: disabled
+      reasoning_effort: low
+      # GLM-5.3-Flash always reasons; disabling thinking is rejected with API 1210.
+      thinking: omitted
       timeout_ms: 120000
       retries: 2
       retry_statuses: [429, 502, 503, 504]

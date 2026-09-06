@@ -265,6 +265,22 @@ tools:
       required: [action]
       properties:
         action: *action_schema
+        next_intent:
+          type: object
+          additionalProperties: false
+          description: Optional short-term intention for the next decision; it is recorded but never executed automatically.
+          properties:
+            task_id:
+              type: string
+              description: Existing task id from the current task plan, when applicable.
+            purpose:
+              type: string
+              maxLength: 180
+              description: Short explanation of what the next action should accomplish.
+            preferred_follow_up:
+              type: string
+              maxLength: 180
+              description: Optional preferred follow-up for the next decision.
 
   inspect:
     name: inspect
@@ -307,6 +323,19 @@ tools:
           type: string
           minLength: 1
           description: Proposal id returned by evaluate_action in the current step.
+        next_intent:
+          type: object
+          additionalProperties: false
+          description: Optional short-term intention for the next decision; it is recorded but never executed automatically.
+          properties:
+            task_id:
+              type: string
+            purpose:
+              type: string
+              maxLength: 180
+            preferred_follow_up:
+              type: string
+              maxLength: 180
 
 tool_docs:
   inspect_rules:

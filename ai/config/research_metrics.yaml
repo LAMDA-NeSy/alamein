@@ -5,7 +5,7 @@ complete_game:
   require_final_victory_flag: true
 
 judge:
-  model_profile: deepseek_flash
+  model_profile: mock_secondary
   temperature: 0
   max_output_tokens: 6000
   timeout_ms: 120000

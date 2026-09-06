@@ -18,6 +18,13 @@ transport:
   stepFallbackReserveMs: 0
   pauseOnCircuitOpen: true
 
+performance:
+  planning_context: compact
+  max_preparation_units: 12
+  max_preparation_targets: 12
+  max_preparation_reachable_hexes: 60
+  fallback_reserve_ms: 0
+
 context:
   phaseStrategyMaxTokens: 3000
   maxLegalActions: 180

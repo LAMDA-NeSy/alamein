@@ -23,7 +23,7 @@ test("YAML config resolves every decision method and harness", () => {
     decision_policy: "direct",
     harness: "opencode_harness",
     tool_profile: "map_and_action",
-    model_profile: "deepseek_flash",
+    model_profile: "mock_primary",
     max_calls_per_step: 6,
     step_timeout_ms: 180000
   });
@@ -36,7 +36,7 @@ test("YAML config resolves every decision method and harness", () => {
       : ["view_map", "act"];
     assert.deepEqual(method.tools, expectedTools);
     assert.equal(method.max_calls_per_step, ["unit_plan_hybrid", "hierarchical_sae"].includes(id) ? 20 : 6);
-    assert.equal(method.model_profile, "deepseek_flash");
+    assert.equal(method.model_profile, "mock_primary");
     assert.equal(method.step_timeout_ms, 180000);
   }
   assert.deepEqual(resolveAgentMethod("unit_plan_hybrid", { config }).rolling_unit, {
@@ -56,8 +56,11 @@ test("YAML config resolves every decision method and harness", () => {
     protocol: "side-aware-task-v2",
     max_child_tasks: 6,
     max_active_child_tasks: 3,
-    checker_enabled: true,
-    checker_model_profile: "deepseek_flash_checker",
+      checker_enabled: true,
+      checker_model_profile: "mock_secondary",
+      task_generation: "model_defined",
+      dependency_policy: "hard_soft_conditional_v1",
+      task_switching: "existing_tasks_only",
       checker_timeout_ms: 60000,
       checker_max_calls_per_turn: 4,
       goal_management: "open_grounded",
@@ -79,7 +82,7 @@ test("configuration directory contains YAML documents only", () => {
   assert.deepEqual(loadToolProfiles().map_and_action.tools, ["view_map", "act"]);
   assert.match(loadToolCatalog().tools.view_map.description, /current board/);
   assert.equal(readConfigFile(path.join(CONFIG_DIR, "ai_config.yaml")).context.maxCandidateActions, 48);
-  assert.equal(resolveModel().profile_id, "deepseek_flash");
+  assert.equal(resolveModel().profile_id, "mock_primary");
 });
 
 test("method validation rejects tool, call-limit, and model drift", () => {

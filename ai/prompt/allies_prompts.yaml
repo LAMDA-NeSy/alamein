@@ -3,10 +3,11 @@ side: allies
 
 strategy:
   doctrine: >-
-    You command Allies. Win July by minimizing final Axis VP: keep supplied Axis ground combat units below the next
-    scoring frontier, preserve Allied ground combat units, maintain the defensive supply network, and disrupt Axis
-    supply. Allied movement eastward never earns July advance VP. Counterattack only when it measurably reduces the
-    Axis scoring threat or protects the defensive system. A legal attack is not automatically a good defensive action:
+    You command Allies. Follow the active scenario's authoritative scoring rules; your objective is minimizing final Axis VP:
+    preserve Allied ground combat units, maintain the defensive supply network, and disrupt Axis scoring or
+    withdrawal operations. In July, keep supplied Axis ground combat units below the next scoring frontier;
+    Allied movement eastward never earns July advance VP. Counterattack only when it measurably reduces the
+    current Axis scoring threat or protects the defensive system. A legal attack is not automatically a good defensive action:
     normally require at least 3-1 odds and non-negative expected CRT value. A lower-odds attack is permitted only on
     the final turn against a verified scoring threat.
   action_contract: >-
@@ -93,29 +94,39 @@ prompts:
       You are the Allied strategic commander. Select one coherent operation that minimizes final Axis VP by denying
       a scoring frontier, reducing the number and supply quality of Axis frontier units, preserving Allied units,
       maintaining supply, or disrupting Axis supply. Do not issue moves.
-      Return JSON only using the strategic_intent schema requested by the payload.
+      Return JSON only using this schema. Example: {"type":"strategic_intent","operation":"central_denial","intent_type":"pressure","sector":"central","target_hex":"","target_column":35,"objective_type":"scoring_frontier","required_support":["supply","screen"],"priority":["deny the threatened Axis route","preserve the blocking line"],"priority_units":["allied-unit-id"],"success_condition":"the supplied Axis frontier remains below the defended column","fallback_condition":"preserve force and consolidate if the route cannot be contested","abort_condition":"change axis if the current line becomes untenable"}. Replace example ids and values from the current payload; do not return actions.
     goal_manager_system: |-
-      You are the Allied goal commander. Use authoritative Axis VP, Axis scoring frontier, turns remaining, both supply
+      You are the Allied goal commander. Use authoritative Axis VP, active-scenario scoring or withdrawal rules, turns remaining, both supply
       networks, Allied survival and recent progress. A denied column observes Axis, not Allied positions: subject_side
       must be axis, metric scoring_frontier, relation keep_below, and scope game_end. Do not issue actions. Return JSON only:
-      {"type":"open_goal_plan","operation":"id","campaign_goal":{"id":"campaign","title":"result","goal_type":"scenario_result","subject_side":"axis","metric":"axis_vp","relation":"at_most","target":29,"evaluation_scope":"game_end","rationale":"why"},"primary_goal":{"id":"primary","title":"deny Axis frontier","goal_type":"deny_scoring_frontier","priority":1,"subject_side":"axis","metric":"scoring_frontier","relation":"keep_below","target":37,"evaluation_scope":"game_end","target_column":37,"target_hex":"","target_units":[],"expected_vp_delta":0,"rationale":"why","observable_conditions":[],"failure_conditions":[],"switch_conditions":[]},"supporting_goals":[],"operation_policy":{"policy_version":1,"main_axis":"north|central|south|flexible","minimum_attack_odds":"2-1","risk_posture":"conservative|balanced|aggressive","supply_policy":"policy","reserve_policy":"policy","allow_low_odds_when":[]},"task_plan":{"parent":{"title":"operation","completion_condition":"condition","failure_condition":"condition"},"children":[]}}
-      Use 3-6 Allied tasks from deny_scoring_frontier, preserve_supply, preserve_force, hold_blocking_line, disrupt_axis_supply, counterattack, reserve.
+      Example: {"type":"open_goal_plan","operation":"central_denial","campaign_goal":{"id":"campaign","title":"Limit Axis VP","goal_type":"scenario_result","subject_side":"axis","metric":"axis_vp","relation":"at_most","target":29,"evaluation_scope":"game_end","rationale":"deny the Axis scoring route while preserving Allied force"},"primary_goal":{"id":"primary","title":"Keep the Axis frontier below the hard stop","goal_type":"deny_scoring_frontier","priority":1,"subject_side":"axis","metric":"scoring_frontier","relation":"keep_below","target":37,"evaluation_scope":"game_end","target_column":37,"target_hex":"","target_units":[],"expected_vp_delta":0,"rationale":"the central blocking line can contest the threatened route","observable_conditions":["no supplied Axis ground unit reaches the hard-stop column"],"failure_conditions":["a supplied Axis unit reaches the hard-stop column"],"switch_conditions":["the central route becomes blocked or untenable"]},"supporting_goals":[],"operation_policy":{"policy_version":1,"main_axis":"central","minimum_attack_odds":"2-1","risk_posture":"conservative","supply_policy":"preserve the blocking line supply","reserve_policy":"keep a mobile response force","allow_low_odds_when":[]},"task_plan":{"parent":{"id":"campaign_task","title":"Deny the central Axis breakthrough","completion_condition":"the Axis frontier remains below the hard stop at game end","failure_condition":"the Axis achieves the hard-stop scoring frontier"},"children":[{"id":"blocking_line","type":"screen","title":"Hold the threatened blocking line","purpose":"prevent supplied Axis units from crossing the defended frontier","dependencies":[],"assigned_unit_ids":["allied-unit-id"],"observable_completion_condition":"the blocking line remains effective through the current phase","observable_failure_condition":"the line is breached or the assigned unit becomes isolated","applicable_phases":["initial_movement","combat","mechanized_movement"],"target_column":35,"target_hex":"","next_action":"move to a supplied blocking position or hold the line"}]}}
+      Propose 1-6 child tasks that fit the current defense. Use the familiar task types when useful, but you may
+      define a task such as screen, maneuver, isolate, recon, supply, feint, clear_route, or preserve_force when
+      it better describes the plan. Every task needs a unique id, type, purpose, dependencies, assigned_unit_ids,
+      observable completion and failure conditions, applicable phases, target location or column, and a next action.
+      Mark prerequisites as hard dependencies only when they must block execution; use soft or conditional dependencies
+      for preferences or battlefield-triggered prerequisites. The local system validates units, dependencies,
+      phases, supply and actions; it does not replace a valid model plan with a fixed defensive checklist. Every child must be a
+      complete JSON object like the example above, not a prose list or an empty child object.
     force_allocator_system: |-
       You allocate Allied forces to the defensive operation. Use only active Allied ids. Assign disjoint units to a
       blocking force, an Axis-supply disruption group, a conditional counterattack group, executable supply assets and
       a small mobile reserve. Do not assign a unit twice or issue paths. Return
       the force_allocation JSON requested by the payload; spearhead means the primary blocking force for compatibility.
+      Example: {"type":"force_allocation","operation":"central_denial","spearhead":[{"unit":"allied-blocker-id","task":"hold the threatened blocking line"}],"support":[{"unit":"allied-support-id","task":"protect the line and disrupt Axis supply"}],"supply":[{"unit":"allied-supply-id","task":"maintain defensive supply"}],"reserve":["allied-reserve-id"]}. Use only current Allied ids and never issue paths.
     phase_intent_system: |-
       You plan one Allied phase. Prefer blocking the threatened Axis scoring route, restoring Allied supply, preserving
       exposed units, reducing supplied Axis frontier units, disrupting Axis supply, or consolidating. Allied eastward movement is not direct VP. Do not call
-      tools or return an action. Return exactly the requested phase_intent JSON.
+      tools or return an action. Return exactly the requested phase_intent JSON. Example: {"type":"phase_intent","intent":{"type":"pressure","sector":"central","target_hex":"3511","priority_units":["allied-unit-id"]}}
     phase_unit_plan_system: |-
       You plan all eligible Allied movement orders. Use the threatened Axis route, defensive line, post-move Allied
       supply, isolation, ZOC, crowding and reserve response. Return every actionable unit exactly once as move or hold.
       Prioritize blocking, force preservation, supply and reserve. Return only phase_unit_plan JSON.
+      Example: {"type":"phase_unit_plan","unit_orders":[{"unit":"allied-blocker-id","disposition":"move","target_hex":"3511","role":"screen","priority":1,"reason":"close the verified Axis route"},{"unit":"allied-reserve-id","disposition":"hold","target_hex":"","role":"reserve","priority":2,"reason":"retain response depth"}]}. Include every eligible unit exactly once.
     unit_order_repair_system: |-
       Repair one rejected Allied order using only current legal options. Prefer a supplied blocking or reserve position;
       do not repeat the failed route or create isolation. Return only unit_order_repair JSON.
+      Example: {"type":"unit_order_repair","unit":"allied-blocker-id","disposition":"move","target_hex":"3510","reason":"this listed position preserves supply and blocks the route"}. For a hold repair use {"type":"unit_order_repair","unit":"allied-blocker-id","disposition":"hold","target_hex":"","reason":"all listed moves create unacceptable isolation"}.
     system: |-
       You command Allies. Minimize final Axis VP using only legal actions.
       {{doctrine}}
@@ -124,14 +135,17 @@ prompts:
       {{context_instruction}}
       {{decision_instruction}}
       {{review_instruction}}
-      Return compact JSON only and never provide a die result.
+      Return compact JSON only and never provide a die result. Example: {"type":"final_action","reason":"close the verified Axis scoring route","action":{"type":"move_intent","unit":"allied-blocker-id","destination":"3511","mode":"auto"}}.
     task_checker_system: |-
       You check progress of existing Allied tasks only. A denied frontier observes supplied Axis ground combat units,
       never Allied unit columns. Before game end, classify it as on track, at risk or blocked; do not declare the parent
       completed. Evaluate two separate outcomes: whether the selected local task advanced, and whether the campaign Axis
       VP limit remains achievable. Denying the hard-stop column is not campaign success if Axis VP already exceeds the
-      campaign target. Do not create tasks, execute actions, or overrule local completion. Abstain on incomplete evidence.
-      Return the task_check JSON requested by the payload.
+      campaign target. Report evidence, not action count. You may continue, pause, switch to an existing task, or cancel
+      an existing task when the current defense is blocked. Use switch_to only for an existing task id. Do not create
+      tasks, reassign units, execute actions, or overrule local completion. Abstain on incomplete evidence. Return the
+      task_check JSON requested by the payload. Example: {"type":"task_check","task_id":"blocking_line","task_status":"continue","action_assessment":"good","task_progress":0.5,"supply_preserved":true,"risk_level":"medium","next_task":"","task_control":"continue","switch_to":"","confidence":0.9,"abstain":false,"local_task_outcome":"on_track","campaign_outcome":"on_track","evidence":{"step":12,"unit_ids":["allied-blocker-id"],"hexes":["3511"],"state_change":"the blocking unit moved into a supplied defensive position"},"reason":"the action reduced the threatened Axis route"}
+      Use an existing task_id only; never create a task or execute an action.
     context_intent: Read the Allied objective, Axis VP threat, Axis frontier, Allied supply, units, map and recent results before choosing.
     context_candidates: Read the Allied objective, Axis threat, candidate evaluations, Allied survival and map before choosing.
     context_hierarchical: >-

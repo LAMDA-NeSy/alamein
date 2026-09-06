@@ -764,19 +764,6 @@ function hexDistance(a, b) {
   return Math.abs(ac - bc) + Math.abs(ar - br);
 }
 
-function checkScenarioMoveRestriction(unit, path) {
-  const scenario = state.scenario || "";
-  if (scenario === "october" && unit.side === "axis" && Number(state.turn || 1) <= 10) {
-    const crossedWest = path.some((hex) => Number(hex.slice(0, 2)) < 18);
-    if (crossedWest) return { legal: false, reason: "October 特殊规则：前 10 回合 Axis 不能越过撤退线向西移动" };
-  }
-  if (scenario === "july" && unit.side === "allies" && isInActiveBox(unit.hex)) {
-    const leavesBox = path.some((hex) => !isInActiveBox(hex));
-    if (leavesBox) return { legal: false, reason: "July Boxed Area：Box 内 Allied 单位不能自愿离开" };
-  }
-  return { legal: true };
-}
-
 function isInActiveBox(hex) {
   const tags = hexTags(hex);
   return tags.includes("alamein_box") && state.boxed_areas_active !== false;
@@ -913,15 +900,7 @@ function terrainDefenseBonus(hex) {
 }
 
 function requiredDefenderHexes(attackers) {
-  const side = attackers[0]?.side;
-  const enemyByHex = unitsByHex(enemyUnits(side));
-  const required = new Set();
-  for (const attacker of attackers) {
-    for (const nb of neighbors(attacker.hex)) {
-      if (enemyByHex[nb]?.length) required.add(nb);
-    }
-  }
-  return required;
+  return RulesEngine.requiredDefenderHexes(rulesContext(), attackers);
 }
 
 function resolveCombat(action, options = {}) {
@@ -4953,6 +4932,7 @@ function recoverSpentForSide(side) {
     unit.attacked_this_turn = false;
     unit.attacked_this_phase = false;
     unit.defended_this_phase = false;
+    unit.retreated_this_phase = false;
     unit.cleared_mine_this_turn = false;
     unit.mine_cleared_this_turn = false;
     unit.engineer_assisted_this_turn = false;
@@ -5051,6 +5031,11 @@ function updateSupplyStates() {
       if (!unit) continue;
       const previous = unit.supply_state;
       unit.supply_state = value;
+      if (value === "isolated" || value === "unsupplied") {
+        unit.road_mode = false;
+        unit.road_facing = null;
+        unit.facing = null;
+      }
       if (previous && previous !== value) {
         changes.push({ unit: id, side: unit.side, hex: unit.hex || "", from: previous, to: value });
       }
@@ -5066,6 +5051,7 @@ function updateSupplyStates() {
       { changes }
     );
   }
+  state.supply_states_dirty = false;
 }
 
 function eliminatePersistentIsolated() {
@@ -8216,6 +8202,7 @@ function enumerateCombatActions(limit = 50) {
     ].filter((group) => group.length);
     for (const group of groups) {
       const defenderHexes = [...requiredDefenderHexes(group)];
+      if (!defenderHexes.includes(defenderHex)) defenderHexes.push(defenderHex);
       if (!defenderHexes.length) continue;
       const attackerIds = [...new Set(group.map((unit) => unit.id))];
       const key = `${attackerIds.sort().join(",")}=>${defenderHexes.sort().join(",")}`;
@@ -8232,7 +8219,27 @@ function enumerateCombatActions(limit = 50) {
   return actions;
 }
 
+let sharedRulesAiControllerCache = null;
+function sharedRulesAiController() {
+  const factory = globalThis.AlameinRulesAiController;
+  if (!factory?.createRulesAiController) return null;
+  if (!sharedRulesAiControllerCache
+    || sharedRulesAiControllerCache.state !== state
+    || sharedRulesAiControllerCache.rules !== rules
+    || sharedRulesAiControllerCache.terrain !== terrain) {
+    sharedRulesAiControllerCache = {
+      state,
+      rules,
+      terrain,
+      controller: factory.createRulesAiController({ state, rules, terrain, engine: RulesEngine })
+    };
+  }
+  return sharedRulesAiControllerCache.controller;
+}
+
 function enumerateLegalAiActions(limit = 50) {
+  const shared = sharedRulesAiController();
+  if (shared) return shared.enumerateLegalActions(limit);
   const actions = [];
   const kind = phaseKind();
   if (kind === "combat") actions.push(...enumerateCombatActions(limit));
@@ -8414,6 +8421,8 @@ function scoreAiAction(action) {
 }
 
 function fixedAiTarget(side = state.active_side) {
+  const shared = sharedRulesAiController();
+  if (shared) return shared.dynamicTargetForSide(side);
   if (side === "axis" && state.scenario === "october" && Number(state.turn || 1) > 10) return "0101";
   if (side === "axis") return normalizeHex(rules.game?.alamein_hex || "3711");
   return normalizeHex(rules.game?.alamein_hex || "3711");
@@ -8537,6 +8546,8 @@ function octoberAxisStagingTarget(unit) {
 }
 
 function rulesAiMoveTarget(unit) {
+  const shared = sharedRulesAiController();
+  if (shared) return shared.moveTarget(unit);
   if (isSupplyUnit(unit)) return supplyEscortTarget(unit);
   if (unit.side === "axis" && state.scenario === "october" && Number(state.turn || 1) <= 10) return octoberAxisStagingTarget(unit);
   if (unit.side === "axis") return fixedAiTarget("axis");
@@ -8547,6 +8558,8 @@ function rulesAiMoveTarget(unit) {
 }
 
 function rulesAiDirectionScore(unit, start, destination) {
+  const shared = sharedRulesAiController();
+  if (shared) return shared.directionScore(unit, start, destination);
   const startCol = hexColumn(start);
   const destCol = hexColumn(destination);
   const delta = destCol - startCol;
@@ -8572,6 +8585,8 @@ function rulesAiDirectionScore(unit, start, destination) {
 }
 
 function rulesAiScore(action) {
+  const shared = sharedRulesAiController();
+  if (shared) return shared.scoreAction(action);
   if (!action || action.type === "pass") return -10000;
   if (action.type === "exit_west") {
     const unit = state.units[action.unit];
@@ -8635,6 +8650,8 @@ function rulesAiScore(action) {
 }
 
 function suggestRulesAction() {
+  const shared = sharedRulesAiController();
+  if (shared) return shared.suggestAction();
   aiScoreSupplyCache = aiSupplyScoreMap(state.active_side);
   try {
     const candidates = enumerateLegalAiActions(Math.max(80, Number(el("aiMaxActionsInput")?.value || 80)))
@@ -8766,9 +8783,12 @@ function applyAiAction(rawAction, options = {}) {
     unit.road_facing = action.path.length > 1 ? hexDirection(action.path[action.path.length - 2], action.path[action.path.length - 1]) : unit.road_facing;
     unit.facing = unit.road_facing;
     unit.state = "spent";
-    if (isEngineer({ id: action.unit, ...unit }) && phaseKind() === "initial_movement" && enemyMinesAt(unit.side, unit.hex).length) {
-      RulesEngine.clearMine(rulesContext(), action.unit, unit.hex);
+    state.supply_states_dirty = true;
+    const mineEntryHex = validation.details?.mine_entry_hex;
+    if (isEngineer({ id: action.unit, ...unit }) && phaseKind() === "initial_movement" && mineEntryHex) {
+      RulesEngine.clearMine(rulesContext(), action.unit, mineEntryHex, null, { path_entry: true });
     }
+    updateSupplyStates();
     selectedUnitId = action.unit;
     movePathDraft = [unit.hex];
     syncMovePathInput();
@@ -8791,6 +8811,7 @@ function applyAiAction(rawAction, options = {}) {
       ? { ...advance.options[0] }
       : false;
     const result = resolveCombat(combatAction);
+    state.supply_states_dirty = true;
     return { ...result, action, die, source: fixedDie ? "debug_fixed" : "frontend_random" };
   }
   return { legal: false, reason: `不能执行未知动作 ${action.type}`, action };
@@ -10433,7 +10454,7 @@ async function loadScenarioState(name) {
 function applyStateDefaults(nextState) {
   invalidateAsyncGameWork();
   state = nextState || structuredClone(FALLBACK_STATE);
-  RulesEngine.applyStateDefaults(state);
+  RulesEngine.applyStateDefaults(state, { terrain });
   const legacyPhases = {
     axis_operational_movement: "axis_initial_movement",
     allies_operational_movement: "allies_initial_movement",
@@ -10572,6 +10593,7 @@ function executeCurrentMove() {
   unit.road_facing = path.length > 1 ? hexDirection(path[path.length - 2], path[path.length - 1]) : unit.road_facing;
   unit.facing = unit.road_facing;
   unit.state = "spent";
+  state.supply_states_dirty = true;
   unit.temporary_overstack = false;
   if (verdict.details?.repaired_temporary_overstack || verdict.details?.progressed_temporary_overstack) {
     const originStack = RulesEngine.checkStacking(rulesContext(), state, { hexes: [fromHex] });
@@ -10580,9 +10602,11 @@ function executeCurrentMove() {
       candidate.temporary_overstack = !originStack.legal;
     }
   }
-  if (isEngineer({ id: unitId, ...unit }) && phaseKind() === "initial_movement" && enemyMinesAt(unit.side, unit.hex).length) {
-    RulesEngine.clearMine(rulesContext(), unitId, unit.hex);
+  const mineEntryHex = verdict.details?.mine_entry_hex;
+  if (isEngineer({ id: unitId, ...unit }) && phaseKind() === "initial_movement" && mineEntryHex) {
+    RulesEngine.clearMine(rulesContext(), unitId, mineEntryHex, null, { path_entry: true });
   }
+  updateSupplyStates();
   selectedUnitId = unitId;
   movePathDraft = [unit.hex];
   syncMovePathInput();

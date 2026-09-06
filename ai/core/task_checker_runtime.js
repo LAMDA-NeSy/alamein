@@ -44,6 +44,9 @@ function normalizeCheck(raw, taskPlan) {
     supply_preserved: value.supply_preserved == null ? null : !!value.supply_preserved,
     risk_level: ["low", "medium", "high"].includes(value.risk_level) ? value.risk_level : "medium",
     next_task: known.has(value.next_task) ? value.next_task : "",
+    task_control: ["continue", "pause", "switch", "cancel"].includes(value.task_control)
+      ? value.task_control : "continue",
+    switch_to: known.has(value.switch_to) ? value.switch_to : "",
     confidence,
     abstain,
     local_task_outcome: outcomeValues.has(value.local_task_outcome) ? value.local_task_outcome : "unknown",
@@ -67,7 +70,10 @@ function compactTask(task) {
     status: task.status,
     progress: Number(task.progress || 0),
     priority: Number(task.priority || 0),
+    model_task_type: task.model_task_type || "",
     assigned_units: (task.assigned_units || []).slice(0, 12),
+    dependency_status: task.dependency_status || null,
+    phase_scope: task.phase_scope || [],
     completion_condition: task.completion_condition || "",
     failure_condition: task.failure_condition || "",
     current_metrics: task.current_metrics || null,
@@ -141,13 +147,16 @@ function checkerPayload({ input, taskPlan, stepRecord, events }) {
       supply_preserved: "boolean or null",
       risk_level: "low|medium|high",
       next_task: "exact existing task id or empty string",
+      task_control: "continue|pause|switch|cancel; control existing tasks only",
+      switch_to: "exact existing task id when task_control=switch, otherwise empty string",
       confidence: "number from 0 to 1",
       abstain: "boolean",
       local_task_outcome: "on_track|at_risk|blocked|achieved|failed|unknown",
       campaign_outcome: "on_track|at_risk|blocked|achieved|failed|unknown",
       evidence: { step: "current step", unit_ids: [], hexes: [], state_change: "observed before/after change" },
       reason: "short grounded explanation"
-    }
+    },
+    control_rules: "You may continue, pause, switch to an existing task, or cancel an existing task. Never create a task, reassign a unit, or execute an action. Use switch_to only for an existing task id."
   };
 }
 
@@ -155,7 +164,7 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
   let callsThisTurn = 0;
   let currentTurn = null;
   const records = [];
-  async function check({ input, taskPlan, stepRecord, events = [] } = {}) {
+  async function check({ input, taskPlan, stepRecord, events = [], timeoutMs: timeoutOverride } = {}) {
     if (!client || !runtime || !events.length) return { skipped: true, reason: "no_trigger" };
     if (currentTurn !== input?.turn) {
       currentTurn = input?.turn;
@@ -164,6 +173,7 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
     if (callsThisTurn >= maxCallsPerTurn) return { skipped: true, reason: "turn_check_limit" };
     callsThisTurn += 1;
     const started = Date.now();
+    const requestTimeoutMs = Math.max(1, Number(timeoutOverride ?? timeoutMs));
     const payload = checkerPayload({ input, taskPlan, stepRecord, events });
     let result;
     try {
@@ -176,7 +186,7 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
         max_tokens: Math.min(900, Number(runtime.profile.limits.output || 900)),
         response_format: runtime.profile.capabilities.structured_output ? { type: "json_object" } : undefined,
         thinking: thinkingRequest(runtime),
-        timeout_ms: timeoutMs
+        timeout_ms: requestTimeoutMs
       });
       if (!result.ok) throw new Error(`task checker model status ${result.status}`);
       const parsed = parseJson(result);
@@ -197,6 +207,7 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
   }
   return {
     check,
+    get timeoutMs() { return timeoutMs; },
     records,
     resetTurn() { callsThisTurn = 0; },
     metadata() { return { calls_this_turn: callsThisTurn, max_calls_per_turn: maxCallsPerTurn, records: clone(records.slice(-12)) }; }

@@ -7,6 +7,7 @@ const Rules = require("../../rule_engine.js");
 const { defaultLogFile, prepareOutputFile } = require("../core/experiment_log.js");
 const { PROJECT_ROOT } = require("../core/project_paths.js");
 const { resolveControllers } = require("../core/controller_config.js");
+const { createRulesAiController } = require("../core/rules_ai_controller.js");
 
 const ROOT = PROJECT_ROOT;
 const OUT = defaultLogFile("last_ai_replay_report.json");
@@ -36,7 +37,7 @@ function makeReplay(scenarioName, options = {}) {
   const state = readJson(SCENARIO_FILES[scenarioName] || SCENARIO_FILES.july);
   if (!state) throw new Error(`Unknown scenario ${scenarioName}`);
 
-  Rules.applyStateDefaults(state);
+  Rules.applyStateDefaults(state, { terrain });
   state.player_control = { axis: "rules_ai", allies: "rules_ai" };
   state.ai_autoplay = true;
   state.ai_phase_action_counts ||= {};
@@ -46,11 +47,21 @@ function makeReplay(scenarioName, options = {}) {
   let aiSupplyScorePhaseCache = null;
   let seed = Number(options.seed || 1942) >>> 0;
   const onStateChange = typeof options.onStateChange === "function" ? options.onStateChange : null;
+  const onStateChangeFilter = typeof options.onStateChangeFilter === "function" ? options.onStateChangeFilter : null;
 
   function notifyStateChange(event = {}) {
     if (!onStateChange) return;
+    const callbackEvent = {
+      ...event,
+      turn: event.turn ?? state.turn,
+      phase: event.phase || state.phase,
+      side: event.side || state.active_side
+    };
+    // Avoid cloning and serializing a full battlefield for controller events
+    // that the caller explicitly does not persist.
+    if (onStateChangeFilter && !onStateChangeFilter(callbackEvent)) return;
     try {
-      onStateChange({ ...event, state: clone(state) });
+      onStateChange({ ...callbackEvent, state: clone(state) });
     }
     catch (error) {
       if (typeof options.onStateChangeError === "function") {
@@ -84,6 +95,7 @@ function makeReplay(scenarioName, options = {}) {
   const isEngineer = Rules.isEngineer;
   const isMapCounter = Rules.isMapCounter;
   const isPlayableSide = Rules.isPlayableSide;
+  const sharedRulesAi = createRulesAiController({ state, rules, terrain, engine: Rules });
 
   function logEvent(type, summary, details = {}) {
     state.game_log.push({
@@ -112,6 +124,8 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function fixedAiTarget(side = state.active_side) {
+    return sharedRulesAi.dynamicTargetForSide(side);
+    /* istanbul ignore next -- retained only as a readable migration fallback */
     if (side === "axis" && state.scenario === "october" && Number(state.turn || 1) > 10) return "0101";
     if (side === "axis") return normalizeHex(rules.game?.alamein_hex || "3711");
     return normalizeHex(rules.game?.alamein_hex || "3711");
@@ -163,6 +177,8 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function rulesAiMoveTarget(unit) {
+    return sharedRulesAi.moveTarget(unit);
+    /* istanbul ignore next -- retained only as a readable migration fallback */
     if (isSupplyUnit(unit)) return supplyEscortTarget(unit);
     if (unit.side === "axis" && state.scenario === "october" && Number(state.turn || 1) <= 10) return octoberAxisStagingTarget(unit);
     if (unit.side === "axis") return fixedAiTarget("axis");
@@ -173,6 +189,8 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function rulesAiDirectionScore(unit, start, destination) {
+    return sharedRulesAi.directionScore(unit, start, destination);
+    /* istanbul ignore next -- retained only as a readable migration fallback */
     const startCol = hexColumn(start);
     const destCol = hexColumn(destination);
     const delta = destCol - startCol;
@@ -320,6 +338,8 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function rulesAiScore(action) {
+    return sharedRulesAi.scoreAction(action);
+    /* istanbul ignore next -- retained only as a readable migration fallback */
     if (!action || action.type === "pass") return -10000;
     if (action.type === "exit_west") {
       const unit = state.units[action.unit];
@@ -584,15 +604,7 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function requiredDefenderHexes(attackers) {
-    const side = attackers[0]?.side;
-    const enemyByHex = unitsByHex(enemyUnits(side));
-    const required = new Set();
-    for (const attacker of attackers) {
-      for (const nb of neighbors(attacker.hex)) {
-        if (enemyByHex[nb]?.length) required.add(nb);
-      }
-    }
-    return required;
+    return Rules.requiredDefenderHexes(ctx(), attackers);
   }
 
   function enumerateCombatActions(limit = 50) {
@@ -613,6 +625,7 @@ function makeReplay(scenarioName, options = {}) {
       ].filter((group) => group.length);
       for (const group of groups) {
         const defenderHexes = [...requiredDefenderHexes(group)];
+        if (!defenderHexes.includes(defenderHex)) defenderHexes.push(defenderHex);
         if (!defenderHexes.length) continue;
         const attackerIds = [...new Set(group.map((unit) => unit.id))];
         const key = `${attackerIds.sort().join(",")}=>${defenderHexes.sort().join(",")}`;
@@ -709,6 +722,8 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function enumerateLegalAiActions(limit = 50) {
+    return sharedRulesAi.enumerateLegalActions(limit);
+    /* istanbul ignore next -- retained only as a readable migration fallback */
     const actions = [];
     const kind = phaseKind();
     if (kind === "combat") actions.push(...enumerateCombatActions(limit));
@@ -757,6 +772,8 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function suggestRulesAction() {
+    return sharedRulesAi.suggestAction();
+    /* istanbul ignore next -- retained only as a readable migration fallback */
     aiScoreSupplyCache = aiSupplyScoreMap(state.active_side);
     try {
       const candidates = enumerateLegalAiActions(Math.max(80, Number(options.maxActions || 80)))
@@ -931,14 +948,41 @@ function makeReplay(scenarioName, options = {}) {
       unit.road_facing = action.path.length > 1 ? Rules.hexDirection(action.path[action.path.length - 2], action.path[action.path.length - 1]) : unit.road_facing;
       unit.facing = unit.road_facing;
       unit.state = "spent";
-      if (isEngineer({ id: action.unit, ...unit }) && phaseKind() === "initial_movement" && enemyMinesAt(unit.side, unit.hex).length) {
-        Rules.clearMine(ctx(), action.unit, unit.hex);
+      state.supply_states_dirty = true;
+      const mineEntryHex = validation.details?.mine_entry_hex;
+      if (isEngineer({ id: action.unit, ...unit }) && phaseKind() === "initial_movement" && mineEntryHex) {
+        Rules.clearMine(ctx(), action.unit, mineEntryHex, null, { path_entry: true });
       }
+      updateSupplyStates();
       return { legal: true, reason: "move applied", action, verdict: validation };
     }
     if (action.type === "combat") {
-      const result = Rules.resolveCombat(ctx(), { ...action, die: die() });
-      return { ...result, action };
+      // The model submits the attack before the die is known. Complete any
+      // deterministic post-roll choice locally so a valid attack is not
+      // reported as illegal when the CRT produces an exchange.
+      const rolledAction = { ...action, die: die() };
+      const rolledVerdict = Rules.checkCombat(ctx(), rolledAction);
+      let resolutionAction = rolledAction;
+      if (rolledVerdict.legal && rolledVerdict.details?.outcome === "Ex") {
+        const exchange = Rules.combatExchangeOptions(ctx(), rolledAction);
+        if (exchange.available && exchange.automatic_loss_ids?.length) {
+          resolutionAction = {
+            ...rolledAction,
+            exchange_loss_ids: [...exchange.automatic_loss_ids]
+          };
+        }
+      }
+      const result = Rules.resolveCombat(ctx(), resolutionAction);
+      state.supply_states_dirty = true;
+      return {
+        ...result,
+        action,
+        resolution: {
+          die: rolledAction.die,
+          outcome: rolledVerdict.details?.outcome || null,
+          automatic_exchange_loss_ids: resolutionAction.exchange_loss_ids || []
+        }
+      };
     }
     return { legal: false, reason: `cannot apply ${action.type}`, action };
   }
@@ -950,6 +994,7 @@ function makeReplay(scenarioName, options = {}) {
       unit.attacked_this_turn = false;
       unit.attacked_this_phase = false;
       unit.defended_this_phase = false;
+      unit.retreated_this_phase = false;
       unit.cleared_mine_this_turn = false;
       unit.mine_cleared_this_turn = false;
       unit.engineer_assisted_this_turn = false;
@@ -977,17 +1022,23 @@ function makeReplay(scenarioName, options = {}) {
         if (!unit) continue;
         const previous = unit.supply_state;
         unit.supply_state = value;
+        if (value === "isolated" || value === "unsupplied") {
+          unit.road_mode = false;
+          unit.road_facing = null;
+          unit.facing = null;
+        }
         if (value === "isolated" && previous !== "isolated") unit.isolated_since = `${state.turn}:${state.phase}`;
         if (value !== "isolated") unit.isolated_since = null;
       }
     }
   }
+    state.supply_states_dirty = false;
 
   function eliminatePersistentIsolated() {
     for (const [id, unit] of Object.entries(state.units || {})) {
       if (!isCombatUnit({ id, ...unit }) || unit.eliminated || unit.supply_state !== "isolated" || !unit.isolated_since) continue;
-      const [turnText] = String(unit.isolated_since).split(":");
-      if (Number(state.turn || 1) - Number(turnText || state.turn) < 1) continue;
+      const [turnText, isoPhase] = String(unit.isolated_since).split(":");
+      if (Number(state.turn || 1) <= Number(turnText || state.turn) || state.phase !== isoPhase) continue;
       unit.eliminated = true;
       unit.eliminated_reason = "isolation";
       unit.eliminated_turn = Number(state.turn || 1);
@@ -1297,7 +1348,12 @@ function makeReplay(scenarioName, options = {}) {
         action: compactAction(action),
         candidates: suggestion.candidates,
         model: suggestion.model || null,
-        result: { legal: result.legal, reason: result.reason, die: result.die || result.roll || null }
+        result: {
+          legal: result.legal,
+          reason: result.reason,
+          die: result.die || result.roll || result.resolution?.die || null,
+          resolution: result.resolution || null
+        }
       });
       if (result.legal && source === "external_model") {
         await notifyExternalActionApplied({

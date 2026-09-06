@@ -24,6 +24,8 @@ function completeTranscript(id, vp = 30) {
     decision_mode: "unit_plan_hybrid",
     model_profile: "mock_primary",
     comparison_contract_hash: "contract-v1",
+    benchmark_version: "alamein-benchmark-v1",
+    artifact_manifest_hash: "artifact-v1",
     summary: { victory: { final: true, victory_points: vp } },
     counts: { act_calls: 6, invalid_action_attempts: 2 },
     model_steps: [
@@ -82,7 +84,7 @@ test("deterministic research metrics follow the requested formulas", () => {
   assert.equal(run.low_odds_attack_rate, 0.5);
 });
 
-test("average VP excludes incomplete games but does not exclude complete infrastructure-affected games", () => {
+test("average VP includes complete method-fallback games but excludes incomplete games", () => {
   const first = deterministicRunMetrics(completeTranscript("run-a", 30));
   const secondTranscript = completeTranscript("run-b", 40);
   secondTranscript.counts.transport_failures = 2;
@@ -93,9 +95,15 @@ test("average VP excludes incomplete games but does not exclude complete infrast
   const partial = deterministicRunMetrics(partialTranscript);
   const [group] = aggregateRuns([first, second, partial], "decision_policy");
   assert.equal(group.complete_games, 2);
+  assert.equal(group.ranking_eligible_games, 2);
+  assert.equal(group.raw_final_vp_sum, 70);
+  assert.equal(group.ranking_final_vp_sum, 70);
   assert.equal(group.final_vp_sum, 70);
   assert.equal(group.average_vp, 35);
+  assert.equal(group.raw_average_vp, 35);
   assert.equal(group.average_vp_delta, 10);
+  assert.equal(group.raw_vp_delta_sum, 20);
+  assert.equal(group.ranking_vp_delta_sum, 20);
   assert.equal(group.vp_delta_sum, 20);
   assert.equal(group.average_side_adjusted_vp_gain, 10);
 });

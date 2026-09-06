@@ -51,3 +51,30 @@ test("human controller stops an automated replay explicitly", async () => {
   assert.equal(result.status, "waiting_for_human");
   assert.equal(result.waiting_for_human, "axis");
 });
+
+test("replay completes an exchange outcome after a valid model combat action", async () => {
+  const replay = makeReplay("july", { seed: 1942 });
+  replay.state.phase = "axis_combat";
+  replay.state.active_side = "axis";
+  replay.state.road_supply_markers = { axis: "2424" };
+  replay.state.scenario_meta = { road_path: ["0101", "2424"] };
+  replay.state.units = {
+    attacker_a: { side: "axis", hex: "2424", state: "fresh", attack: 4, defense: 2, movement: 4, kind: "ground" },
+    attacker_b: { side: "axis", hex: "2424", state: "fresh", attack: 4, defense: 2, movement: 4, kind: "ground" },
+    defender: { side: "allies", hex: "2525", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" }
+  };
+  const provider = async () => ({
+    action: { type: "combat", attackers: ["attacker_a", "attacker_b"], defender_hexes: ["2525"] }
+  });
+
+  const result = await replay.playWithProvider({
+    maxSteps: 1,
+    externalSide: "axis",
+    externalAction: provider
+  });
+
+  assert.notEqual(result.status, "illegal_action");
+  assert.equal(result.log[0].result.legal, true);
+  assert.equal(result.log[0].result.die, 4);
+  assert.deepEqual(result.log[0].result.resolution.automatic_exchange_loss_ids, ["attacker_a"]);
+});

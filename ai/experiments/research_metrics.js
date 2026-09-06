@@ -1,6 +1,9 @@
 "use strict";
 
 const RulesEngine = require("../../rule_engine.js");
+const { infrastructureStatus } = require("../core/benchmark_comparison.js");
+const { rankingEligible } = require("../core/benchmark_comparison.js");
+const { summaryStats: benchmarkStats } = require("../core/benchmark_statistics.js");
 
 const OPPORTUNITY_TYPES = new Set([
   "joint_attack",
@@ -13,6 +16,24 @@ const OPPORTUNITY_TYPES = new Set([
 function meanOrNull(values) {
   const finite = values.filter(Number.isFinite);
   return finite.length ? finite.reduce((sum, value) => sum + value, 0) / finite.length : null;
+}
+
+function medianOrNull(values) {
+  const finite = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!finite.length) return null;
+  const middle = Math.floor(finite.length / 2);
+  return finite.length % 2 ? finite[middle] : (finite[middle - 1] + finite[middle]) / 2;
+}
+
+function sampleStddev(values) {
+  const finite = values.filter(Number.isFinite);
+  if (finite.length < 2) return 0;
+  const mean = finite.reduce((sum, value) => sum + value, 0) / finite.length;
+  return Math.sqrt(finite.reduce((sum, value) => sum + ((value - mean) ** 2), 0) / (finite.length - 1));
+}
+
+function summaryStats(values) {
+  return benchmarkStats(values);
 }
 
 function ratioOrNull(numerator, denominator) {
@@ -92,7 +113,13 @@ function deterministicRunMetrics(transcript, config = {}) {
     scenario_side: `${scenario}:${externalSide}`,
     comparison_cell: `${scenario}:axis-${axisController}:allies-${alliesController}:${harness}:${decisionPolicy}:${modelProfile}`,
     comparison_contract_hash: transcript.comparison_contract_hash || "",
+    benchmark_version: transcript.benchmark_version || transcript.comparison_contract?.benchmark_version || "",
+    artifact_manifest_hash: transcript.artifact_manifest_hash || transcript.comparison_contract?.artifact_manifest_hash || "",
     complete_game: complete,
+    sample_status: infrastructureStatus(transcript),
+    ranking_eligible: transcript.comparison_contract
+      ? rankingEligible(transcript)
+      : complete && Boolean(transcript.artifact_manifest_hash || transcript.comparison_contract?.artifact_manifest_hash),
     final_vp: complete && Number.isFinite(victoryPoints) ? victoryPoints : null,
     vp_baseline: vpBaseline,
     vp_delta: vpDelta,
@@ -331,6 +358,7 @@ function aggregateRuns(runs, key) {
   }
   return [...groups.entries()].map(([value, rows]) => {
     const complete = rows.filter((row) => row.complete_game && Number.isFinite(row.final_vp));
+    const ranked = complete.filter((row) => row.ranking_eligible);
     const scenarios = [...new Set(rows.map((row) => row.scenario))];
     const externalSides = [...new Set(rows.map((row) => row.external_side))];
     const controllerPairs = [...new Set(rows.map((row) => `axis-${row.axis_controller}:allies-${row.allies_controller}`))];
@@ -348,7 +376,7 @@ function aggregateRuns(runs, key) {
       .filter((item) => !item.abstain && item.opportunity_status !== "uncertain" && Number.isFinite(item.confidence))
       .map((item) => item.confidence));
     const coherenceScores = rows.flatMap((row) => (row.judge?.windows || [])
-      .filter((window) => window.judgment)
+      .filter((window) => window.judgment && !window.judgment.plan_coherence?.abstain)
       .map((window) => window.judgment.plan_coherence.score));
     const coherenceConfidences = rows.flatMap((row) => (row.judge?.windows || [])
       .map((window) => window.judgment?.plan_coherence)
@@ -370,11 +398,20 @@ function aggregateRuns(runs, key) {
         ...(controllerPairs.length > 1 ? [`mixed controller pairs: ${controllerPairs.join(", ")}`] : [])
       ],
       complete_games: complete.length,
-      average_vp: meanOrNull(complete.map((row) => row.final_vp)),
-      final_vp_sum: complete.reduce((sum, row) => sum + row.final_vp, 0),
-      average_vp_delta: meanOrNull(complete.map((row) => row.vp_delta)),
-      vp_delta_sum: complete.reduce((sum, row) => sum + row.vp_delta, 0),
-      average_side_adjusted_vp_gain: meanOrNull(complete.map((row) => row.side_adjusted_vp_gain)),
+      ranking_eligible_games: ranked.length,
+      sample_statuses: [...new Set(rows.map((row) => row.sample_status))],
+      raw_vp_stats: summaryStats(complete.map((row) => row.final_vp)),
+      vp_stats: summaryStats(ranked.map((row) => row.final_vp)),
+      average_vp: meanOrNull(ranked.map((row) => row.final_vp)),
+      raw_final_vp_sum: complete.reduce((sum, row) => sum + row.final_vp, 0),
+      ranking_final_vp_sum: ranked.reduce((sum, row) => sum + row.final_vp, 0),
+      final_vp_sum: ranked.reduce((sum, row) => sum + row.final_vp, 0),
+      raw_average_vp: meanOrNull(complete.map((row) => row.final_vp)),
+      average_vp_delta: meanOrNull(ranked.map((row) => row.vp_delta)),
+      raw_vp_delta_sum: complete.reduce((sum, row) => sum + (Number.isFinite(row.vp_delta) ? row.vp_delta : 0), 0),
+      ranking_vp_delta_sum: ranked.reduce((sum, row) => sum + (Number.isFinite(row.vp_delta) ? row.vp_delta : 0), 0),
+      vp_delta_sum: ranked.reduce((sum, row) => sum + (Number.isFinite(row.vp_delta) ? row.vp_delta : 0), 0),
+      average_side_adjusted_vp_gain: meanOrNull(ranked.map((row) => row.side_adjusted_vp_gain)),
       submitted_actions: submitted,
       rejected_actions: rejected,
       action_rejection_rate: ratioOrNull(rejected, submitted),
@@ -404,7 +441,7 @@ function aggregateRuns(runs, key) {
 function buildResearchReport(runs, metadata = {}) {
   return {
     generated_at: new Date().toISOString(),
-    metric_version: "wargame-research-metrics-v1",
+    metric_version: "wargame-research-metrics-v2",
     definitions: {
       average_vp: "Sum of final VP from complete games divided by the number of complete games.",
       vp_delta: "Final VP minus the scenario starting VP. Positive values favor Axis; negative values favor Allies.",
@@ -418,7 +455,13 @@ function buildResearchReport(runs, metadata = {}) {
       opportunity_confidence: "Mean Judge confidence for confirmed opportunity decisions. Higher indicates stronger evidence, not better gameplay.",
       multi_step_plan_coherence: "Sum of Judge coherence scores from 1 to 5 divided by the number of fixed action windows. Higher is better.",
       plan_coherence_confidence: "Mean Judge confidence for non-abstained plan coherence judgments. Higher indicates stronger evidence, not better gameplay.",
-      plan_coherence_abstentions: "Action windows for which the Judge abstained from scoring plan coherence."
+      plan_coherence_abstentions: "Action windows for which the Judge abstained from scoring plan coherence.",
+      ranking_eligibility: "A complete game with a benchmark artifact manifest. Declared method fallback remains part of end-to-end performance; infrastructure status is reported separately.",
+      vp_stats: "Mean, median, sample standard deviation, and 95% confidence-interval half-width over ranking-eligible games.",
+      raw_final_vp_sum: "Final VP sum over all complete games.",
+      ranking_final_vp_sum: "Final VP sum over complete games with a benchmark artifact manifest, including declared method fallbacks.",
+      raw_vp_delta_sum: "VP delta sum over all complete games; diagnostic only.",
+      ranking_vp_delta_sum: "VP delta sum over complete games with a benchmark artifact manifest, including declared method fallbacks."
     },
     ...metadata,
     runs,

@@ -36,13 +36,16 @@ const { agentMethodDefaults, resolveAgentMethod } = require("../core/agent_metho
 const { LOG_DIR } = require("../core/experiment_log.js");
 const { createContextStore, sha256 } = require("../core/context_store.js");
 const { createPhaseIntentPlanner } = require("../core/phase_intent_runtime.js");
-const { createSaeRuntime } = require("../core/sae_runtime.js");
+const { createSaeRuntime, deriveActionEffect } = require("../core/sae_runtime.js");
 const { createTaskCheckerRuntime } = require("../core/task_checker_runtime.js");
 const { fallbackReasonClass, isNonRetryableRequestStatus } = require("../core/transport_attribution.js");
 const { resolveSidePrompt, renderSidePrompt, sidePromptRegistryMetadata, sideStrategyConfig } = require("../core/prompt_registry.js");
 const { toolPromptReference } = require("../core/agent_tools.js");
 const { PROJECT_ROOT } = require("../core/project_paths.js");
 const { resolveControllers } = require("../core/controller_config.js");
+const { infrastructureStatus } = require("../core/benchmark_comparison.js");
+const { attachRuntimeAccounting, refreshRuntimeAccounting } = require("../core/experiment_accounting.js");
+const { validateExperimentSelection } = require("../core/experiment_selection.js");
 
 const ROOT = PROJECT_ROOT;
 // DeepSeek rejects `required` and function-specific tool_choice in its default
@@ -237,8 +240,17 @@ function fallbackActionFromContext(context) {
   return best?.action || { type: "pass", reason: "fallback after model error" };
 }
 
-function writeTranscript(outFile, transcript) {
+const transcriptWriteState = new WeakMap();
+const TRANSCRIPT_CHECKPOINT_INTERVAL_MS = 30000;
+
+function writeTranscript(outFile, transcript, { force = false } = {}) {
   if (!outFile) return;
+  const now = Date.now();
+  const state = transcriptWriteState.get(transcript) || { lastWriteAt: 0 };
+  if (!force && state.lastWriteAt && now - state.lastWriteAt < TRANSCRIPT_CHECKPOINT_INTERVAL_MS) return;
+  state.lastWriteAt = now;
+  transcriptWriteState.set(transcript, state);
+  refreshRuntimeAccounting(transcript);
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   fs.writeFileSync(outFile, JSON.stringify(transcript, null, 2));
 }
@@ -560,6 +572,9 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         advance_reason: action?.type === "pass" ? status?.advance_reason || "rolling_unit_plan_complete" : ""
       };
     }
+    if (typeof bridge.submittedNextIntent === "function") {
+      stepRecord.next_intent = bridge.submittedNextIntent();
+    }
     stepRecord.provider_result = {
       provider: runtime.profile.provider,
       model: runtime.profile.model,
@@ -579,6 +594,7 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       fallback_used: stepRecord.fallback_used,
       fallback_reason_class: stepRecord.fallback_reason_class || "",
       transport_failures: stepRecord.transport_failures.length,
+      recovered_transport_failures: stepRecord.recovered_transport_failures.length,
       protocol_failures: stepRecord.protocol_failures.length,
       error: stepRecord.error || null,
       final_accepted: !stepRecord.fallback_used
@@ -607,6 +623,30 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       action: clone(event.action || stepRecord.final_action || {}),
       result: clone(event.result || null)
     };
+    if (afterState && pending.input?.state) {
+      try {
+        const effectBuilt = buildContext(config, {
+          state: pending.input.state,
+          decisionMode: stepRecord.decision_mode || "hierarchical_sae",
+          privateCandidates: false,
+          includeInitialMap: false
+        });
+        stepRecord.action_effect = deriveActionEffect(
+          pending.input.state,
+          afterState,
+          stepRecord,
+          { ctx: effectBuilt.ctx, side: stepRecord.side }
+        );
+      }
+      catch (error) {
+        stepRecord.action_effect = {
+          protocol: "sae-action-effect-v1",
+          accepted: false,
+          unavailable: true,
+          error: error.message
+        };
+      }
+    }
     if (afterState) {
       stepRecord.state_hash_after = sha256(afterState);
       stepRecord.post_action_state = {
@@ -623,6 +663,7 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         step: stepRecord.step,
         state: afterState
       }, stepRecord);
+      stepRecord.task_progress_delta = stepRecord.task_observation?.task_progress_delta || {};
       stepRecord.sae_replan_pending = !!saeRuntime.replanReasons?.get(`${Number(stepRecord.turn)}:${stepRecord.side}`);
       if (stepRecord.task_observation) transcript.task_observations = (transcript.task_observations || []).concat([{
         step: stepRecord.step,
@@ -643,17 +684,19 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
 
   const provider = async function externalAction(input) {
     const started = Date.now();
+    const stepDeadline = started + stepTimeoutMs;
     const phasePlanStarted = Date.now();
     const phasePlan = decisionPolicy === "hierarchical_sae"
       ? { phaseIntent: null, record: null, localFastPass: false }
-      : await phasePlanner.plan(input);
-    const saePlan = saeRuntime ? await saeRuntime.plan(input) : null;
+      : await phasePlanner.plan(input, { deadline: stepDeadline });
+    const saePlan = saeRuntime ? await saeRuntime.plan(input, { deadline: stepDeadline }) : null;
     const phasePlanMs = Date.now() - phasePlanStarted;
     const phaseIntent = saePlan?.phaseIntent || phasePlan.phaseIntent;
 
     const prepareStarted = Date.now();
     const movementPhase = /_(initial_movement|mechanized_movement|supply_movement)$/.test(input.phase);
     const executionPolicy = decisionPolicy;
+    const rollingMovement = ["unit_plan_hybrid", "hierarchical_sae"].includes(decisionPolicy) && movementPhase;
     const prepared = bridge.prepareStep({
       ...input,
       session_id: sessionId,
@@ -661,7 +704,14 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       phaseIntent,
       strategicIntent: saePlan?.strategic_intent,
       forceAllocation: saePlan?.force_allocation,
-      operationState: saePlan?.operation_state
+      operationState: saePlan?.operation_state,
+      builtContext: saeRuntime?.contextFor(input) || undefined,
+      privateCandidates: rollingMovement ? false : undefined,
+      // Rolling SAE execution already receives authoritative phase_status and
+      // task dispatch. Building the full verified movement candidate pool here
+      // repeats expensive path and supply projections without adding model
+      // information; route checks remain available through tools and fallback.
+      exposeVerifiedActions: false
     });
     const prepareMs = Date.now() - prepareStarted;
     const context = prepared.public_payload.context;
@@ -719,10 +769,11 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       rounds: [],
       action_attempts: [],
       transport_failures: [],
+      recovered_transport_failures: [],
       protocol_failures: [],
       fallback_used: false,
       local_fast_pass: false,
-      rolling_movement: ["unit_plan_hybrid", "hierarchical_sae"].includes(decisionPolicy) && movementPhase,
+      rolling_movement: rollingMovement,
       candidates: (context.candidate_actions || []).slice(0, 5).map(compactCandidate)
     };
     if (phasePlan.record) {
@@ -734,6 +785,7 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       stepRecord.goal_plan = saePlan.goal_plan;
       stepRecord.force_allocation = saePlan.force_allocation;
       stepRecord.operation_state = saePlan.operation_state;
+      stepRecord.tactical_summary = saePlan.operation_state?.tactical_summary || null;
       stepRecord.phase_intent = {
         source: saePlan.record.source,
         value: phaseIntent,
@@ -764,7 +816,7 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
     const toolResults = [];
     let timedOut = false;
     const fallbackReserveMs = Math.max(0, Number(config.transport?.stepFallbackReserveMs ?? 0));
-    const deadline = started + stepTimeoutMs;
+    const deadline = stepDeadline;
     let consecutiveTransportFailureRounds = 0;
     for (let attempt = 0; attempt < toolProfile.max_calls_per_step; attempt += 1) {
       const remainingStepMs = deadline - Date.now();
@@ -801,6 +853,12 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         result = await callModel(config, runtime, client, [
           ...sessionMessages
         ], `step_${input.step}_act_${attempt}`, requestOptions);
+        if (result.ok && result.recovered_after_retry) {
+          stepRecord.recovered_transport_failures.push({
+            attempts: result.attempts,
+            retryable_failures: result.retryable_failures || []
+          });
+        }
         parsed = result.ok
           ? parseProfileToolCall(result, toolProfile)
           : { error: `model API status ${result.status}`, failure_type: "transport", error_class: result.error_class || "network_error" };
@@ -841,6 +899,9 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
           break;
         }
         continue;
+      }
+      if (stepRecord.transport_failures.length) {
+        stepRecord.continued_after_transport_failure = true;
       }
       consecutiveTransportFailureRounds = 0;
       const toolResult = bridge.executeTool(parsed.tool, parsed.arguments, sessionId);
@@ -935,26 +996,28 @@ async function main() {
     alliesController: argValue("--allies-controller", "") || undefined
   });
   const externalSide = controllers.external_side;
+  const externalSides = ["axis", "allies"].filter((side) => controllers[side] === "external_ai");
+  const metadataPromptSide = externalSide || externalSides[0] || "axis";
   const requestedMode = argValue("--decision-policy", argValue("--decision-mode", methodDefaults.decision_policy));
-  const decisionMode = ["direct", "candidates", "intent", "hybrid", "opportunity_aware_hybrid", "unit_plan_hybrid", "hierarchical_sae", "strategy_execute"].includes(requestedMode) ? requestedMode : "direct";
-  const methodConfig = resolveAgentMethod(decisionMode);
+  const decisionMode = requestedMode;
+  const methodConfig = validateExperimentSelection("manual_single_action", decisionMode);
   const maxSteps = Number(argValue("--max-steps", 1000));
   const seed = Number(argValue("--seed", 1942));
   const replicate = Number(argValue("--replicate", 1));
   const requestedModelProfile = argValue("--model-profile", "") || "";
-  const modelProfile = requestedModelProfile || (externalSide ? methodConfig.model_profile : "mock_primary");
+  const modelProfile = requestedModelProfile || (externalSides.length ? methodConfig.model_profile : "mock_primary");
   const toolProfile = resolveToolProfile(argValue("--tool-profile", "") || methodConfig.tool_profile);
   const stepTimeoutMs = Number(argValue("--step-timeout-ms", "") || methodConfig.step_timeout_ms);
-  // Multi-task mode is opt-in so historical v7.10 hierarchical SAE runs remain reproducible.
+  // Explicit disabled mode retains the historical SAE without task management.
   const taskManagement = decisionMode === "hierarchical_sae"
-    && argValue("--task-management", "disabled") === "multi_task"
+    && argValue("--task-management", methodConfig.task_management?.mode || "disabled") === "multi_task"
     ? methodConfig.task_management || {
       mode: "multi_task",
       protocol: "side-aware-task-v2",
       max_child_tasks: 6,
       max_active_child_tasks: 3,
       checker_enabled: true,
-      checker_model_profile: "deepseek_flash_checker",
+      checker_model_profile: "mock_secondary",
       checker_timeout_ms: 60000,
       checker_max_calls_per_turn: 4
     }
@@ -965,20 +1028,33 @@ async function main() {
     .join("__");
   const outFile = path.resolve(argValue("--out", path.join(LOG_DIR, `${experimentId}.json`)));
   const profile = resolveModel(modelProfile);
+  if (profile.adapter !== "mock" && taskManagement?.checker_enabled && !argValue("--task-checker-model-profile", "")) {
+    throw new Error("real multi-task experiments require an explicit --task-checker-model-profile");
+  }
   validateCapabilities(profile, { tool_calling: true, min_context: 32000 });
   const runtime = createModelRuntime(profile, { run_id: experimentId });
-  const taskCheckerRuntime = taskManagement?.checker_enabled
-    ? createModelRuntime(taskCheckerProfile, { run_id: `${experimentId}__task_checker` })
-    : null;
-  if (taskCheckerRuntime) validateCapabilities(taskCheckerRuntime.profile, { structured_output: true, min_context: 16000 });
-  const taskChecker = taskCheckerRuntime
-    ? createTaskCheckerRuntime({
-      client: createChatCompletionsClient(taskCheckerRuntime),
-      runtime: taskCheckerRuntime,
+  const runtimeBySide = Object.fromEntries(
+    externalSides.map((side) => [side, side === externalSides[0]
+      ? runtime
+      : createModelRuntime(profile, { run_id: `${experimentId}__${side}` })])
+  );
+  const taskCheckerRuntimes = Object.fromEntries(
+    externalSides
+      .filter(() => taskManagement?.checker_enabled)
+      .map((side) => [side, createModelRuntime(taskCheckerProfile, { run_id: `${experimentId}__${side}__task_checker` })])
+  );
+  for (const checkerRuntime of Object.values(taskCheckerRuntimes)) {
+    validateCapabilities(checkerRuntime.profile, { structured_output: true, min_context: 16000 });
+  }
+  const taskCheckers = Object.fromEntries(Object.entries(taskCheckerRuntimes).map(([side, checkerRuntime]) => [side,
+    createTaskCheckerRuntime({
+      client: createChatCompletionsClient(checkerRuntime),
+      runtime: checkerRuntime,
       timeoutMs: taskManagement.checker_timeout_ms,
       maxCallsPerTurn: taskManagement.checker_max_calls_per_turn
     })
-    : null;
+  ]));
+  const taskChecker = taskCheckers[externalSide] || taskCheckers[externalSides[0]] || null;
   const config = {
     ...legacyConfig,
     provider: profile.provider,
@@ -992,7 +1068,13 @@ async function main() {
     task_management: taskManagement ? "multi_task" : "disabled",
     task_management_options: taskManagement || {}
   };
-  const promptProfile = sidePromptRegistryMetadata(externalSide);
+  const promptProfile = sidePromptRegistryMetadata(metadataPromptSide);
+  const promptProfiles = Object.fromEntries(
+    (externalSides.length ? externalSides : [metadataPromptSide]).map((side) => {
+      const metadata = sidePromptRegistryMetadata(side);
+      return [side, metadata];
+    })
+  );
   const comparison = createComparisonContract({
     config,
     scenario,
@@ -1006,6 +1088,7 @@ async function main() {
     runtime,
     contextProfile: CONTEXT_PROFILE_ID,
     timeoutMs: stepTimeoutMs,
+    maxSteps,
     unitPlanSettings: methodConfig.rolling_unit,
     toolChoice: EXECUTION_TOOL_CHOICE,
     thinkingMode: runtime.profile.defaults.thinking,
@@ -1016,20 +1099,26 @@ async function main() {
   const contextStoreDirectory = path.join(path.dirname(outFile), path.basename(outFile, path.extname(outFile)));
   const initialContext = buildContext(config, {
     scenario,
-    phase: `${externalSide || "axis"}_initial_movement`,
-    activeSide: externalSide || "axis",
+    phase: `${metadataPromptSide}_initial_movement`,
+    activeSide: metadataPromptSide,
     decisionMode: "direct",
     includeInitialMap: true
   });
-  const contextStore = createContextStore({ runId: experimentId, outFile, directory: contextStoreDirectory });
+  const contextSides = externalSides.length ? externalSides : [metadataPromptSide];
+  const contextStores = Object.fromEntries(contextSides.map((side) => [side, createContextStore({
+    runId: `${experimentId}__${side}`,
+    outFile,
+    directory: path.join(contextStoreDirectory, side)
+  })]));
+  const contextStore = contextStores[externalSide] || contextStores[externalSides[0]] || null;
   const contextStoreErrors = [];
   const hashFile = (file) => {
     try { return sha256(fs.readFileSync(file, "utf8")); }
     catch { return null; }
   };
-  const contextManifest = contextStore.initialize({
+  const contextManifest = contextStore?.initialize({
     scenario,
-    external_side: externalSide,
+    external_side: externalSide || metadataPromptSide,
     controllers: { axis: controllers.axis, allies: controllers.allies },
     seed,
     replicate,
@@ -1052,17 +1141,60 @@ async function main() {
       prompt_registry_hash: comparison.contract.prompt_registry_hash
     }
   }, initialContext.publicContext.game_overview.initial_map_reference_2d);
+  const contextManifests = Object.fromEntries(contextSides.map((side) => {
+    if (side === (externalSide || externalSides[0])) return [side, contextManifest];
+    const store = contextStores[side];
+    return [side, store.initialize({
+      scenario,
+      external_side: side,
+      controllers: { axis: controllers.axis, allies: controllers.allies },
+      seed,
+      replicate,
+      decision_policy: decisionMode,
+      harness: "manual_single_action",
+      model_profile: modelProfile,
+      tool_profile: toolProfile.id,
+      comparison_contract_hash: comparison.hash,
+      prompt_registry_hash: comparison.contract.prompt_registry_hash,
+      rules_source: "rules_el_alamein.json",
+      context_policy: CONTEXT_POLICY,
+      hashes: {
+        rules_hash: hashFile(path.join(ROOT, "rules_el_alamein.json")),
+        config_hash: sha256(config),
+        agent_methods_hash: hashFile(path.join(ROOT, "ai/config/agent_methods.yaml")),
+        agent_tools_hash: hashFile(path.join(ROOT, "ai/config/agent_tools.yaml")),
+        models_hash: hashFile(path.join(ROOT, "ai/config/ai_models.yaml")),
+        prompts_hash: hashFile(path.join(ROOT, "ai/prompt/prompts.yaml")),
+        comparison_contract_hash: comparison.hash,
+        prompt_registry_hash: comparison.contract.prompt_registry_hash
+      }
+    }, buildContext(config, {
+      scenario,
+      phase: `${side}_initial_movement`,
+      activeSide: side,
+      decisionMode: "direct",
+      includeInitialMap: true
+    }).publicContext.game_overview.initial_map_reference_2d)];
+  }));
   const replay = makeReplay(scenario, {
     seed,
+    onStateChangeFilter: (event) => externalSides.includes(event.side),
     onStateChange: (event) => {
-      contextStore.snapshot({
-        stage: event.stage,
-        step: event.step,
-        state: event.state,
-        turn: event.turn,
-        phase: event.phase,
-        side: event.side
-      });
+      // Rule-AI actions can be numerous and do not need an external-agent
+      // recovery checkpoint. Persisting every full state for both controllers
+      // makes JSONL serialization dominate long runs before the model acts.
+      const changedSide = event.side || event.state?.active_side;
+      if (!externalSides.includes(changedSide)) return;
+      for (const store of Object.values(contextStores)) {
+        store.snapshot({
+          stage: event.stage,
+          step: event.step,
+          state: event.state,
+          turn: event.turn,
+          phase: event.phase,
+          side: event.side || event.state?.active_side
+        });
+      }
     },
     onStateChangeError: (error, event) => {
       contextStoreErrors.push({ stage: event.stage || "state_change", step: event.step ?? null, error: error.message });
@@ -1089,10 +1221,15 @@ async function main() {
       agent_tools: "ai/config/agent_tools.yaml",
       models: "ai/config/ai_models.yaml",
       prompts: "ai/prompt/prompts.yaml",
-      side_prompts: `ai/prompt/${externalSide}_prompts.yaml`
+      side_prompts: Object.fromEntries(Object.keys(promptProfiles).map((side) => [side, `ai/prompt/${side}_prompts.yaml`]))
     },
     prompt_profile: promptProfile.profile,
     prompt_profile_hash: promptProfile.hash,
+    prompt_profiles: Object.fromEntries(Object.entries(promptProfiles).map(([side, metadata]) => [side, {
+      profile: metadata.profile,
+      version: metadata.version,
+      hash: metadata.hash
+    }])),
     model_profile: modelProfile,
     model_runtime: publicRuntimeMetadata(runtime),
     tool_protocol: toolProfile.id,
@@ -1102,6 +1239,9 @@ async function main() {
     tool_config_hash: toolProfileHash(toolProfile),
     comparison_contract: comparison.contract,
     comparison_contract_hash: comparison.hash,
+    benchmark_version: comparison.contract.benchmark_version,
+    artifact_manifest: comparison.contract.artifact_manifest,
+    artifact_manifest_hash: comparison.contract.artifact_manifest_hash,
     context_profile: CONTEXT_PROFILE_ID,
     context_policy: CONTEXT_POLICY,
     tool_feedback_profile: TOOL_FEEDBACK_PROFILE,
@@ -1116,8 +1256,13 @@ async function main() {
     goal_protocol: taskManagement ? "side-aware-goal-v2" : null,
     task_management: taskManagement ? "multi_task" : "disabled",
     task_protocol: taskManagement ? "side-aware-task-v2" : null,
+    task_dependency_policy: taskManagement ? "hard_soft_conditional_v1" : null,
+    task_switching: taskManagement ? "existing_tasks_only" : null,
+    task_progress_version: taskManagement ? "evidence-grounded-model-task-progress-v6" : null,
+    task_action_feedback_version: taskManagement ? "post-action-feedback-v1" : null,
     task_checker_model_profile: taskCheckerProfile || null,
-    task_checker_runtime: taskCheckerRuntime ? publicRuntimeMetadata(taskCheckerRuntime) : null,
+    task_checker_runtime: taskChecker ? publicRuntimeMetadata(taskCheckerRuntimes[externalSide] || taskCheckerRuntimes[externalSides[0]]) : null,
+    task_checker_runtimes: Object.fromEntries(Object.entries(taskCheckerRuntimes).map(([side, checkerRuntime]) => [side, publicRuntimeMetadata(checkerRuntime)])),
     strategic_planner_protocol: taskManagement ? "side-aware-goal-v2" : decisionMode === "hierarchical_sae" ? "sae-v1" : null,
     force_allocator_protocol: decisionMode === "hierarchical_sae" ? "sae-v1" : null,
     dispatch_protocol: decisionMode === "hierarchical_sae" ? "rolling-unit-action-v1" : null,
@@ -1137,7 +1282,8 @@ async function main() {
       planning_thinking_mode: runtime.profile.defaults.thinking
     },
     model_transport: runtime.transport,
-    task_checker_transport: taskCheckerRuntime?.transport || [],
+    model_transports: Object.fromEntries(Object.entries(runtimeBySide).map(([side, sideRuntime]) => [side, sideRuntime.transport])),
+    task_checker_transport: taskChecker?.records || [],
     context_store: {
       directory: contextStore.directory,
       files: contextStore.files,
@@ -1145,52 +1291,78 @@ async function main() {
       map_reference_hash: contextManifest.hashes.map_reference_hash,
       recovery_policy: "verify_manifest_map_rules_and_state_hashes_before_resume"
     },
+    context_stores: Object.fromEntries(Object.entries(contextStores).map(([side, store]) => [side, {
+      directory: store.directory,
+      files: store.files,
+      manifest_hash: store.hash(contextManifests[side]),
+      map_reference_hash: contextManifests[side].hashes.map_reference_hash
+    }])),
     context_store_errors: contextStoreErrors,
     transport_health: runtime.transport_health,
     model_usage: runtime.usage,
     model_steps: []
   };
+  attachRuntimeAccounting(transcript, {
+    ...Object.fromEntries(Object.entries(runtimeBySide).map(([side, value]) => [`${side}.agent`, value])),
+    ...Object.fromEntries(Object.entries(taskCheckerRuntimes).map(([side, value]) => [`${side}.task_checker`, value]))
+  });
   writeTranscript(outFile, transcript);
   const started = Date.now();
   try {
-    const externalProvider = makeSingleActionProvider(config, runtime, transcript, {
+    const providerOptions = (side) => ({
       outFile,
       progress: true,
       decisionPolicy: decisionMode,
       toolProfile: toolProfile.id,
       timeoutMs: stepTimeoutMs,
+      sessionId: `manual-${experimentId}-${side}`,
       bridge: createRuleBridge(config, { toolProfile: toolProfile.id }),
-      taskChecker,
-      contextStore,
-      contextManifest
+      taskChecker: taskCheckers[side] || null,
+      contextStore: contextStores[side] || contextStore,
+      contextManifest: contextManifests[side] || contextManifest
     });
+    const externalProviders = Object.fromEntries(
+      externalSides.map((side) => [side, makeSingleActionProvider(config, runtimeBySide[side] || runtime, transcript, providerOptions(side))])
+    );
+    // Keep one external provider for the legacy single-side path. With two
+    // external controllers, the replay selects the provider by active side.
+    const externalProvider = externalProviders[externalSide] || externalProviders[externalSides[0]] || null;
     const result = await replay.playWithProvider({
       maxSteps,
       controllers,
-      externalAction: externalProvider
+      externalAction: externalProvider,
+      externalActions: externalProviders
     });
     transcript.elapsed_ms = Date.now() - started;
     transcript.partial = false;
     transcript.status = result.status;
     transcript.summary = replay.summary(result);
-    const finalTaskPlan = await externalProvider.finalize({
-      state: replay.state,
-      turn: replay.state.turn,
-      phase: replay.state.phase,
-      side: externalSide,
-      step: result.steps,
-      status: result.status,
-      victory: result.victory || null
-    });
-    if (finalTaskPlan) {
-      transcript.final_task_settlement = {
-        applied: true,
-        protocol: finalTaskPlan.protocol,
+    const finalTaskSettlements = {};
+    for (const [side, provider] of Object.entries(externalProviders)) {
+      const finalTaskPlan = await provider.finalize({
+        state: replay.state,
         turn: replay.state.turn,
         phase: replay.state.phase,
-        parent_state: finalTaskPlan.parent?.state || null,
-        child_statuses: Object.fromEntries((finalTaskPlan.children || []).map((task) => [task.id, task.status]))
-      };
+        side,
+        step: result.steps,
+        status: result.status,
+        victory: result.victory || null
+      });
+      if (finalTaskPlan) {
+        finalTaskSettlements[side] = {
+          applied: true,
+          protocol: finalTaskPlan.protocol,
+          turn: replay.state.turn,
+          phase: replay.state.phase,
+          parent_state: finalTaskPlan.parent?.state || null,
+          child_statuses: Object.fromEntries((finalTaskPlan.children || []).map((task) => [task.id, task.status]))
+        };
+      }
+    }
+    if (Object.keys(finalTaskSettlements).length) {
+      transcript.final_task_settlement = externalSides.length > 1
+        ? finalTaskSettlements
+        : finalTaskSettlements[externalSides[0]];
     }
     const taskObservations = transcript.model_steps
       .filter((step) => step.task_observation)
@@ -1198,6 +1370,10 @@ async function main() {
     const actionAttempts = transcript.model_steps.flatMap((step) => step.action_attempts || []);
     const rollingMovement = summarizeRollingMovementPhases(transcript.model_steps);
     const movementPatterns = summarizeMovementPatterns(result.log || [], "external_model", transcript.model_steps);
+    const taskSwitches = [...new Map(taskObservations
+      .flatMap((observation) => observation.plan?.task_switches || [])
+      .map((item) => [`${item.from}:${item.to}:${item.step}:${item.reason}`, item])).values()];
+    const taskChecks = taskObservations.map((observation) => observation.check?.result).filter(Boolean);
     const rollingMoveSteps = transcript.model_steps.filter((step) =>
       step.rolling_movement
       && ["move", "move_intent", "exit_west"].includes(step.rolling_unit_action?.selected_action?.type));
@@ -1213,6 +1389,7 @@ async function main() {
       fallback_actions: transcript.model_steps.filter((item) => item.fallback_used).length,
       network_fallback_actions: transcript.model_steps.filter((item) => item.fallback_reason_class === "transport_failure").length,
       transport_failures: transcript.model_steps.reduce((sum, step) => sum + (step.transport_failures?.length || 0), 0),
+      recovered_transport_failures: transcript.model_steps.reduce((sum, step) => sum + (step.recovered_transport_failures?.length || 0), 0),
       protocol_failures: transcript.model_steps.reduce((sum, step) => sum + (step.protocol_failures?.length || 0), 0),
       circuit_open_events: runtime.transport_health?.circuit_open_events || 0,
       retry_attempts: runtime.transport.reduce((sum, item) => sum + Math.max(0, Number(item.attempts || 1) - 1), 0)
@@ -1264,10 +1441,29 @@ async function main() {
       task_checker_abstentions: taskObservations.filter((item) => item.check?.result?.abstain).length,
       task_checker_low_confidence: taskObservations.filter((item) => item.check?.result && Number(item.check.result.confidence || 0) < 0.5).length,
       task_checker_consistency_warnings: taskObservations.filter((item) => item.check?.consistency_warning).length,
+      task_switches: taskSwitches.length,
+      task_pause_requests: taskChecks.filter((check) => check.task_control === "pause").length,
+      task_cancel_requests: taskChecks.filter((check) => check.task_control === "cancel").length,
+      task_switch_requests: taskChecks.filter((check) => check.task_control === "switch" || check.switch_to).length,
       task_trigger_events: taskObservations.reduce((sum, item) => sum + (item.events?.length || 0), 0),
       task_blocked_events: taskObservations.filter((item) => item.events?.includes("route_blocked") || item.check?.result?.task_status === "blocked").length,
       task_completed_events: taskObservations.filter((item) => item.events?.includes("task_completed") || (item.check?.result?.task_status === "completed" && !item.check.result.abstain) || item.progress?.parent_completed).length,
       task_progress_observations: taskObservations.filter((item) => item.progress?.changed).length,
+      task_action_feedback_records: taskObservations.filter((item) => item.action_feedback?.accepted).length,
+      action_effect_records: transcript.model_steps.filter((step) => step.action_effect).length,
+      meaningful_action_records: transcript.model_steps.filter((step) => step.action_effect?.accepted && (
+        step.action_effect?.units && Object.values(step.action_effect.units).some((unit) => unit.position_changed || unit.supply_changed)
+        || (step.action_effect?.combat_opportunities_gained || []).length
+        || (step.action_effect?.applied_result?.eliminated || []).length
+      )).length,
+      tactical_opportunities_seen: transcript.model_steps.reduce((sum, step) => sum + (step.tactical_summary?.tactical_opportunities?.length || 0), 0),
+      tactical_opportunities_selected: transcript.model_steps.filter((step) => step.action_effect?.combat_opportunities_gained?.length || step.task_observation?.events?.includes("combat_target_threat_reduced")).length,
+      allocation_corrections: transcript.model_steps.reduce((sum, step) => sum + (step.force_allocation?.allocation_corrections?.length || 0), 0),
+      next_intent_records: transcript.model_steps.filter((step) => step.next_intent).length,
+      task_progress_rate: taskObservations.length
+        ? Number((taskObservations.filter((item) => item.progress?.changed).length / taskObservations.length).toFixed(3)) : 0,
+      task_blocked_rate: taskObservations.length
+        ? Number((taskObservations.filter((item) => item.events?.includes("route_blocked") || item.check?.result?.task_status === "blocked").length / taskObservations.length).toFixed(3)) : 0,
       task_observations: taskObservations.length,
       task_replan_reasons: transcript.model_steps.reduce((counts, step) => {
         const reason = step.sae_plan?.replan_reason || "";
@@ -1275,6 +1471,8 @@ async function main() {
         return counts;
       }, {})
     };
+    refreshRuntimeAccounting(transcript);
+    transcript.sample_status = infrastructureStatus(transcript);
     if (decisionMode === "hierarchical_sae") {
       transcript.strategic_intent = transcript.model_steps.find((step) => step.strategic_intent)?.strategic_intent || null;
       transcript.goal_plan = [...transcript.model_steps].reverse().find((step) => step.goal_plan)?.goal_plan || null;
@@ -1283,32 +1481,32 @@ async function main() {
         .map((step) => ({ step: step.step, turn: step.turn, phase: step.phase, replan_reason: step.sae_plan.replan_reason || "initial", goal_plan: step.goal_plan }));
       transcript.force_allocation = transcript.model_steps.find((step) => step.force_allocation)?.force_allocation || null;
       const latestOperationState = [...transcript.model_steps].reverse().find((step) => step.operation_state)?.operation_state || null;
-      transcript.operation_state = finalTaskPlan && latestOperationState
-        ? { ...latestOperationState, task_plan: finalTaskPlan }
-        : latestOperationState;
-      transcript.task_plan = finalTaskPlan
-        || [...transcript.model_steps].reverse().find((step) => step.sae_plan?.task_plan)?.sae_plan.task_plan
-        || null;
+      const latestTaskSettlement = transcript.final_task_settlement;
+      transcript.operation_state = latestOperationState;
+      transcript.task_plan = [...transcript.model_steps].reverse().find((step) => step.sae_plan?.task_plan)?.sae_plan.task_plan
+        || (latestTaskSettlement && externalSides.length === 1 ? latestTaskSettlement : null);
       transcript.sae_plan_calls = transcript.counts.sae_plan_calls;
       transcript.sae_plan_fallbacks = transcript.counts.sae_plan_fallbacks;
     }
     transcript.game_log = result.log;
-    contextStore.snapshot({
-      stage: "final",
-      step: result.steps,
-      state: replay.state,
-      turn: replay.state.turn,
-      phase: replay.state.phase,
-      side: replay.state.active_side
-    });
-    contextStore.updateMemory({
-      recent_strategic_events: [{
+    for (const store of Object.values(contextStores)) {
+      store.snapshot({
         stage: "final",
-        status: transcript.status,
-        victory: transcript.summary?.victory || null
-      }]
-    });
-    writeTranscript(outFile, transcript);
+        step: result.steps,
+        state: replay.state,
+        turn: replay.state.turn,
+        phase: replay.state.phase,
+        side: replay.state.active_side
+      });
+      store.updateMemory({
+        recent_strategic_events: [{
+          stage: "final",
+          status: transcript.status,
+          victory: transcript.summary?.victory || null
+        }]
+      });
+    }
+    writeTranscript(outFile, transcript, { force: true });
     console.log(JSON.stringify({
       output: outFile,
       experiment_id: experimentId,
@@ -1324,17 +1522,20 @@ async function main() {
       victory: transcript.summary.victory,
       counts: transcript.counts,
       usage: runtime.usage,
+      usage_by_side: Object.fromEntries(Object.entries(runtimeBySide).map(([side, sideRuntime]) => [side, sideRuntime.usage])),
       tail: transcript.summary.tail
     }, null, 2));
     return transcript;
   }
   finally {
     if (typeof replay !== "undefined" && replay?.state) {
-      contextStore.snapshot({ stage: "shutdown", step: transcript.model_steps.length, state: replay.state });
+      for (const store of Object.values(contextStores)) {
+        store.snapshot({ stage: "shutdown", step: transcript.model_steps.length, state: replay.state });
+      }
     }
-    await closeModelRuntime(runtime);
-    if (taskCheckerRuntime) await closeModelRuntime(taskCheckerRuntime);
-    writeTranscript(outFile, transcript);
+    for (const sideRuntime of new Set(Object.values(runtimeBySide))) await closeModelRuntime(sideRuntime);
+    for (const checkerRuntime of Object.values(taskCheckerRuntimes)) await closeModelRuntime(checkerRuntime);
+    writeTranscript(outFile, transcript, { force: true });
   }
 }
 

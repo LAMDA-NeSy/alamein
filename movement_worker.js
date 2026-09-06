@@ -5,7 +5,7 @@ self.addEventListener("message", (event) => {
   const { id, type, state, rules, terrain, unitId, targetHex, options, revision } = request;
   try {
     const workerState = structuredClone(state);
-    self.AlameinRules.applyStateDefaults(workerState);
+    self.AlameinRules.applyStateDefaults(workerState, { terrain });
     const context = self.AlameinRules.createContext({ state: workerState, rules, terrain });
     if (type === "reachable") {
       const reachable = self.AlameinRules.reachableHexes(context, unitId, options || {});

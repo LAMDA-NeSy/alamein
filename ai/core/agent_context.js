@@ -80,24 +80,28 @@ function compactStrategicIntent(intent, includeGoalPlan = true) {
 
 function compactTask(task) {
   return pickDefined(task, [
-    "id", "type", "title", "priority", "depends_on", "target_column",
-    "sequence_index", "requires_scoring_supply", "required_for_parent",
-    "assigned_units", "compatible_units", "completion_condition", "failure_condition",
+    "id", "type", "model_task_type", "title", "priority", "depends_on", "target_column",
+    "task_class", "block_conditions", "progress_metric", "progress_value",
+    "soft_depends_on", "conditional_dependencies", "dependency_status", "target_hex", "target_region", "target_units",
+    "sequence_index", "checkpoint_only", "allows_overshoot", "requires_scoring_supply", "required_for_parent",
+    "assigned_units", "compatible_units", "completion_condition", "failure_condition", "phase_scope",
     "progress", "status", "next_action", "last_blocked_reason", "source",
-    "activation_reason", "tactical_opportunities", "current_metrics", "progress_evidence"
+    "activation_reason", "tactical_opportunities", "combat_preparation", "preparation_actions",
+    "current_metrics", "progress_evidence", "normalization_corrections"
   ]);
 }
 
 function compactTaskPlan(plan) {
   if (!plan || typeof plan !== "object") return plan;
   return {
-    ...pickDefined(plan, ["type", "protocol", "side", "normalized"]),
+    ...pickDefined(plan, ["type", "protocol", "side", "normalized", "last_action_feedback", "last_task_events"]),
     parent: pickDefined(plan.parent, [
       "id", "title", "objective", "completion_condition", "failure_condition",
       "target_column", "subject_side", "metric", "relation", "evaluation_scope",
       "state", "started_turn", "started_vp", "partial_success", "goal_progress_evidence"
     ]),
-    children: boundedList(plan.children, 6).map(compactTask)
+    children: boundedList(plan.children, 6).map(compactTask),
+    task_switches: boundedList(plan.task_switches, 8)
   };
 }
 
@@ -105,13 +109,15 @@ function compactFrontierBreakthrough(value) {
   if (!value || typeof value !== "object") return value;
   return {
     ...pickDefined(value, [
-      "protocol", "current_column", "target_column", "vp_gain_at_target",
+      "protocol", "current_column", "target_column", "minimum_checkpoint_column", "campaign_target_column", "vp_gain_at_target",
       "scoring_requirement", "next_step", "recommended_unit_ids",
-      "preparation_actions", "model_freedom"
+      "blocked_route_summary", "preparation_actions", "model_freedom"
     ]),
-    direct_entry_routes: boundedList(value.direct_entry_routes, 5),
-    scoring_eligible_direct_routes: boundedList(value.scoring_eligible_direct_routes, 5),
-    approach_routes: boundedList(value.approach_routes, 5)
+    best_scoring_routes: boundedList(value.best_scoring_routes, 3),
+    ...(!value.best_scoring_routes?.length ? {
+      direct_entry_routes: boundedList(value.direct_entry_routes, 3),
+      approach_routes: boundedList(value.approach_routes, 3)
+    } : {})
   };
 }
 
@@ -120,10 +126,39 @@ function compactPhaseDispatch(dispatch) {
   return {
     ...pickDefined(dispatch, [
       "phase_kind", "rule", "primary_task_id", "preferred_units",
-      "allowed_unit_ids", "eligible_units_at_phase_start"
+      "allowed_unit_ids", "eligible_units_at_phase_start", "dynamic_spearhead_unit_ids",
+      "dynamic_spearhead_reassignment", "execution_source", "tactical_opportunities",
+      "upcoming_combat_opportunities", "preparation_actions", "recommended_preparation_unit_ids",
+      "blocked_tasks"
     ]),
     tasks: boundedList(dispatch.tasks, 3).map(compactTask),
     frontier_breakthrough: compactFrontierBreakthrough(dispatch.frontier_breakthrough)
+  };
+}
+
+function compactTacticalSummary(summary) {
+  if (!summary || typeof summary !== "object") return summary;
+  return {
+    ...pickDefined(summary, [
+      "protocol", "side", "opponent", "turn", "phase", "phase_kind",
+      "remaining_action_opportunities", "current_vp", "baseline_vp",
+      "vp_delta_from_baseline", "next_scoring_change", "must_process_units",
+      "can_hold_units", "should_not_act_units", "next_required_task",
+      "replanning_trigger", "allocation_corrections"
+    ]),
+    active_tasks: boundedList(summary.active_tasks, 4).map(compactTask),
+    task_units: boundedList(summary.task_units, 12),
+    key_units: boundedList(summary.key_units, 8).map((unit) => ({
+      ...pickDefined(unit, ["unit", "position", "attack", "defense", "movement", "supply"]),
+      legal_move_options: boundedList(unit.legal_move_options, 4).map((option) => pickDefined(option, [
+        "destination", "cost", "destination_column", "enemy_zoc", "mines"
+      ]))
+    })),
+    supply_bottlenecks: boundedList(summary.supply_bottlenecks, 8),
+    enemy_threats: boundedList(summary.enemy_threats, 8),
+    tactical_opportunities: boundedList(summary.tactical_opportunities, 8),
+    last_action_effect: summary.last_action_effect || null,
+    task_progress_delta: summary.task_progress_delta || {}
   };
 }
 
@@ -135,6 +170,7 @@ function compactOperationState(state) {
       "units", "phase", "phase_kind", "current_vp", "next_required_task", "progress",
       "execution_brief", "warnings", "source"
     ]),
+    tactical_summary: compactTacticalSummary(state.tactical_summary),
     task_plan: compactTaskPlan(state.task_plan),
     active_tasks: boundedList(state.active_tasks, 3).map(compactTask),
     phase_dispatch: compactPhaseDispatch(state.phase_dispatch)
@@ -143,13 +179,25 @@ function compactOperationState(state) {
 
 function compactPhaseStatus(status) {
   if (!status || typeof status !== "object") return status;
+  const compactCombatTarget = (target) => ({
+    ...pickDefined(target, [
+      "target_hex", "defenders", "defender_strength", "terrain",
+      "joint_attack_rule", "has_attack", "required_defender_hexes",
+      "recommended_attackers", "recommended_defender_hexes", "recommended_odds",
+      "recommendation_reason"
+    ]),
+    attackers_that_can_attack: boundedList(target.attackers_that_can_attack, 12),
+    unavailable_attackers: boundedList(target.unavailable_attackers, 12)
+  });
   return {
     ...pickDefined(status, [
       "ok", "read_only", "snapshot", "remaining_units", "unavailable_units",
-      "has_legal_non_pass_action", "can_pass", "counts", "advance_reason"
+      "has_legal_non_pass_action", "can_pass", "counts", "advance_reason",
+      "combat_target_count", "combat_rules"
     ]),
     remaining_unit_details: boundedList(status.remaining_unit_details, 24),
-    mandatory_actions: boundedList(status.mandatory_actions, 8)
+    mandatory_actions: boundedList(status.mandatory_actions, 8),
+    combat_targets: boundedList(status.combat_targets, 12).map(compactCombatTarget)
   };
 }
 
@@ -195,6 +243,7 @@ function compactAgentPayload(payload, options = {}) {
     ...(includeStableContext ? { tools: compactTools(context.tools) } : {}),
     tool_results: boundedList(context.tool_results, 6)
   };
+  if (context.tactical_summary) compactContext.tactical_summary = compactTacticalSummary(context.tactical_summary);
   if (context.phase_intent_catalog) compactContext.phase_intent_catalog = context.phase_intent_catalog;
   if (context.phase_intent) compactContext.phase_intent = context.phase_intent;
   if (context.strategy_execution) compactContext.strategy_execution = context.strategy_execution;
@@ -211,7 +260,13 @@ function compactAgentPayload(payload, options = {}) {
   if (context.objective_resolution) compactContext.objective_resolution = context.objective_resolution;
   if (context.movement_memory) compactContext.movement_memory = context.movement_memory;
   if (context.context_persistence) compactContext.context_persistence = context.context_persistence;
+  if (context.action_effect) compactContext.action_effect = context.action_effect;
+  if (context.task_progress_delta) compactContext.task_progress_delta = context.task_progress_delta;
+  if (context.next_intent) compactContext.next_intent = context.next_intent;
   if (Array.isArray(context.candidate_actions)) compactContext.candidate_actions = boundedList(context.candidate_actions, 6);
+  if (Array.isArray(context.verified_action_options)) {
+    compactContext.verified_action_options = boundedList(context.verified_action_options, 8).map(compactAlternative);
+  }
   if (context.execution_candidate_count != null) compactContext.execution_candidate_count = context.execution_candidate_count;
   return {
     ...(includeStableContext ? {

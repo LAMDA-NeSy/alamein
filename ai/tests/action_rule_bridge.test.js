@@ -212,7 +212,7 @@ test("Axis combat keeps the configured two-to-one policy", () => {
   assert.equal(result.accept, true);
 });
 
-test("hierarchical movement guard grounds a scoring advance in projected supply", () => {
+test("hierarchical movement guard grounds a dynamic non-assigned scoring advance in projected supply", () => {
   const result = reviewStrategicMovement({
     decisionMode: "hierarchical_sae",
     action: { type: "move", unit: "spearhead", destination: "3916" },
@@ -233,7 +233,8 @@ test("hierarchical movement guard grounds a scoring advance in projected supply"
           observable_conditions: [{ kind: "scoring_frontier_at_least", target: 37 }]
         }
       },
-      units: { spearhead: { role: "spearhead" } }
+      phase_dispatch: { frontier_breakthrough: { current_column: 37 } },
+      units: { spearhead: { role: "reserve" } }
     },
     history: ["3716"],
     state: { units: { spearhead: { side: "axis", kind: "ground", hex: "3716" } } }
@@ -401,10 +402,16 @@ test("combat phase_status groups attackable units by target without enumerating 
   assert.equal(status.combat_targets[0].target_hex, "2524");
   assert.deepEqual(status.combat_targets[0].attackers_that_can_attack.map((unit) => unit.unit).sort(), ["attacker_a", "attacker_b"]);
   assert.match(status.combat_targets[0].joint_attack_rule, /any subset/);
+  assert.ok(Array.isArray(status.combat_targets[0].recommended_attackers));
+  assert.ok(Array.isArray(status.combat_targets[0].recommended_defender_hexes));
+  assert.equal(typeof status.combat_targets[0].recommendation_reason, "string");
   assert.equal(Object.hasOwn(status.combat_targets[0], "joint_attacks"), false);
-  const subset = bridge.executeTool("check_combat", { attackers: ["attacker_a"], defender_hexes: ["2524"] }, "combat-status");
-  assert.equal(subset.legal, true, subset.reason);
-  assert.ok(subset.details.odds_column);
+  const incomplete = bridge.executeTool("check_combat", { attackers: ["attacker_a"], defender_hexes: ["2524"] }, "combat-status");
+  assert.equal(incomplete.legal, false);
+  assert.deepEqual(incomplete.details.missing_attackers, ["attacker_b"]);
+  const complete = bridge.executeTool("check_combat", { attackers: ["attacker_a", "attacker_b"], defender_hexes: ["2524"] }, "combat-status");
+  assert.equal(complete.legal, true, complete.reason);
+  assert.ok(complete.details.odds_column);
 });
 
 test("hierarchical combat may pass without holding every attack-capable unit", () => {

@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
+const https = require("node:https");
 const path = require("node:path");
 const { readConfigFile } = require("./config_file.js");
 const { CONFIG_DIR, PROJECT_ROOT } = require("./project_paths.js");
@@ -129,7 +130,7 @@ function loadRegistryDocument(registryFile = REGISTRY_FILE) {
   if (!models || typeof models !== "object" || Array.isArray(models)) throw new Error("model registry must be an object keyed by profile_id");
   return {
     version: Number(parsed.models ? parsed.version || 1 : 1),
-    default_profile: String(parsed.models ? parsed.default_profile || "deepseek_flash" : "deepseek_flash"),
+    default_profile: String(parsed.models ? parsed.default_profile || "mock_primary" : "mock_primary"),
     models
   };
 }
@@ -140,7 +141,7 @@ function loadRegistry(registryFile = REGISTRY_FILE) {
 
 function resolveModel(profileId, options = {}) {
   const document = options.registry
-    ? { default_profile: options.defaultProfile || "deepseek_flash", models: options.registry }
+    ? { default_profile: options.defaultProfile || "mock_primary", models: options.registry }
     : loadRegistryDocument(options.registryFile);
   const resolvedId = profileId || document.default_profile;
   if (!Object.hasOwn(document.models, resolvedId)) throw new Error(`unknown model profile ${resolvedId}`);
@@ -193,6 +194,22 @@ function publicRuntimeMetadata(runtime) {
       circuit_breaker_cooldown_ms: runtime.profile.defaults.circuit_breaker_cooldown_ms
     },
     raw_transport_capture: true
+  };
+}
+
+function modelContractConfiguration(profile) {
+  return {
+    identity: {
+      profile_id: profile.profile_id,
+      adapter: profile.adapter,
+      provider: profile.provider,
+      model: profile.model,
+      billing_channel: profile.access.billing_channel,
+      endpoint_hash: crypto.createHash("sha256").update(profile.base_url).digest("hex")
+    },
+    limits: clone(profile.limits),
+    defaults: clone(profile.defaults),
+    capabilities: clone(profile.capabilities)
   };
 }
 
@@ -565,6 +582,47 @@ function retryableFailure(profile, status, error) {
     || ["network_timeout", "dns_error", "connection_error", "network_error"].includes(errorClass);
 }
 
+function systemCaCertificate() {
+  const candidates = [
+    process.env.AGENT_CA_CERT_FILE,
+    process.platform === "darwin" ? "/etc/ssl/cert.pem" : null
+  ].filter(Boolean);
+  for (const file of candidates) {
+    try {
+      return fs.readFileSync(file);
+    }
+    catch {
+      // Try the next configured system certificate location.
+    }
+  }
+  return undefined;
+}
+
+function requestHttps(url, options, body) {
+  return new Promise((resolve, reject) => {
+    const request = https.request(url, {
+      method: options.method || "GET",
+      headers: options.headers || {},
+      ca: systemCaCertificate(),
+      signal: options.signal
+    }, (response) => {
+      const chunks = [];
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({ response, responseText: chunks.join("") }));
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
+function normalizeHttpsHeaders(headers = {}) {
+  return Object.fromEntries(Object.entries(headers).map(([key, value]) => [
+    key,
+    Array.isArray(value) ? value.join(", ") : String(value)
+  ]));
+}
+
 function sleep(ms) {
   return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 }
@@ -576,19 +634,17 @@ async function callOpenAiCompatible(runtime, body, attempt, timeoutMs) {
   let timeoutId;
   try {
     const request = (async () => {
-      const response = await fetch(`${runtime.profile.base_url}/chat/completions`, {
+      const { response, responseText } = await requestHttps(`${runtime.profile.base_url}/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${runtime._credential}` },
-        body: JSON.stringify({
+        signal: controller.signal
+      }, JSON.stringify({
           ...body,
           model: runtime.profile.model,
           stream: false,
           stream_options: undefined,
           parallel_tool_calls: runtime.profile.capabilities.parallel_tool_calls
-        }),
-        signal: controller.signal
-      });
-      const responseText = await response.text();
+        }));
       return { response, responseText };
     })();
     const { response, responseText } = await Promise.race([
@@ -602,7 +658,7 @@ async function callOpenAiCompatible(runtime, body, attempt, timeoutMs) {
         }, effectiveTimeoutMs);
       })
     ]);
-    return { status: response.status, headers: Object.fromEntries(response.headers.entries()), json: parseBody(responseText), attempt };
+    return { status: response.statusCode, headers: normalizeHttpsHeaders(response.headers), json: parseBody(responseText), attempt };
   }
   finally {
     clearTimeout(timeout);
@@ -612,6 +668,7 @@ async function callOpenAiCompatible(runtime, body, attempt, timeoutMs) {
 
 async function dispatchUpstream(runtime, body, options = {}) {
   const started = Date.now();
+  const requestId = crypto.randomUUID();
   const totalTimeoutMs = Math.max(1, Number(options.timeoutMs || runtime.profile.defaults.timeout_ms));
   const deadline = started + totalTimeoutMs;
   const maxAttempts = runtime.profile.defaults.retries + 1;
@@ -619,9 +676,11 @@ async function dispatchUpstream(runtime, body, options = {}) {
   let error;
   let attempts = 0;
   let errorClass = "none";
+  const retryableFailures = [];
   if (Date.now() < runtime.transport_health.circuit_open_until) {
     errorClass = "circuit_open";
     const record = {
+      request_id: requestId,
       run_id: runtime.run_id,
       model_profile: runtime.profile.profile_id,
       started_at: new Date(started).toISOString(),
@@ -651,19 +710,30 @@ async function dispatchUpstream(runtime, body, options = {}) {
       result = runtime.profile.adapter === "mock"
         ? await callMock(runtime, body, attempt, remaining)
         : await callOpenAiCompatible(runtime, body, attempt, remaining);
+      error = null;
       errorClass = classifyTransportFailure({ status: result.status });
       if (!retryableFailure(runtime.profile, result.status, null)) break;
+      retryableFailures.push({
+        attempt: attempt + 1,
+        status: Number(result.status || 0),
+        error_class: errorClass
+      });
       error = new Error(`upstream status ${result.status}`);
     }
     catch (caught) {
       error = caught;
       errorClass = classifyTransportFailure({ error: caught });
+      retryableFailures.push({
+        attempt: attempt + 1,
+        status: 0,
+        error_class: errorClass
+      });
     }
     if (!retryableFailure(runtime.profile, result?.status || 0, error) || attempt + 1 >= maxAttempts) break;
     const delay = Number(runtime.profile.defaults.retry_delays_ms[attempt] || 0);
     await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
   }
-  const successful = Number(result?.status || 0) >= 200 && Number(result?.status || 0) < 400;
+  const successful = !error && Number(result?.status || 0) >= 200 && Number(result?.status || 0) < 400;
   if (successful) {
     runtime.transport_health.consecutive_failures = 0;
   }
@@ -675,6 +745,7 @@ async function dispatchUpstream(runtime, body, options = {}) {
     }
   }
   const record = {
+    request_id: requestId,
     run_id: runtime.run_id,
     model_profile: runtime.profile.profile_id,
     started_at: new Date(started).toISOString(),
@@ -683,7 +754,11 @@ async function dispatchUpstream(runtime, body, options = {}) {
     request: redactValue(body, [runtime._credential, runtime.local_token]),
     response: redactValue(result?.json || { error: error?.message || "upstream request failed" }, [runtime._credential, runtime.local_token]),
     status: result?.status || 502,
-    error_class: successful ? "none" : errorClass,
+    error_class: successful ? "none" : result?.status
+      ? classifyTransportFailure({ status: result.status })
+      : errorClass,
+    recovered_after_retry: successful && retryableFailures.length > 0,
+    retryable_failures: retryableFailures,
     total_timeout_ms: totalTimeoutMs,
     request_headers: redactHeaders({ authorization: `Bearer ${runtime.local_token}`, "content-type": "application/json" }),
     response_headers: redactHeaders(result?.headers || {})
@@ -769,11 +844,23 @@ async function startModelGateway(runtime) {
         };
       }
       if (body.stream && forwarded.json && (result.status || 500) < 400) {
-        res.writeHead(result.status || 200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-agent-error-class": record.error_class });
+        res.writeHead(result.status || 200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+          "x-agent-error-class": record.error_class,
+          "x-agent-attempts": String(record.attempts || 0),
+          "x-agent-recovered-after-retry": String(!!record.recovered_after_retry)
+        });
         res.end(completionAsSse(forwarded.json));
       }
       else {
-        res.writeHead(result?.status || 502, { "content-type": "application/json", "x-agent-error-class": record.error_class });
+        res.writeHead(result?.status || 502, {
+          "content-type": "application/json",
+          "x-agent-error-class": record.error_class,
+          "x-agent-attempts": String(record.attempts || 0),
+          "x-agent-recovered-after-retry": String(!!record.recovered_after_retry)
+        });
         res.end(JSON.stringify(forwarded.json || { error: { message: error?.message || "upstream request failed" } }));
       }
     }
@@ -876,6 +963,8 @@ function createChatCompletionsClient(runtime) {
           ok: response.ok,
           status: response.status,
           error_class: response.headers.get("x-agent-error-class") || classifyTransportFailure({ status: response.status }),
+          attempts: Number(response.headers.get("x-agent-attempts") || 1),
+          recovered_after_retry: response.headers.get("x-agent-recovered-after-retry") === "true",
           elapsed_ms: Date.now() - started,
           request_body: redactValue(body, [runtime.local_token]),
           response_json: redactValue(json, [runtime.local_token, runtime._credential])
@@ -917,6 +1006,7 @@ module.exports = {
   createOpenCodeProviderConfig,
   loadRegistry,
   loadRegistryDocument,
+  modelContractConfiguration,
   publicRuntimeMetadata,
   resolveModel,
   startModelGateway,

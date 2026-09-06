@@ -3,23 +3,32 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { fallbackReasonClass, isNonRetryableRequestStatus, stepBudget } = require("../core/transport_attribution.js");
+const {
+  failedTransportRecords,
+  recoveredTransportDetails
+} = require("../core/transport_attribution.js");
 
-test("zero fallback reserve gives the model the complete step budget", () => {
-  const started = Date.now();
-  const budget = stepBudget({ transport: { stepFallbackReserveMs: 0 } }, started, 180000);
+test("transport attribution does not treat an unrelated later request as recovery", () => {
+  const runtime = {
+    transport: [
+      { status: 502, error_class: "upstream_unavailable", attempts: 3 },
+      { status: 200, error_class: "none", attempts: 1 }
+    ]
+  };
 
-  assert.equal(budget.fallbackReserveMs, 0);
-  assert.ok(budget.remainingStepMs <= 180000 && budget.remainingStepMs > 179000);
-  assert.equal(budget.modelBudgetMs, budget.remainingStepMs);
+  assert.equal(failedTransportRecords(runtime).length, 1);
+  assert.deepEqual(recoveredTransportDetails(runtime), []);
 });
+test("transport attribution keeps a final failure unresolved", () => {
+  const runtime = {
+    transport: [
+      { status: 502, error_class: "upstream_unavailable", attempts: 3 },
+      { status: 200, error_class: "none", attempts: 1 },
+      { status: 503, error_class: "upstream_unavailable", attempts: 3 }
+    ]
+  };
 
-test("non-retryable 4xx request errors are separated from network failures", () => {
-  assert.equal(isNonRetryableRequestStatus(402), true);
-  assert.equal(isNonRetryableRequestStatus(429), false);
-  assert.equal(isNonRetryableRequestStatus(503), false);
-  assert.equal(fallbackReasonClass({
-    fallbackUsed: true,
-    transportFailures: [{ status: 402, error_class: "request_error" }]
-  }), "request_error");
+  assert.equal(failedTransportRecords(runtime).length, 2);
+  assert.equal(failedTransportRecords(runtime).at(-1).status, 503);
+  assert.equal(recoveredTransportDetails(runtime).length, 0);
 });

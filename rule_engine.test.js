@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const Rules = require("./rule_engine.js");
+const TERRAIN = JSON.parse(fs.readFileSync("./terrain.json", "utf8"));
 
 function ctx(state, terrain = { hexes: {}, edges: {} }) {
   Rules.applyStateDefaults(state);
@@ -40,6 +41,13 @@ test("October standard scenario defaults to Allies first player", () => {
   assert.equal(state.active_side, "allies");
 });
 
+test("October defaults do not reset the active side after turn 1", () => {
+  const state = baseState({ scenario: "october", turn: 11, phase: "axis_initial_movement", active_side: "axis" });
+  Rules.applyStateDefaults(state);
+  assert.equal(state.phase, "axis_initial_movement");
+  assert.equal(state.active_side, "axis");
+});
+
 test("scenario engineers use their printed (1)4 values", () => {
   const scenarios = ["september", "october"].map((name) => JSON.parse(fs.readFileSync(`./scenarios/${name}.json`, "utf8")));
   const engineers = scenarios.flatMap((scenario) => Object.values(scenario.units).filter((unit) => unit.kind === "engineer"));
@@ -52,22 +60,105 @@ test("scenario engineers use their printed (1)4 values", () => {
   }
 });
 
-test("October Axis movement cannot cross west of the retreat line before turn 11", () => {
+test("October Axis start line contains all 65 reviewed adjacent hex edges", () => {
+  const edges = Object.entries(TERRAIN.edges)
+    .filter(([, tags]) => tags.includes("axis_start_line_october"))
+    .map(([edge]) => edge);
+  assert.equal(edges.length, 65);
+  assert.ok(edges.includes("3207-3208"));
+  assert.ok(edges.includes("3108-3208"));
+  assert.ok(edges.includes("4033-4134"));
+  for (const edge of edges) {
+    const [left, right] = edge.split("-");
+    assert.ok(Rules.neighbors(left).includes(right), `${edge} must join adjacent hexes`);
+  }
+});
+
+test("compiled October line regions put both sides of every tagged edge in different regions", () => {
+  const state = octoberMovementState(10, "3314");
+  const context = ctx(state, TERRAIN);
+  for (const tag of ["axis_retreat_line", "axis_start_line_october"]) {
+    const regions = Rules.taggedLineRegions(context, tag);
+    assert.ok(regions.boundary_edges.length > 0);
+    assert.equal(regions.boundary_edges.some((edge) => !edge.separates_regions), false, tag);
+  }
+});
+
+function octoberMovementState(turn, hex) {
+  return baseState({
+    scenario: "october",
+    turn,
+    phase: "axis_mechanized_movement",
+    active_side: "axis",
+    units: {
+      tank: { side: "axis", hex, state: "fresh", attack: 2, defense: 2, movement: 30, kind: "ground", piece_type: "Mech" }
+    }
+  });
+}
+
+test("October Axis units between the reviewed lines cannot move west through turn 10", () => {
+  const state = octoberMovementState(10, "3314");
+  const verdict = Rules.checkMove(ctx(state, TERRAIN), "tank", ["3314", "3214"]);
+  assert.equal(verdict.legal, false);
+  assert.match(verdict.reason, /撤退线与 Axis 起始线之间.*不能向西移动/);
+});
+
+test("October Axis units west of the retreat line can move freely within the western area", () => {
+  const westward = octoberMovementState(10, "2412");
+  const lateral = octoberMovementState(10, "2412");
+  assert.equal(Rules.checkMove(ctx(westward, TERRAIN), "tank", ["2412", "2312"]).legal, true);
+  assert.equal(Rules.checkMove(ctx(lateral, TERRAIN), "tank", ["2412", "2411"]).legal, true);
+});
+
+test("October Axis units cannot cross back west over the retreat line through turn 10", () => {
+  const direct = octoberMovementState(10, "2610");
+  const loop = octoberMovementState(10, "2610");
+  const directVerdict = Rules.checkMove(ctx(direct, TERRAIN), "tank", ["2610", "2510"]);
+  const loopVerdict = Rules.checkMove(ctx(loop, TERRAIN), "tank", ["2610", "2510", "2610"]);
+  assert.equal(directVerdict.legal, false);
+  assert.match(directVerdict.reason, /不能从东侧向西越过撤退线/);
+  assert.equal(loopVerdict.legal, false);
+  assert.match(loopVerdict.reason, /不能从东侧向西越过撤退线/);
+});
+
+test("October Axis units west of the retreat line cannot cross east before turn 11", () => {
+  const state = octoberMovementState(10, "2510");
+  const verdict = Rules.checkMove(ctx(state, TERRAIN), "tank", ["2510", "2610"]);
+  assert.equal(verdict.legal, false);
+  assert.match(verdict.reason, /位于撤退线西侧.*不能向东越过撤退线/);
+});
+
+test("October Axis line restrictions expire on turn 11", () => {
+  const state = octoberMovementState(11, "3314");
+  const verdict = Rules.checkMove(ctx(state, TERRAIN), "tank", ["3314", "3214"]);
+  assert.equal(verdict.legal, true, verdict.reason);
+});
+
+test("mechanized units that defended in combat cannot move in the mechanized phase", () => {
+  const state = baseState({
+    phase: "axis_mechanized_movement",
+    units: {
+      tank: { side: "axis", hex: "0501", state: "fresh", attack: 2, defense: 2, movement: 6, kind: "ground", piece_type: "Mech", defended_this_phase: true }
+    }
+  });
+  const verdict = Rules.checkMove(ctx(state), "tank", ["0501", "0601"]);
+  assert.equal(verdict.legal, false);
+  assert.match(verdict.reason, /阶段不允许/);
+});
+
+test("October movement uses the reviewed start line rather than a fixed map column", () => {
   const state = baseState({
     scenario: "october",
     turn: 10,
     phase: "axis_mechanized_movement",
     active_side: "axis",
     units: {
-      tank: { side: "axis", hex: "1809", state: "fresh", attack: 2, defense: 2, movement: 10, kind: "ground", piece_type: "Mech" }
+      tank: { side: "axis", hex: "3314", state: "fresh", attack: 2, defense: 2, movement: 10, kind: "ground", piece_type: "Mech" }
     }
   });
-  const direct = Rules.checkMove(ctx(state), "tank", ["1809", "1709"]);
-  const loop = Rules.checkMove(ctx(state), "tank", ["1809", "1709", "1809"]);
-  assert.equal(direct.legal, false);
-  assert.match(direct.reason, /撤退线/);
-  assert.equal(loop.legal, false);
-  assert.match(loop.reason, /撤退线/);
+  const verdict = Rules.checkMove(ctx(state, TERRAIN), "tank", ["3314", "3214"]);
+  assert.equal(verdict.legal, false);
+  assert.match(verdict.reason, /起始线/);
 });
 
 test("coastal all-sea hexes block movement and automatic pathfinding", () => {
@@ -247,6 +338,22 @@ test("road mode movement space must remain empty while moving", () => {
   assert.match(verdict.reason, /前\/后方|道路移动空间/);
 });
 
+test("road mode cannot enter a depression even when the edge is a road", () => {
+  const state = baseState({
+    units: {
+      tank: { side: "axis", hex: "0101", state: "fresh", attack: 2, defense: 2, movement: 6, kind: "ground", piece_type: "Mech" }
+    }
+  });
+  const terrain = {
+    hexes: { "0201": ["depression"] },
+    edges: {},
+    notes: { coastal_road: ["0101", "0201"] }
+  };
+  const verdict = Rules.checkMove(ctx(state, terrain), "tank", ["0101", "0201"], { mode: "road" });
+  assert.equal(verdict.legal, false);
+  assert.match(verdict.reason, /洼地|ridge\/depression/);
+});
+
 test("leaving road mode is a judged movement-cost action", () => {
   const state = baseState({
     units: {
@@ -260,6 +367,28 @@ test("leaving road mode is a judged movement-cost action", () => {
   assert.equal(result.legal, true, result.reason);
   assert.equal(state.units.tank.road_mode, false);
   assert.equal(state.units.tank.state, "spent");
+});
+
+test("an engineer stops in the second minefield and only clears the first one", () => {
+  const state = baseState({
+    units: {
+      engineer: { side: "axis", hex: "0202", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "engineer" },
+      first: { side: "allies", hex: "0302", kind: "mine" },
+      second: { side: "allies", hex: "0402", kind: "mine" }
+    }
+  });
+  const context = ctx(state);
+  const through = Rules.checkMove(context, "engineer", ["0202", "0302", "0402", "0503"]);
+  assert.equal(through.legal, false);
+  assert.match(through.reason, /第二个敌方雷区/);
+  const toSecond = Rules.checkMove(context, "engineer", ["0202", "0302", "0402"]);
+  assert.equal(toSecond.legal, true, toSecond.reason);
+  assert.equal(toSecond.details.mine_entry_hex, "0302");
+  state.units.engineer.hex = "0402";
+  const cleared = Rules.clearMine(context, "engineer", "0302", null, { path_entry: true });
+  assert.equal(cleared.legal, true, cleared.reason);
+  assert.equal(state.units.first.eliminated, true);
+  assert.equal(state.units.second.eliminated, undefined);
 });
 
 test("temporary overstack must be repaired before other movement", () => {
@@ -663,6 +792,19 @@ test("friendly minefield doubles defender strength", () => {
   assert.equal(verdict.details.odds_column, "1-1");
 });
 
+test("a unit that retreated earlier in the combat phase contributes no defense strength", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      attacker: { side: "axis", hex: "0501", state: "fresh", attack: 2, defense: 2, movement: 4, kind: "ground" },
+      retreated: { side: "allies", hex: "0601", state: "fresh", attack: 1, defense: 3, movement: 4, kind: "ground", retreated_this_phase: true }
+    }
+  });
+  const verdict = Rules.checkCombat(ctx(state), { attackers: ["attacker"], defender_hexes: ["0601"], die: 1 });
+  assert.equal(verdict.legal, true, verdict.reason);
+  assert.equal(verdict.details.defense, 0);
+});
+
 test("engineer assist cancels enemy minefield defense doubling", () => {
   const state = baseState({
     phase: "axis_combat",
@@ -961,4 +1103,172 @@ test("friendly combat unit inside enemy minefield counts as supplied when an adj
   // even though the supply-line BFS treats enemy-mine hexes as blocking transit (rule 11.41).
   assert.equal(Rules.supplyState(context, "f0"), "supplied");
   assert.notEqual(Rules.supplyState(context, "f0"), "isolated");
+});
+
+test("July boxed-area restriction uses the starting-unit snapshot, not the current hex", () => {
+  const terrain = { hexes: { "0302": ["alamein_box"] }, edges: {} };
+  const entered = baseState({
+    phase: "allies_initial_movement",
+    active_side: "allies",
+    initial_box_restricted_unit_ids: [],
+    units: {
+      mover: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" }
+    }
+  });
+  assert.equal(Rules.checkMove(ctx(entered, terrain), "mover", ["0302", "0202"]).legal, true);
+
+  const started = baseState({
+    phase: "allies_initial_movement",
+    active_side: "allies",
+    initial_box_restricted_unit_ids: ["mover"],
+    units: {
+      mover: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" }
+    }
+  });
+  const restricted = Rules.checkMove(ctx(started, terrain), "mover", ["0302", "0202"]);
+  assert.equal(restricted.legal, false);
+  assert.match(restricted.reason, /方框/);
+});
+
+test("enemy supply counters block movement and supply lines without creating ZOC", () => {
+  const state = baseState({
+    units: {
+      mover: { side: "axis", hex: "0202", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      supply: { side: "allies", hex: "0302", state: "fresh", attack: 0, defense: 1, movement: 4, kind: "supply", name: "1-3 Supply" }
+    }
+  });
+  const context = ctx(state);
+  const move = Rules.checkMove(context, "mover", ["0202", "0302"]);
+  assert.equal(move.legal, false);
+  assert.match(move.reason, /敌军/);
+  assert.equal(Rules.supplyBlockedHexes(context, "axis").has("0302"), true);
+  assert.deepEqual(Rules.enemyZocSources(context, "axis", "0302"), new Set());
+});
+
+test("engineers count as Allied combat units for VP losses", () => {
+  const state = baseState({
+    units: {
+      engineer: { side: "allies", hex: "0302", attack: 1, defense: 1, movement: 4, kind: "engineer", eliminated: true, eliminated_reason: "combat" }
+    }
+  });
+  const result = Rules.calculateVictoryPoints(ctx(state));
+  assert.equal(result.victory_points, 26);
+  assert.deepEqual(result.breakdown.find((item) => item.id === "allied_combat_eliminated").units, ["engineer"]);
+});
+
+test("combat rejects dice outside the physical die range without changing state", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      attacker: { side: "axis", hex: "0202", state: "fresh", attack: 2, defense: 2, movement: 4, kind: "ground" },
+      defender: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" }
+    }
+  });
+  const result = Rules.resolveCombat(ctx(state), { attackers: ["attacker"], defender_hexes: ["0302"], die: 7 });
+  assert.equal(result.legal, false);
+  assert.match(result.reason, /1 到 6/);
+  assert.equal(state.units.attacker.state, "fresh");
+  assert.equal(state.units.defender.defended_this_phase, false);
+  assert.equal(state.units.defender.eliminated, undefined);
+});
+
+test("clearing a mine hex prevents every unit in that hex from attacking or assisting this turn", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      attacker: { side: "axis", hex: "0201", state: "fresh", attack: 2, defense: 2, movement: 4, kind: "ground" },
+      cleared: { side: "axis", hex: "0202", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground", just_cleared_mine_hex: "0202" },
+      engineer: { side: "axis", hex: "0202", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "engineer", just_cleared_mine_hex: "0202" },
+      defender: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      mine: { side: "allies", hex: "0302", kind: "mine" }
+    }
+  });
+  const context = ctx(state);
+  const attack = Rules.checkCombat(context, { attackers: ["cleared"], defender_hexes: ["0302"] });
+  assert.equal(attack.legal, false);
+  assert.match(attack.reason, /刚清除/);
+  const assist = Rules.checkCombat(context, { attackers: ["attacker"], defender_hexes: ["0302"], engineer_assists: ["engineer"] });
+  assert.equal(assist.legal, false);
+  assert.match(assist.reason, /刚清除/);
+});
+
+test("defensive combat immediately exits the defender from road mode", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      attacker: { side: "axis", hex: "0202", state: "fresh", attack: 2, defense: 2, movement: 4, kind: "ground" },
+      defender: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground", road_mode: true, road_facing: 0, facing: 0 }
+    }
+  });
+  const result = Rules.resolveCombat(ctx(state), { attackers: ["attacker"], defender_hexes: ["0302"], die: 1 });
+  assert.equal(result.legal, true, result.reason);
+  assert.equal(state.units.defender.road_mode, false);
+  assert.equal(state.units.defender.road_facing, null);
+  assert.equal(state.units.defender.facing, null);
+});
+
+test("combat rejects duplicate attackers and duplicate defender hexes", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      attacker: { side: "axis", hex: "0202", state: "fresh", attack: 2, defense: 2, movement: 4, kind: "ground" },
+      defender: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" }
+    }
+  });
+  const context = ctx(state);
+  assert.equal(Rules.checkCombat(context, { attackers: ["attacker", "attacker"], defender_hexes: ["0302"] }).legal, false);
+  assert.equal(Rules.checkCombat(context, { attackers: ["attacker"], defender_hexes: ["0302", "0302"] }).legal, false);
+});
+
+test("all eligible adjacent combat units must join an attack on the shared target", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      first: { side: "axis", hex: "0202", state: "fresh", attack: 2, defense: 2, movement: 4, kind: "ground" },
+      second: { side: "axis", hex: "0201", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      defender: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" }
+    }
+  });
+  const context = ctx(state);
+  const incomplete = Rules.checkCombat(context, { attackers: ["first"], defender_hexes: ["0302"] });
+  assert.equal(incomplete.legal, false);
+  assert.deepEqual(incomplete.details.missing_attackers, ["second"]);
+  const complete = Rules.checkCombat(context, { attackers: ["first", "second"], defender_hexes: ["0302"] });
+  assert.equal(complete.legal, true, complete.reason);
+});
+
+test("an attack cannot combine an enemy minefield target with another target or two minefield targets", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      attacker: { side: "axis", hex: "0202", state: "fresh", attack: 3, defense: 3, movement: 4, kind: "ground" },
+      mine_defender: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      normal_defender: { side: "allies", hex: "0203", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      mine_one: { side: "allies", hex: "0302", kind: "mine" },
+    }
+  });
+  const context = ctx(state);
+  const mixed = Rules.checkCombat(context, { attackers: ["attacker"], defender_hexes: ["0302", "0203"] });
+  assert.equal(mixed.legal, false);
+  assert.match(mixed.reason, /雷区/);
+  state.units.mine_two = { side: "allies", hex: "0203", kind: "mine" };
+  const twoMines = Rules.checkCombat(context, { attackers: ["attacker"], defender_hexes: ["0302", "0203"] });
+  assert.equal(twoMines.legal, false);
+  assert.match(twoMines.reason, /最多只能选择一个雷区/);
+});
+
+test("required ordinary defender hexes exclude a minefield target, while the final attack still names it", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      attacker: { side: "axis", hex: "0202", state: "fresh", attack: 3, defense: 3, movement: 4, kind: "ground" },
+      mine_defender: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      mine: { side: "allies", hex: "0302", kind: "mine" }
+    }
+  });
+  const context = ctx(state);
+  const attackers = [{ id: "attacker", ...state.units.attacker }];
+  assert.deepEqual([...Rules.requiredDefenderHexes(context, attackers)], []);
+  const attack = Rules.checkCombat(context, { attackers: ["attacker"], defender_hexes: ["0302"] });
+  assert.equal(attack.legal, true, attack.reason);
 });

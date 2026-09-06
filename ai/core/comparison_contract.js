@@ -5,6 +5,10 @@ const { TOOL_CATALOG_VERSION } = require("./agent_tools.js");
 const { promptRegistryMetadata, sidePromptRegistryMetadata } = require("./prompt_registry.js");
 const { createHarnessPromptContract } = require("./harness_prompt_contract.js");
 const { resolveControllers } = require("./controller_config.js");
+const { artifactContractFields, createArtifactManifest } = require("./benchmark_artifacts.js");
+const { modelContractConfiguration, resolveModel } = require("./model_runtime.js");
+
+const COMPARISON_CONTRACT_VERSION = "single-action-comparison-v14-benchmark-integrity";
 
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -27,25 +31,44 @@ function createComparisonContract({
   runtime,
   contextProfile = "full_public_payload_v1",
   timeoutMs = 180000,
+  maxSteps = 1000,
   toolChoice = "auto",
-  thinkingMode = "default",
-  planningThinkingMode = "default",
+  thinkingMode,
+  planningThinkingMode,
   unitPlanSettings = {},
   taskManagement = null,
   taskCheckerProfile = null
 }) {
   const promptRegistry = promptRegistryMetadata();
+  const artifactManifest = createArtifactManifest(scenario);
   const resolvedControllers = resolveControllers({ controllers, externalSide });
   const promptSide = resolvedControllers.external_side || externalSide || "axis";
   const promptProfile = sidePromptRegistryMetadata(promptSide);
+  const externalPromptSides = ["axis", "allies"]
+    .filter((side) => resolvedControllers[side] === "external_ai");
+  const promptProfiles = Object.fromEntries(
+    (externalPromptSides.length ? externalPromptSides : [promptSide])
+      .map((side) => {
+        const metadata = sidePromptRegistryMetadata(side);
+        return [side, { profile: metadata.profile, version: metadata.version, hash: metadata.hash }];
+      })
+  );
   const harnessPrompt = createHarnessPromptContract(toolProfile.tools, promptProfile.side);
   const contract = {
-    version: "single-action-comparison-v10-allied-layered-defense",
+    version: COMPARISON_CONTRACT_VERSION,
     tool_argument_contract: "canonical-tool-arguments-v2",
     scenario,
+    ...artifactContractFields(artifactManifest),
+    artifact_manifest: {
+      benchmark_version: artifactManifest.benchmark_version,
+      scenario: artifactManifest.scenario,
+      files: artifactManifest.files
+    },
+    source_control: artifactManifest.source_control,
     external_side: resolvedControllers.external_side || externalSide || null,
     prompt_profile: promptProfile.profile,
     prompt_profile_hash: promptProfile.hash,
+    prompt_profiles: promptProfiles,
     side_goal_protocol: taskManagement ? "side-aware-goal-v2" : null,
     side_task_protocol: taskManagement ? "side-aware-task-v2" : null,
     controllers: { axis: resolvedControllers.axis, allies: resolvedControllers.allies },
@@ -64,6 +87,7 @@ function createComparisonContract({
     movement_supply_projection_version: "post-move-supply-v1",
     non_retryable_4xx_policy: "immediate-step-fallback-v1",
     consecutive_transport_failure_round_limit: 2,
+    transport_fallback_ranking_policy: "complete-game-method-fallback-v1",
     movement_metrics_version: "movement-patterns-v2",
     strategic_movement_guard_version: taskManagement ? "goal-grounded-movement-v1" : null,
     strategic_combat_guard_version: taskManagement ? "allied-threat-aware-odds-v2" : null,
@@ -76,13 +100,15 @@ function createComparisonContract({
     movement_memory_size: taskManagement ? 4 : null,
     immediate_reversal_policy: taskManagement ? "reject_without_vp_supply_zoc_or_stack_repair_benefit" : null,
     scoring_frontier_supply_policy: taskManagement ? "spearhead_must_project_scoring_eligible_supply" : null,
-    frontier_breakthrough_protocol: taskManagement ? "dynamic-frontier-breakthrough-v1" : null,
+    frontier_breakthrough_protocol: taskManagement ? "dynamic-frontier-breakthrough-v2-max-reach" : null,
+    axis_breakthrough_checkpoint_policy: taskManagement ? "overshoot-completes-crossed-checkpoints-v1" : null,
+    axis_dynamic_spearhead_policy: taskManagement ? "global-rule-verified-top3-v1" : null,
     max_calls_per_step: toolProfile.max_calls_per_step,
     parallel_tool_calls: false,
     execution_tool_choice: String(toolChoice),
     execution_tool_choice_protocol: "application-validated-auto-v1",
-    execution_thinking_mode: String(thinkingMode),
-    planning_thinking_mode: String(planningThinkingMode),
+    execution_thinking_mode: String(thinkingMode ?? runtime.profile.defaults.thinking),
+    planning_thinking_mode: String(planningThinkingMode ?? runtime.profile.defaults.thinking),
     objective_resolution_version: taskManagement ? "objective-resolution-v3-open-goal" : decisionPolicy === "hierarchical_sae" ? "objective-resolution-v2" : null,
     adaptive_replanning_version: taskManagement ? "adaptive-replanning-v2-goal-events" : decisionPolicy === "hierarchical_sae" ? "adaptive-replanning-v1" : null,
     stop_on_accepted: toolProfile.stop_on_accepted,
@@ -106,7 +132,11 @@ function createComparisonContract({
     operation_state_version: taskManagement ? "sae-operation-v2" : decisionPolicy === "hierarchical_sae" ? "sae-operation-v1" : null,
     task_management: taskManagement ? "multi_task" : "disabled",
     task_protocol: taskManagement ? "side-aware-task-v2" : null,
-    task_progress_version: taskManagement ? "combined-goal-task-progress-v5" : null,
+    task_generation: taskManagement ? String(config.task_management_options?.task_generation || "fixed_skeleton") : null,
+    task_dependency_policy: taskManagement ? String(config.task_management_options?.dependency_policy || "hard_soft_conditional_v1") : null,
+    task_switching: taskManagement ? String(config.task_management_options?.task_switching || "existing_tasks_only") : null,
+    task_progress_version: taskManagement ? "evidence-grounded-model-task-progress-v6" : null,
+    task_action_feedback_version: taskManagement ? "post-action-feedback-v1" : null,
     task_checker_timing: taskManagement ? "filtered-next-state-evidence-v2" : null,
     task_replan_policy: taskManagement ? {
       no_progress_threshold: Number(config.task_management_options?.no_progress_replan_threshold || 3),
@@ -117,8 +147,12 @@ function createComparisonContract({
       cooldown_actions: Number(config.task_management_options?.replan_cooldown_actions || 3)
     } : null,
     task_checker_model_profile: taskCheckerProfile || null,
+    task_configuration: taskManagement ? config.task_management_options || {} : null,
+    task_checker_configuration: taskCheckerProfile ? modelContractConfiguration(resolveModel(taskCheckerProfile)) : null,
     step_timeout_ms: Number(timeoutMs),
+    max_steps: Number(maxSteps),
     model_profile: runtime.profile.profile_id,
+    model_configuration: modelContractConfiguration(runtime.profile),
     model: runtime.profile.model,
     billing_channel: runtime.profile.access?.billing_channel || "metered_api",
     context_limit: runtime.profile.limits.context,
@@ -138,12 +172,21 @@ function createComparisonContract({
     harness_prompt_version: harnessPrompt.version,
     harness_prompt_hash: harnessPrompt.hash,
     policy_config: {
+      api: { maxTokens: config.api?.maxTokens ?? null, maxToolRounds: config.api?.maxToolRounds ?? null },
       context: config.context || {},
-      strategy: config.strategy || {}
+      strategy: config.strategy || {},
+      performance: config.performance || {}
     }
   };
-  const hash = crypto.createHash("sha256").update(stableJson(contract)).digest("hex");
+  // A comparison contract describes the controlled conditions. The sample
+  // identity (seed/replicate) remains in the recorded contract, but must not
+  // split otherwise identical repeated samples into different contract
+  // groups.
+  const contractForHash = structuredClone(contract);
+  delete contractForHash.seed;
+  delete contractForHash.replicate;
+  const hash = crypto.createHash("sha256").update(stableJson(contractForHash)).digest("hex");
   return { contract, hash };
 }
 
-module.exports = { createComparisonContract, stableJson };
+module.exports = { COMPARISON_CONTRACT_VERSION, createComparisonContract, stableJson };

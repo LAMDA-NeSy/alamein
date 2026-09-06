@@ -25,7 +25,13 @@ pnpm run ai:pydanticai -- --model-profile mock_primary --max-steps 1
 pnpm run ai:batch -- --model-profiles mock_primary --seeds 1942 --max-steps 1
 pnpm run ai:metrics -- log/run1.json log/run2.json --out log/research_metrics.json
 pnpm run ai:metrics -- log/run1.json log/run2.json --judge --judge-model-profile deepseek_flash --out log/research_metrics_with_judge.json
+pnpm run ai:compare -- --dimension method --baseline direct log/run1.json log/run2.json
 ```
+
+The public default model is `mock_primary`, so the commands above run offline without
+an API key. The task checker defaults to `mock_secondary`. Real model calls are
+opt-in, for example `--model-profile deepseek_flash`; the selected profile reads
+its API key only from the configured environment variable.
 
 Python 和 PydanticAI 环境由 `uv` 管理：
 
@@ -56,7 +62,7 @@ pnpm run ai:full-game -- \
 
 `config/` 只包含 YAML：`agent_methods.yaml` 配置方法和工具组合；`agent_tools.yaml` 使用 `name`、`description` 和 `parameters` 定义工具；`ai_models.yaml` 配置模型；`ai_config.yaml` 配置 API 兼容入口与上下文边界；`agent_tool_profiles.schema.yaml` 约束工具组合。
 
-`config/research_metrics.yaml` 固定论文评估口径。`ai:metrics` 不带 `--judge` 时计算平均 VP、相对场景初始值的 VP 增减、阵营方向校正后的 VP 收益、动作拒绝率和低赔率攻击率；带 `--judge` 时额外按“外部阵营的一回合”评估错失机会严重度和多步计划连贯性，并保存逐窗口证据与 Judge 覆盖率。
+`config/research_metrics.yaml` 固定论文评估口径。`ai:metrics` 不带 `--judge` 时计算平均 VP、相对场景初始值的 VP 增减、阵营方向校正后的 VP 收益、动作拒绝率和低赔率攻击率；带 `--judge` 时额外按“外部阵营的一回合”评估错失机会严重度和多步计划连贯性，并保存逐窗口证据与 Judge 覆盖率。正式排名使用已确认完整且带 benchmark artifact 清单的样本；重试和方法自身 fallback 属于端到端方法的一部分，可以进入排名，但必须同时报告 `sample_status`、传输失败、恢复次数和 fallback 率。部分对局与 Harness 错误仍被排除。`ai:compare` 按 `seed + replicate` 输出配对 VP 差值，异常或重复配对的差值为空。
 
 `prompt/prompts.yaml` 只保存阵营无关的工具协议、规则上下文和研究指标 Judge PE。完整战略与执行 PE 分别位于 `prompt/axis_prompts.yaml` 和 `prompt/allies_prompts.yaml`，覆盖浏览器外部 AI、手写方法、OpenCode、LangGraph、PydanticAI、阶段意图、单位计划、SAE 战略与分配、任务检查和阵营压缩摘要。启动时会校验当前阵营的完整 PE，缺失字段不会回退到共享战略文本。转录记录 `prompt_profile`、阵营 PE SHA-256、共享 Prompt SHA-256 和完整 Harness Prompt SHA-256。
 

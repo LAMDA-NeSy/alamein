@@ -108,6 +108,31 @@ test("game overview states the active side's concrete scenario goal", () => {
   assert.match(allies.publicContext.game_overview.turn_goal_update, /下一项直接得分机会是第 35 列/);
 });
 
+test("September and October contexts expose their actual VP baselines and objectives", () => {
+  const config = Transcript.readConfig();
+  const september = Transcript.buildContext(config, {
+    state: { scenario: "september", turn: 1, phase: "axis_initial_movement", active_side: "axis", units: {} }
+  }).publicContext;
+  assert.ok(september.game_overview.scoring_rules.some((rule) => /Start at 35 VP/.test(rule)));
+  assert.equal(september.objectives.axis_primary_type, "mine_clearance");
+  assert.match(september.objectives.axis_primary, /minefield/i);
+  assert.doesNotMatch(september.objectives.axis_primary, /3711/);
+
+  const octoberBefore = Transcript.buildContext(config, {
+    state: { scenario: "october", turn: 1, phase: "allies_initial_movement", active_side: "allies", units: {} }
+  }).publicContext;
+  assert.ok(octoberBefore.game_overview.scoring_rules.some((rule) => /Start at -20 VP/.test(rule)));
+  assert.equal(octoberBefore.objectives.axis_primary_type, "withdrawal_preparation");
+  assert.match(octoberBefore.objectives.allies_primary, /withdrawal/i);
+  assert.doesNotMatch(octoberBefore.objectives.axis_primary, /3711/);
+
+  const octoberAfter = Transcript.buildContext(config, {
+    state: { scenario: "october", turn: 11, phase: "axis_initial_movement", active_side: "axis", units: {} }
+  }).publicContext;
+  assert.equal(octoberAfter.objectives.axis_primary_type, "west_edge_withdrawal");
+  assert.match(octoberAfter.objectives.axis_primary, /west edge/i);
+});
+
 test("external AI combat intel applies ridge defense and cancels D retreats", () => {
   const built = combatContext();
   const result = Transcript.runTool(

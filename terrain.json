@@ -610,6 +610,198 @@
     "2534-2633": [
       "axis_retreat_line"
     ],
+    "3207-3208": [
+      "axis_start_line_october"
+    ],
+    "3108-3109": [
+      "axis_start_line_october"
+    ],
+    "3008-3109": [
+      "axis_start_line_october"
+    ],
+    "3009-3109": [
+      "axis_start_line_october"
+    ],
+    "3010-3110": [
+      "axis_start_line_october"
+    ],
+    "3110-3111": [
+      "axis_start_line_october"
+    ],
+    "3111-3210": [
+      "axis_start_line_october"
+    ],
+    "3111-3211": [
+      "axis_start_line_october"
+    ],
+    "3112-3211": [
+      "axis_start_line_october"
+    ],
+    "3211-3212": [
+      "axis_start_line_october"
+    ],
+    "3212-3312": [
+      "axis_start_line_october"
+    ],
+    "3212-3313": [
+      "axis_start_line_october"
+    ],
+    "3213-3313": [
+      "axis_start_line_october"
+    ],
+    "3313-3314": [
+      "axis_start_line_october"
+    ],
+    "3314-3413": [
+      "axis_start_line_october"
+    ],
+    "3314-3414": [
+      "axis_start_line_october"
+    ],
+    "3315-3414": [
+      "axis_start_line_october"
+    ],
+    "3315-3415": [
+      "axis_start_line_october"
+    ],
+    "3316-3415": [
+      "axis_start_line_october"
+    ],
+    "3316-3416": [
+      "axis_start_line_october"
+    ],
+    "3317-3416": [
+      "axis_start_line_october"
+    ],
+    "3317-3417": [
+      "axis_start_line_october"
+    ],
+    "3318-3417": [
+      "axis_start_line_october"
+    ],
+    "3417-3418": [
+      "axis_start_line_october"
+    ],
+    "3417-3518": [
+      "axis_start_line_october"
+    ],
+    "3517-3518": [
+      "axis_start_line_october"
+    ],
+    "3518-3617": [
+      "axis_start_line_october"
+    ],
+    "3518-3618": [
+      "axis_start_line_october"
+    ],
+    "3519-3618": [
+      "axis_start_line_october"
+    ],
+    "3618-3619": [
+      "axis_start_line_october"
+    ],
+    "3619-3719": [
+      "axis_start_line_october"
+    ],
+    "3719-3720": [
+      "axis_start_line_october"
+    ],
+    "3720-3819": [
+      "axis_start_line_october"
+    ],
+    "3819-3820": [
+      "axis_start_line_october"
+    ],
+    "3820-3920": [
+      "axis_start_line_october"
+    ],
+    "3820-3921": [
+      "axis_start_line_october"
+    ],
+    "3821-3921": [
+      "axis_start_line_october"
+    ],
+    "3821-3922": [
+      "axis_start_line_october"
+    ],
+    "3822-3922": [
+      "axis_start_line_october"
+    ],
+    "3822-3923": [
+      "axis_start_line_october"
+    ],
+    "3823-3923": [
+      "axis_start_line_october"
+    ],
+    "3923-3924": [
+      "axis_start_line_october"
+    ],
+    "3924-4023": [
+      "axis_start_line_october"
+    ],
+    "3924-4024": [
+      "axis_start_line_october"
+    ],
+    "3925-4024": [
+      "axis_start_line_october"
+    ],
+    "4024-4025": [
+      "axis_start_line_october"
+    ],
+    "4025-4125": [
+      "axis_start_line_october"
+    ],
+    "4025-4126": [
+      "axis_start_line_october"
+    ],
+    "4026-4126": [
+      "axis_start_line_october"
+    ],
+    "4026-4127": [
+      "axis_start_line_october"
+    ],
+    "4027-4127": [
+      "axis_start_line_october"
+    ],
+    "4027-4128": [
+      "axis_start_line_october"
+    ],
+    "4028-4128": [
+      "axis_start_line_october"
+    ],
+    "4028-4129": [
+      "axis_start_line_october"
+    ],
+    "4029-4129": [
+      "axis_start_line_october"
+    ],
+    "4029-4130": [
+      "axis_start_line_october"
+    ],
+    "4030-4130": [
+      "axis_start_line_october"
+    ],
+    "4030-4131": [
+      "axis_start_line_october"
+    ],
+    "4031-4131": [
+      "axis_start_line_october"
+    ],
+    "4031-4132": [
+      "axis_start_line_october"
+    ],
+    "4032-4132": [
+      "axis_start_line_october"
+    ],
+    "4032-4133": [
+      "axis_start_line_october"
+    ],
+    "4033-4133": [
+      "axis_start_line_october"
+    ],
+    "4033-4134": [
+      "axis_start_line_october"
+    ],
     "2605-2705": [
       "road"
     ],
@@ -629,7 +821,8 @@
       "road"
     ],
     "3108-3208": [
-      "road"
+      "road",
+      "axis_start_line_october"
     ],
     "3208-3309": [
       "road"

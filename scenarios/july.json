@@ -5,6 +5,11 @@
   "turn": 1,
   "phase": "axis_initial_movement",
   "active_side": "axis",
+  "initial_box_restricted_unit_ids": [
+    "july-1-Pol-inf-01",
+    "july-Allied-Supply-02",
+    "july-69-CW-inf-01"
+  ],
   "map_grid": {
     "x0": 30.0,
     "y0": 36.0,

@@ -53,9 +53,12 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
       max_child_tasks: Math.max(3, Math.min(6, Number(raw.max_child_tasks || 6))),
       max_active_child_tasks: Math.max(1, Math.min(3, Number(raw.max_active_child_tasks || 3))),
       checker_enabled: raw.task_checker_enabled !== false,
-      checker_model_profile: String(raw.task_checker_model_profile || "deepseek_flash_checker"),
+      checker_model_profile: String(raw.task_checker_model_profile || "mock_secondary"),
       checker_timeout_ms: Math.max(1000, Number(raw.task_checker_timeout_ms || 60000)),
       checker_max_calls_per_turn: Math.max(1, Number(raw.task_checker_max_calls_per_turn || 4)),
+      task_generation: String(raw.task_generation || "fixed_skeleton"),
+      dependency_policy: String(raw.task_dependency_policy || "hard_soft_conditional_v1"),
+      task_switching: String(raw.task_switching || "existing_tasks_only"),
       goal_management: String(raw.goal_management || "disabled"),
       goal_protocol: String(raw.goal_protocol || ""),
       no_progress_replan_threshold: Math.max(2, Number(raw.no_progress_replan_threshold || 3)),
@@ -68,6 +71,15 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
     : null;
   if (taskManagement && !["hierarchical-task-v1", "side-aware-task-v2"].includes(taskManagement.protocol)) {
     throw new Error(`agent method ${methodId} task_protocol must be hierarchical-task-v1 or side-aware-task-v2`);
+  }
+  if (taskManagement && !["fixed_skeleton", "model_defined"].includes(taskManagement.task_generation)) {
+    throw new Error(`agent method ${methodId} task_generation must be fixed_skeleton or model_defined`);
+  }
+  if (taskManagement && taskManagement.dependency_policy !== "hard_soft_conditional_v1") {
+    throw new Error(`agent method ${methodId} task_dependency_policy must be hard_soft_conditional_v1`);
+  }
+  if (taskManagement && taskManagement.task_switching !== "existing_tasks_only") {
+    throw new Error(`agent method ${methodId} task_switching must be existing_tasks_only`);
   }
   if (rollingUnitSettings && rollingUnitSettings.protocol !== "v1") {
     throw new Error(`agent method ${methodId} rolling_unit_protocol must be v1`);

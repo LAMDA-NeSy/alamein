@@ -47,14 +47,16 @@ test("model profiles normalize defaults and reject invalid entries", () => {
   assert.equal(coding.base_url, "https://open.bigmodel.cn/api/coding/paas/v4");
   assert.equal(coding.api_key_env, "ZHIPU_CODING_API_KEY");
   assert.equal(coding.access.billing_channel, "coding_plan");
-  assert.equal(coding.defaults.thinking, "disabled");
+  assert.equal(coding.defaults.thinking, "omitted");
   assert.equal(coding.defaults.top_p, 0.95);
-  assert.equal(coding.defaults.reasoning_effort, "max");
+  assert.equal(coding.defaults.reasoning_effort, "low");
   const metered = resolveModel("glm_53_flash_api");
   assert.equal(metered.model, coding.model);
   assert.equal(metered.base_url, "https://open.bigmodel.cn/api/paas/v4");
   assert.equal(metered.api_key_env, "ZHIPU_API_KEY");
   assert.equal(metered.access.billing_channel, "metered_api");
+  assert.equal(metered.defaults.thinking, "omitted");
+  assert.equal(metered.defaults.reasoning_effort, "low");
   assert.throws(() => resolveModel("missing"), /unknown model profile/);
   assert.throws(() => resolveModel("bad", { registry: { bad: { adapter: "unknown" } } }), /unknown adapter/);
   assert.throws(() => resolveModel("bad", { registry: { bad: {
@@ -82,6 +84,14 @@ test("model profile thinking mode is applied by the gateway when callers omit it
   }
 });
 
+test("GLM 5.3 uses low reasoning effort while omitting the incompatible thinking field", () => {
+  const profile = resolveModel("glm_53_flash");
+  const body = applyProfileRequestDefaults({ profile }, { messages: [] });
+  assert.equal(profile.defaults.thinking, "omitted");
+  assert.equal(body.reasoning_effort, "low");
+  assert.equal(Object.hasOwn(body, "thinking"), false);
+});
+
 test("registry rejects duplicate profile ids", () => {
   const file = path.join(os.tmpdir(), `duplicate-models-${process.pid}.json`);
   fs.writeFileSync(file, '{"same":{},"same":{}}');
@@ -102,10 +112,10 @@ test("capability preflight fails before a harness starts", () => {
 test("raw gateway requests inherit model-specific generation defaults", () => {
   const profile = resolveModel("glm_53_flash_coding_plan");
   const body = applyProfileRequestDefaults({ profile }, { messages: [] });
-  assert.equal(body.temperature, 1);
+  assert.equal(body.temperature, 0.25);
   assert.equal(body.top_p, 0.95);
-  assert.equal(body.reasoning_effort, "max");
-  assert.deepEqual(body.thinking, { type: "disabled" });
+  assert.equal(body.reasoning_effort, "low");
+  assert.equal(Object.hasOwn(body, "thinking"), false);
   assert.equal(body.max_tokens, 6000);
 });
 
@@ -175,8 +185,13 @@ test("gateway retries 502 upstream failures and exports OpenCode limits", async 
     assert.equal(runtime._server.headersTimeout, 185000);
     const result = await createChatCompletionsClient(runtime).complete({ messages: [] });
     assert.equal(result.ok, true);
+    assert.equal(result.attempts, 2);
+    assert.equal(result.recovered_after_retry, true);
     assert.equal(calls, 2);
     assert.equal(runtime.transport[0].attempts, 2);
+    assert.equal(runtime.transport[0].error_class, "none");
+    assert.equal(runtime.transport[0].recovered_after_retry, true);
+    assert.equal(runtime.transport[0].retryable_failures.length, 1);
     assert.equal(runtime.usage.input_tokens, 2);
     const provider = createOpenCodeProviderConfig(runtime);
     assert.equal(provider.models[runtime.profile.model].limit.context, 256000);
@@ -275,7 +290,7 @@ test("all retries share one total request timeout", async () => {
     const result = await createChatCompletionsClient(runtime).complete({ messages: [], timeout_ms: 45 });
     const elapsed = Date.now() - started;
     assert.equal(result.ok, false);
-    assert.equal(result.error_class, "network_timeout");
+    assert.equal(result.error_class, "upstream_unavailable");
     assert.equal(calls, 1);
     assert.ok(elapsed < 250, `request took ${elapsed}ms`);
     assert.ok(runtime.transport[0].elapsed_ms < 150, `upstream attempts took ${runtime.transport[0].elapsed_ms}ms`);

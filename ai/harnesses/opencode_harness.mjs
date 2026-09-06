@@ -19,11 +19,14 @@ const { createHarnessPromptContract, renderHarnessStep } = require("../core/harn
 const { resolveAgentMethod } = require("../core/agent_method_config.js");
 const { createPhaseIntentPlanner } = require("../core/phase_intent_runtime.js");
 const { LOG_DIR } = require("../core/experiment_log.js");
-const { fallbackReasonClass, stepBudget, transportFailureDetails } = require("../core/transport_attribution.js");
+const { fallbackReasonClass, recoveredTransportDetails, stepBudget, transportFailureDetails } = require("../core/transport_attribution.js");
 const { promptValue } = require("../core/prompt_registry.js");
 const { sidePromptRegistryMetadata } = require("../core/prompt_registry.js");
 const { PROJECT_ROOT } = require("../core/project_paths.js");
 const { resolveControllers } = require("../core/controller_config.js");
+const { infrastructureStatus } = require("../core/benchmark_comparison.js");
+const { attachRuntimeAccounting, refreshRuntimeAccounting } = require("../core/experiment_accounting.js");
+const { validateExperimentSelection } = require("../core/experiment_selection.js");
 const {
   closeModelRuntime,
   createChatCompletionsClient,
@@ -52,6 +55,7 @@ function safeId(values) {
 }
 
 function writeTranscript(file, transcript) {
+  refreshRuntimeAccounting(transcript);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(transcript, null, 2));
 }
@@ -238,6 +242,7 @@ export async function makeOpenCodeProvider({ config, runtime, bridge, instance, 
       rounds: [],
       action_attempts: [],
       transport_failures: [],
+      recovered_transport_failures: [],
       protocol_failures: [],
       fallback_used: false,
       local_fast_pass: false
@@ -260,6 +265,7 @@ export async function makeOpenCodeProvider({ config, runtime, bridge, instance, 
       stepRecord.local_fast_pass = true;
       stepRecord.final_action = action;
       stepRecord.transport_failures = transportFailureDetails(runtime, transportStart);
+      stepRecord.recovered_transport_failures = recoveredTransportDetails(runtime, transportStart);
       stepRecord.provider_result = {
         provider: runtime.profile.provider,
         model: runtime.profile.model,
@@ -307,6 +313,7 @@ export async function makeOpenCodeProvider({ config, runtime, bridge, instance, 
 
     const toolCalls = bridge.records.slice(toolStart);
     stepRecord.transport_failures = transportFailureDetails(runtime, transportStart);
+    stepRecord.recovered_transport_failures = recoveredTransportDetails(runtime, transportStart);
     stepRecord.action_attempts = toolCalls
       .filter((record) => record.tool === "act")
       .map((record, index) => ({
@@ -347,6 +354,7 @@ export async function makeOpenCodeProvider({ config, runtime, bridge, instance, 
       fallback_used: stepRecord.fallback_used,
       fallback_reason_class: stepRecord.fallback_reason_class,
       transport_failures: stepRecord.transport_failures.length,
+      recovered_transport_failures: stepRecord.recovered_transport_failures.length,
       protocol_failures: stepRecord.protocol_failures.length,
       error: stepRecord.error || null,
       post_accept_tool_calls: toolCalls.filter((record) => record.after_submission).length,
@@ -375,6 +383,7 @@ export async function runOpenCodeExperiment(options = {}) {
   const maxSteps = Number(options.maxSteps || 1000);
   const modelProfile = options.modelProfile || methodConfig.model_profile;
   const decisionPolicy = options.decisionPolicy || methodConfig.decision_policy;
+  validateExperimentSelection("opencode_harness", decisionPolicy);
   const toolProfile = resolveToolProfile(options.toolProfile || methodConfig.tool_profile);
   const stepTimeoutMs = Number(options.timeoutMs || methodConfig.step_timeout_ms);
   const experimentId = safeId([scenario, `axis-${controllers.axis}`, `allies-${controllers.allies}`, seed, replicate, "opencode_harness", decisionPolicy, toolProfile.id, modelProfile]);
@@ -396,7 +405,8 @@ export async function runOpenCodeExperiment(options = {}) {
     toolConfigHash: toolProfileHash(toolProfile),
     runtime,
     contextProfile: CONTEXT_PROFILE_ID,
-    timeoutMs: stepTimeoutMs
+    timeoutMs: stepTimeoutMs,
+    maxSteps
   });
   let instance;
   const transcript = {
@@ -440,6 +450,9 @@ export async function runOpenCodeExperiment(options = {}) {
     legacy_tool_protocol: toolProfile.id === "legacy_three_tool" ? "three_tool_legacy" : null,
     comparison_contract: comparison.contract,
     comparison_contract_hash: comparison.hash,
+    benchmark_version: comparison.contract.benchmark_version,
+    artifact_manifest: comparison.contract.artifact_manifest,
+    artifact_manifest_hash: comparison.contract.artifact_manifest_hash,
     movement_phase_policy: "rule_complete",
     fixed_movement_action_limits: false,
     allowed_tools: [...toolProfile.tools],
@@ -448,6 +461,7 @@ export async function runOpenCodeExperiment(options = {}) {
     model_usage: runtime.usage,
     model_steps: []
   };
+  attachRuntimeAccounting(transcript, { agent: runtime });
   writeTranscript(outputFile, transcript);
   const started = Date.now();
   try {
@@ -481,7 +495,8 @@ export async function runOpenCodeExperiment(options = {}) {
       illegal_actions: (result.log || []).filter((item) => item.result && item.result.legal === false).length,
       fallback_actions: transcript.model_steps.filter((item) => item.fallback_used).length,
       network_fallback_actions: transcript.model_steps.filter((item) => item.fallback_reason_class === "transport_failure").length,
-      transport_failures: runtime.transport.filter((item) => item.error_class && item.error_class !== "none").length,
+      transport_failures: transcript.model_steps.reduce((sum, step) => sum + (step.transport_failures?.length || 0), 0),
+      recovered_transport_failures: transcript.model_steps.reduce((sum, step) => sum + (step.recovered_transport_failures?.length || 0), 0),
       protocol_failures: transcript.model_steps.reduce((sum, step) => sum + (step.protocol_failures?.length || 0), 0),
       circuit_open_events: runtime.transport_health?.circuit_open_events || 0,
       local_fast_pass_actions: transcript.model_steps.filter((item) => item.local_fast_pass).length,
@@ -493,6 +508,7 @@ export async function runOpenCodeExperiment(options = {}) {
       post_accept_tool_calls: bridge.records.filter((item) => item.after_submission).length,
       retry_attempts: runtime.transport.reduce((sum, item) => sum + Math.max(0, Number(item.attempts || 1) - 1), 0)
     };
+    transcript.sample_status = infrastructureStatus(transcript);
     writeTranscript(outputFile, transcript);
     return transcript;
   }
@@ -500,6 +516,7 @@ export async function runOpenCodeExperiment(options = {}) {
     transcript.status = "harness_error";
     transcript.error = error.message;
     transcript.elapsed_ms = Date.now() - started;
+    transcript.sample_status = infrastructureStatus(transcript);
     if (instance?.tempRoot) transcript.opencode_debug_logs = collectDebugLogs(instance.tempRoot, [runtime.local_token, bridge.token]);
     writeTranscript(outputFile, transcript);
     throw error;

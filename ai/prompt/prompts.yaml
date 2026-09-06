@@ -22,7 +22,11 @@ prompts:
     tool_act: >-
       Call act with one proposed action. If accepted=false, use the rules reason
       to try another action. Stop immediately after accepted=true.
-    tool_other: Follow the enabled tool contract and stop immediately after an action is accepted.
+    tool_other: >-
+      Follow the enabled tool contract and stop immediately after an action is accepted.
+      When the protocol requests JSON, return an object in this shape:
+      {"type":"final_action","reason":"short grounded reason","action":{"type":"pass","reason":"no useful legal action remains"}}.
+      Replace the example action with the action selected from the current state; do not return Markdown.
 
   evaluation:
     research_metrics_judge_system: |-

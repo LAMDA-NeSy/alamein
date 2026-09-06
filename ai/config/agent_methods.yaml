@@ -4,7 +4,8 @@ defaults:
   decision_policy: direct
   harness: opencode_harness
   tool_profile: map_and_action
-  model_profile: deepseek_flash
+  # The public default is offline and does not require an API key.
+  model_profile: mock_primary
   max_calls_per_step: 6
   step_timeout_ms: 180000
 
@@ -81,7 +82,7 @@ methods:
     tool_profile: map_and_action
     tools: [view_map, act]
     max_calls_per_step: 6
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
 
   intent:
@@ -91,7 +92,7 @@ methods:
     tool_profile: map_and_action
     tools: [view_map, act]
     max_calls_per_step: 6
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
 
   hybrid:
@@ -101,7 +102,7 @@ methods:
     tool_profile: map_and_action
     tools: [view_map, act]
     max_calls_per_step: 6
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
 
   opportunity_aware_hybrid:
@@ -111,7 +112,7 @@ methods:
     tool_profile: map_and_action
     tools: [view_map, act]
     max_calls_per_step: 6
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
 
   unit_plan_hybrid:
@@ -121,7 +122,7 @@ methods:
     tool_profile: rolling_unit_tactical
     tools: [phase_status, view_map, inspect_supply, check_combat, hold_units, hold_unit, act]
     max_calls_per_step: 20
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
     rolling_unit_protocol: v1
     phase_status_first: true
@@ -135,7 +136,7 @@ methods:
     tool_profile: rolling_unit_rules_tactical
     tools: [phase_status, inspect_rules, view_map, inspect_supply, check_combat, hold_units, hold_unit, act]
     max_calls_per_step: 20
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
     strategic_plan_protocol: side-aware-goal-v2
     goal_management: open_grounded
@@ -144,10 +145,13 @@ methods:
     dispatch_protocol: rolling-unit-action-v1
     task_management: multi_task
     task_protocol: side-aware-task-v2
+    task_generation: model_defined
+    task_dependency_policy: hard_soft_conditional_v1
+    task_switching: existing_tasks_only
     max_child_tasks: 6
     max_active_child_tasks: 3
     task_checker_enabled: true
-    task_checker_model_profile: deepseek_flash_checker
+    task_checker_model_profile: mock_secondary
     task_checker_timeout_ms: 60000
     task_checker_max_calls_per_turn: 4
     no_progress_replan_threshold: 3
@@ -156,6 +160,12 @@ methods:
     low_odds_replan_threshold: 2
     passive_hold_replan_threshold: 3
     replan_cooldown_actions: 3
+    tactical_summary: phase
+    include_action_effect_feedback: true
+    allow_next_intent: true
+    task_progress_mode: evidence_grounded
+    replan_on_new_tactical_opportunity: true
+    task_checker_cooldown_actions: 3
 
   direct:
     category: decision_policy
@@ -164,7 +174,7 @@ methods:
     tool_profile: map_and_action
     tools: [view_map, act]
     max_calls_per_step: 6
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
 
   strategy_execute:
@@ -174,7 +184,7 @@ methods:
     tool_profile: map_and_action
     tools: [view_map, act]
     max_calls_per_step: 6
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
 
   opencode_harness:
@@ -184,7 +194,7 @@ methods:
     tool_profile: map_and_action
     tools: [view_map, act]
     max_calls_per_step: 6
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
 
   langgraph_harness:
@@ -194,7 +204,7 @@ methods:
     tool_profile: map_and_action
     tools: [view_map, act]
     max_calls_per_step: 6
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
 
   pydanticai_harness:
@@ -204,5 +214,5 @@ methods:
     tool_profile: map_and_action
     tools: [view_map, act]
     max_calls_per_step: 6
-    model_profile: deepseek_flash
+    model_profile: mock_primary
     step_timeout_ms: 180000
