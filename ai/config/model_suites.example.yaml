@@ -1,6 +1,7 @@
 version: 1
 
-# Copy the entries you need into model_suites.yaml. API keys remain in .env.
+# Copy to log/model_suites.local.yaml and select ids with --models.
+# API keys remain in .env; the tracked default stays offline Mock.
 models:
   - id: mock
     model_profile: mock_primary
@@ -8,6 +9,9 @@ models:
   - id: glm53-coding-plan
     model_profile: glm_53_flash_coding_plan
     checker_model_profile: glm_53_flash_checker
+  - id: glm53-api
+    model_profile: glm_53_flash_api
+    checker_model_profile: glm_53_flash_api_checker
   - id: deepseek
     model_profile: deepseek_flash
     checker_model_profile: deepseek_flash_checker

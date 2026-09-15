@@ -49,6 +49,7 @@ python3 -m http.server 8000 --bind 127.0.0.1
 | `glm_53_flash_coding_plan` | GLM-5.3-Flash Coding Plan | `ZHIPU_CODING_API_KEY` |
 | `glm_53_flash_checker` | 独立 GLM 任务检查模型 | `ZHIPU_CODING_API_KEY` |
 | `glm_53_flash_api` | 普通计费 API | `ZHIPU_API_KEY` |
+| `glm_53_flash_api_checker` | 普通计费 API 的独立任务检查模型 | `ZHIPU_API_KEY` |
 | `deepseek_flash` | DeepSeek Flash | `DEEPSEEK_API_KEY` |
 
 真实模型只在命令行显式指定。配置密钥：
@@ -61,10 +62,12 @@ cp .env.example .env
 
 ## 给同学的运行清单
 
-从仓库根目录执行。默认 Mock 不收费；真实模型只需要在本机 `.env` 中配置对应密钥。
+完整操作说明见 [实验交接手册](ai/EXPERIMENT_HANDOFF.md)，包括环境安装、密钥配置、Mock 预检、多模型后台双并发、单局、baseline、日志审计、Judge 和结果打包。
+
+当前实验代码在 `codex/publish-alamein-org` 分支，不能直接使用尚未同步的 `main`：
 
 ```bash
-git clone https://github.com/LAMDA-NeSy/alamein.git
+git clone --branch codex/publish-alamein-org https://github.com/LAMDA-NeSy/alamein.git
 cd alamein
 pnpm install --frozen-lockfile
 uv sync --locked --group dev
@@ -72,90 +75,17 @@ pnpm test
 uv run --locked --group dev pytest ai/tests
 ```
 
-先做不调用真实模型的预检和短局：
-
-```bash
-pnpm run ai:models -- --config ai/config/model_suites.yaml \
-  --out-dir log/model_suite_preview --dry-run
-pnpm run ai:full-game -- \
-  --scenario july --external-side axis \
-  --decision-policy hierarchical_sae --task-management multi_task \
-  --model-profile mock_primary --task-checker-model-profile mock_secondary \
-  --seed 1942 --max-steps 20 --out log/smoke_july_axis.json
-```
-
-真实模型必须显式指定主模型和独立 checker：
-
-```bash
-pnpm run ai:full-game -- \
-  --scenario july --external-side axis \
-  --decision-policy hierarchical_sae --task-management multi_task \
-  --model-profile glm_53_flash_coding_plan \
-  --task-checker-model-profile glm_53_flash_checker \
-  --seed 1942 --replicate 1 --step-timeout-ms 180000 \
-  --max-steps 1000 --out log/july_axis_glm53.json
-```
-
-三场景双方各运行一局时使用验收入口。`--concurrency 1` 表示串行，适合真实模型：
+六局验收中的 `--concurrency 2` 是三场景双方共六局、最多两局同时运行，不是只跑 July 两局。下面显式使用普通计费 API，主模型和 checker 均使用 `ZHIPU_API_KEY`：
 
 ```bash
 pnpm run ai:acceptance -- \
-  --out-dir log/sae_acceptance_glm53_$(date +%Y%m%d_%H%M%S) \
-  --model-profile glm_53_flash_coding_plan \
-  --task-checker-model-profile glm_53_flash_checker \
-  --concurrency 1
-```
-
-需要同时测试两个真实对局时，可以显式使用双并发。下面的命令会并发运行 July 的 Axis 和 Allies 两局；每局仍由规则引擎独立验证动作，输出不会互相覆盖：
-
-```bash
-OUT_DIR="log/paid_july_pair_$(date +%Y%m%d_%H%M%S)"
-pnpm run ai:acceptance -- \
-  --out-dir "$OUT_DIR" \
-  --model-profile glm_53_flash_coding_plan \
-  --task-checker-model-profile glm_53_flash_checker \
+  --out-dir log/sae_glm53_api_$(date +%Y%m%d_%H%M%S) \
+  --model-profile glm_53_flash_api \
+  --task-checker-model-profile glm_53_flash_api_checker \
   --concurrency 2
 ```
 
-后台运行时，将命令最后一行改为：
-
-```bash
-pnpm run ai:acceptance -- \
-  --out-dir "$OUT_DIR" \
-  --model-profile glm_53_flash_coding_plan \
-  --task-checker-model-profile glm_53_flash_checker \
-  --concurrency 2 > "$OUT_DIR/launcher.console.log" 2>&1 &
-echo $! > "$OUT_DIR/launcher.pid"
-```
-
-查看状态或等待结束：
-
-```bash
-cat "$OUT_DIR/batch_manifest.json"
-ps -p "$(cat "$OUT_DIR/launcher.pid")" -o pid=,stat=,etime=,command=
-```
-
-不要在同一个输出目录重复启动。若进程中断，保留该目录供诊断并换一个新的 `OUT_DIR`。
-
-查看后台批次并生成报告：
-
-```bash
-pnpm run ai:models -- --status log/model_suite_YYYYMMDD_HHMMSS
-pnpm run ai:metrics -- log/*.json \
-  --judge --judge-model-profile mock_secondary \
-  --out log/all_scenarios_metrics.json
-pnpm run ai:audit -- log/*.json --out log/run_audit.json
-```
-
-对一个验收批次生成审计和指标报告：
-
-```bash
-pnpm run ai:audit -- "$OUT_DIR"/*.json --out "$OUT_DIR/audit.json"
-pnpm run ai:metrics -- "$OUT_DIR"/*.json \
-  --out "$OUT_DIR/metrics.json"
-```
-
-不要提交 `.env`、`log/`、真实请求或响应。每次实验使用新的输出目录；日志中的 `ranking_eligibility`、artifact 哈希和比较合同用于判断结果是否可进入正式排名。
+后台运行请使用手册中的 `ai:models --background`，不依赖终端的 `&` 保活。不要提交 `.env` 或 `log/`；所有运行使用新目录，不自动切换计费通道或重跑。
 
 ## 我们的方法和 Harness
 
@@ -213,7 +143,7 @@ pnpm run ai:acceptance -- \
 
 ## 多模型实验启动
 
-把要测试的模型写入 `ai/config/model_suites.yaml`，每项包含主模型和独立 checker。可参考 `ai/config/model_suites.example.yaml`。默认配置是离线 Mock；真实 profile 必须显式写入配置，并在本机 `.env` 提供对应 API Key。脚本会为每个模型创建独立目录和 manifest，不覆盖已有结果。
+每项包含主模型和独立 checker。默认 `ai/config/model_suites.yaml` 是离线 Mock；建议将 `ai/config/model_suites.example.yaml` 复制到忽略的 `log/model_suites.local.yaml`，通过 `--config` 和 `--models` 显式选择要跑的模型，避免修改已跟踪配置造成 dirty 工作树。在本机 `.env` 提供对应 API Key。脚本会为每个模型创建独立目录和 manifest，不覆盖已有结果。
 
 先做不调用 API 的配置与凭据预检：
 
@@ -252,6 +182,7 @@ pnpm run ai:models -- --status log/model_suite_YYYYMMDD_HHMMSS
 常用真实模型配置示例（不要把密钥写入 YAML）：
 
 ```yaml
+version: 1
 models:
   - id: glm53
     model_profile: glm_53_flash_coding_plan
@@ -311,7 +242,7 @@ pnpm run ai:metrics -- \
   --out log/all_scenarios_metrics.json
 ```
 
-加入 `--judge --judge-model-profile mock_secondary` 才会计算 Judge 指标。报告包含 VP、VP 增量、动作拒绝率、fallback、网络失败、Token、缓存、延迟、任务、机会、场景指标和排名资格。July 只计算计分推进，September 只计算清雷，October 只计算合法西撤；Allies 使用 Axis 计分威胁和防守指标。
+默认不调用 Judge，相关指标标为未评估。`--judge --judge-model-profile mock_secondary` 仅用于离线验证评分协议，不能作为论文 Judge 分数；真实评分须显式指定真实 Judge 档案，会额外调用 API。报告包含 VP、VP 增量、动作拒绝率、fallback、网络失败、Token、缓存、延迟、任务、机会、场景指标和排名资格。July 使用计分推进指标，September 使用清雷指标，October 使用合法西撤指标；Allies 使用 Axis 计分威胁和防守指标。
 
 与规则 baseline 配对比较：
 
