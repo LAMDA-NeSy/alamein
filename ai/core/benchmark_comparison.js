@@ -1,6 +1,6 @@
 "use strict";
 
-const { COMPARISON_CONTRACT_VERSION, stableJson } = require("./comparison_contract.js");
+const { COMPARISON_CONTRACT_VERSION, comparisonContractHash, stableJson } = require("./comparison_contract.js");
 const { validateArtifactManifest } = require("./benchmark_artifacts.js");
 const { pairedStatistics } = require("./benchmark_statistics.js");
 
@@ -29,6 +29,9 @@ function infrastructureStatus(transcript) {
   const circuitEvents = Number(transcript.counts?.circuit_open_events
     ?? transcript.transport_health?.circuit_open_events
     ?? 0);
+  const transports = transcript.model_transport_by_component
+    ? Object.values(transcript.model_transport_by_component).flat() : transcript.model_transport || [];
+  if (transports.some((record) => record.environment_pauses?.length || record.clean_latency_eligible === false)) return "infrastructure_affected";
   if (transportFailures > 0 || circuitEvents > 0) return "infrastructure_affected";
   return "clean";
 }
@@ -121,26 +124,53 @@ function defaultBaselineVariant(variants, dimension) {
 }
 
 function rankingEligible(row) {
-  if (row == null) return false;
-  if (row.ranking_eligible === false || row.eligible_for_tactical_comparison === false) return false;
-  if (row.partial || ["harness_error", "partial"].includes(infrastructureStatus(row))) return false;
-  if (Number(row.counts?.illegal_actions ?? row.illegal_actions ?? 0) !== 0) return false;
+  return rankingEligibilityReasons(row).length === 0;
+}
+
+function rankingEligibilityReasons(row) {
+  const reasons = [];
+  if (row == null) return ["missing_row"];
+  if (row.ranking_eligible === false) reasons.push("explicitly_marked_ineligible");
+  if (row.eligible_for_tactical_comparison === false) reasons.push("explicitly_excluded_from_tactical_comparison");
+  if (row.partial || ["harness_error", "partial"].includes(infrastructureStatus(row))) reasons.push("incomplete_or_harness_error");
+  if (Number(row.counts?.illegal_actions ?? row.illegal_actions ?? 0) !== 0) reasons.push("application_layer_illegal_actions");
   const complete = row.status === "final_victory" && (row.complete_game === true || row.summary?.victory?.final === true);
+  if (!complete) reasons.push("game_not_final_victory");
   const contract = row.comparison_contract;
   const manifest = row.artifact_manifest || contract?.artifact_manifest;
   const vp = row.final_vp ?? row.victory_points ?? row.summary?.victory?.victory_points;
-  return complete && Number.isFinite(vp)
-    && validateArtifactManifest(manifest, artifactHash(row))
-    && contract?.version === COMPARISON_CONTRACT_VERSION
-    && Boolean(contract.model_configuration?.identity && contract.model_configuration?.defaults)
-    && Boolean(row.scenario && row.external_side && row.harness && row.model_profile && row.tool_config_hash && row.context_profile && row.prompt_profile_hash && row.harness_prompt_hash)
-    && Number.isInteger(row.seed) && Number.isInteger(row.replicate) && row.replicate > 0
-    && Number.isInteger(contract.max_steps) && contract.max_steps > 0
-    && Number.isInteger(contract.max_calls_per_step) && contract.max_calls_per_step > 0
-    && Number.isFinite(contract.step_timeout_ms) && contract.step_timeout_ms > 0
-    && row.scenario === manifest.scenario && row.scenario === contract.scenario
-    && row.external_side === contract.external_side
-    && stableJson(row.controllers) === stableJson(contract.controllers);
+  const contractHashMatches = Boolean(contract)
+    && /^[a-f0-9]{64}$/.test(row.comparison_contract_hash || "")
+    && comparisonContractHash(contract) === row.comparison_contract_hash;
+  if (!Number.isFinite(vp)) reasons.push("missing_final_vp");
+  if (!validateArtifactManifest(manifest, artifactHash(row))) reasons.push("artifact_manifest_invalid");
+  // The contract carries source_control because artifact_manifest is a
+  // serialized file-only object. Read both locations for old and new logs.
+  const sourceControl = manifest?.source_control || contract?.source_control || row.source_control;
+  if (sourceControl?.working_tree_dirty === true) reasons.push("working_tree_dirty");
+  if (contract?.version !== COMPARISON_CONTRACT_VERSION) reasons.push("comparison_contract_version_mismatch");
+  if (!contractHashMatches) reasons.push("comparison_contract_hash_mismatch");
+  if (!Boolean(contract.model_configuration?.identity && contract.model_configuration?.defaults)) reasons.push("model_configuration_missing");
+  if (!Boolean(row.scenario && row.external_side && row.harness && row.model_profile && row.tool_config_hash && row.context_profile && row.prompt_profile_hash && row.harness_prompt_hash)) reasons.push("required_identity_fields_missing");
+  if (contract.model_profile && row.model_profile !== contract.model_profile) reasons.push("model_profile_mismatch");
+  if (contract.tool_profile && row.tool_profile !== contract.tool_profile) reasons.push("tool_profile_mismatch");
+  if (contract.tool_config_hash && row.tool_config_hash !== contract.tool_config_hash) reasons.push("tool_config_hash_mismatch");
+  if (contract.context_profile && row.context_profile !== contract.context_profile) reasons.push("context_profile_mismatch");
+  if (contract.prompt_profile_hash && row.prompt_profile_hash !== contract.prompt_profile_hash) reasons.push("prompt_profile_hash_mismatch");
+  if (contract.harness_prompt_hash && row.harness_prompt_hash !== contract.harness_prompt_hash) reasons.push("harness_prompt_hash_mismatch");
+  if (!Number.isInteger(row.seed) || !Number.isInteger(row.replicate) || row.replicate <= 0) reasons.push("seed_or_replicate_missing");
+  if (!Number.isInteger(contract.max_steps) || contract.max_steps <= 0) reasons.push("max_steps_missing");
+  if (!Number.isInteger(contract.max_calls_per_step) || contract.max_calls_per_step <= 0) reasons.push("max_calls_per_step_missing");
+  if (!Number.isFinite(contract.step_timeout_ms) || contract.step_timeout_ms <= 0) reasons.push("step_timeout_missing");
+  if (!manifest || row.scenario !== manifest.scenario) reasons.push("scenario_manifest_mismatch");
+  if (!contract || row.scenario !== contract.scenario) reasons.push("scenario_contract_mismatch");
+  if (!contract || row.external_side !== contract.external_side) reasons.push("external_side_contract_mismatch");
+  if (!contract || stableJson(row.controllers) !== stableJson(contract.controllers)) reasons.push("controller_contract_mismatch");
+  return [...new Set(reasons)];
+}
+
+function cleanRankingEligible(row) {
+  return rankingEligible(row) && infrastructureStatus(row) === "clean";
 }
 
 function buildPairedResults(rows, dimension, baselineVariant = null) {
@@ -183,6 +213,9 @@ function buildPairedResults(rows, dimension, baselineVariant = null) {
           ? (row.final_vp ?? row.victory_points) - (baselineRow.final_vp ?? baselineRow.victory_points)
           : null,
         ranking_eligible: eligible,
+        clean_ranking_eligible: eligible && cleanRankingEligible(baselineRow) && cleanRankingEligible(row),
+        baseline_sample_status: baselineRow ? infrastructureStatus(baselineRow) : null,
+        compared_sample_status: row ? infrastructureStatus(row) : null,
         exclusion_reason: eligible ? null : entry?.duplicate || baselineEntry?.duplicate
           ? "duplicate seed/replicate/variant"
           : !baselineEntry || !baselineRow
@@ -238,6 +271,7 @@ function validateComparisonRows(rows, dimension = "method") {
     clean_rows: items.filter((row) => infrastructureStatus(row) === "clean").length,
     infrastructure_affected_rows: items.filter((row) => infrastructureStatus(row) === "infrastructure_affected").length,
     ranking_eligible_rows: items.filter(rankingEligible).length,
+    clean_ranking_eligible_rows: items.filter(cleanRankingEligible).length,
     comparison_cell_id: items.length ? comparisonCellId(items[0], dimension) : null
   };
 }
@@ -267,7 +301,15 @@ function buildComparisonCells(rows, dimension) {
     variants: unique(items.map((row) => comparisonVariant(row, dimension))),
     runs: items.map((row) => row.experiment_id || ""),
     paired_results: pairs,
-    paired_statistics: pairedStatistics(pairs)
+    paired_statistics: pairedStatistics(pairs),
+    clean_paired_statistics: pairedStatistics(pairs.map((pair) => ({
+      ...pair,
+      comparisons: pair.comparisons.map((comparison) => ({
+        ...comparison,
+        ranking_eligible: comparison.clean_ranking_eligible,
+        vp_difference: comparison.clean_ranking_eligible ? comparison.vp_difference : null
+      }))
+    })))
   }); });
 }
 
@@ -279,6 +321,8 @@ module.exports = {
   comparisonCondition,
   infrastructureStatus,
   rankingEligible,
+  cleanRankingEligible,
+  rankingEligibilityReasons,
   rankingGroupEligible,
   validateComparisonRows
 };

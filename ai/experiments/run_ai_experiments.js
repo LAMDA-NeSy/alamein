@@ -40,6 +40,10 @@ function integer(value, label, minimum = 1) {
 }
 function safeId(values) { return values.map((value) => String(value).replace(/[^a-zA-Z0-9_-]+/g, "_")).join("__"); }
 
+function defaultMaxStepsForScenario(scenario) {
+  return { july: 1000, september: 1500, october: 3000 }[scenario] || 1000;
+}
+
 function buildExperimentJobs(options = {}) {
   const defaults = agentMethodDefaults();
   const scenario = options.scenario || "july";
@@ -52,7 +56,7 @@ function buildExperimentJobs(options = {}) {
   const profiles = list(options["model-profiles"] || options["model-profile"] || defaults.model_profile);
   const seeds = list(options.seeds || options.seed || "1942").map((seed) => integer(seed, "seed", 0));
   const replicates = integer(options.replicates || 1, "replicates");
-  const maxSteps = integer(options["max-steps"] || 1000, "max-steps");
+  const maxSteps = integer(options["max-steps"] || defaultMaxStepsForScenario(scenario), "max-steps");
   const policies = list(options["decision-policies"] || options["decision-policy"] || options["decision-mode"] || defaults.decision_policy);
   if (options.systems && (options.harnesses || options["decision-policies"] || options["decision-policy"] || options["decision-mode"])) throw new Error("--systems cannot be combined with --harnesses or decision policy options");
   const selections = options.systems

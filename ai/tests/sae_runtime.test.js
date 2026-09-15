@@ -231,6 +231,36 @@ test("SAE uses local defaults when both planning responses fail", async () => {
   assert.equal(result.record.allocation_fallback, true);
 });
 
+test("failed replanning retains the old operation and retries only at the next phase", async () => {
+  const config = { ...readConfig(), task_management: "multi_task",
+    task_management_options: { execution_ledger: true, task_generation: "model_defined" } };
+  let calls = 0;
+  const sae = createSaeRuntime({ config, runtime: runtime(), client: { async complete() {
+    calls += 1;
+    if (calls === 1) return response({ type: "strategic_intent", operation: "preserve_model_goal", target_column: 37 });
+    if (calls === 2) return response({ type: "force_allocation", spearhead: [], support: [], supply: [], reserve: [] });
+    return { ok: false, status: 503, error_class: "provider_error" };
+  } } });
+  const input = { state, turn: 1, side: state.active_side, phase: state.phase, step: 1 };
+  const first = await sae.plan(input);
+  sae.replanReasons.set(phaseKey(input), "operational_goal_completed");
+  const failed = await sae.plan({ ...input, step: 2 });
+  assert.equal(calls, 3);
+  assert.equal(failed.record.retained_previous_plan, true);
+  assert.equal(failed.record.planning_attempted, true);
+  assert.deepEqual(failed.strategic_intent, first.strategic_intent);
+  assert.deepEqual(failed.force_allocation, first.force_allocation);
+  assert.deepEqual(failed.operation_state.task_plan.children.map((task) => task.id), first.operation_state.task_plan.children.map((task) => task.id));
+  const cached = await sae.plan({ ...input, step: 3 });
+  assert.equal(calls, 3);
+  assert.equal(cached.record.planning_attempted, false);
+  assert.equal(cached.operation_state.waiting_for_new_goal, true);
+  const next = await sae.plan({ ...input, phase: "axis_combat", state: { ...state, phase: "axis_combat" }, step: 4 });
+  assert.equal(calls, 4);
+  assert.equal(next.record.retained_previous_plan, true);
+  assert.equal(next.record.replan_reason, "operational_goal_completed");
+});
+
 test("multi-task SAE uses an open model goal and grounds its hard facts", async () => {
   const config = {
     ...readConfig(),

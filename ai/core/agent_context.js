@@ -29,12 +29,16 @@ function pickDefined(value, keys) {
 
 function compactGameOverview(overview, includeInitialMap) {
   if (!overview || typeof overview !== "object") return overview;
+  const goalSummary = typeof overview.player_goal_summary === "string"
+    ? overview.player_goal_summary.replace(/开局地图是[\s\S]*?。你的任务/, "开局二维地图见 initial_map_reference_2d。你的任务")
+    : overview.player_goal_summary;
   return {
     ...pickDefined(overview, [
       "title", "game_type", "current_scenario", "current_side", "objective",
       "turn_goal_update", "player_goal_summary", "player_goal", "victory_decision", "scoring_rules",
       "decision_order", "information_boundaries"
     ]),
+    ...(goalSummary !== undefined ? { player_goal_summary: goalSummary } : {}),
     ...(includeInitialMap && overview.initial_map_reference_2d
       ? { initial_map_reference_2d: compactMapReference(overview.initial_map_reference_2d) }
       : {})
@@ -88,6 +92,7 @@ function compactTask(task) {
     "progress", "status", "next_action", "last_blocked_reason", "source",
     "activation_reason", "tactical_opportunities", "combat_preparation", "preparation_actions",
     "current_metrics", "progress_evidence", "normalization_corrections"
+    ,"completion_criteria", "failure_criteria", "acceptance_contract", "completion_evidence", "checker_assessment", "checker_suggested_switch"
   ]);
 }
 
@@ -147,6 +152,7 @@ function compactTacticalSummary(summary) {
       "replanning_trigger", "allocation_corrections"
     ]),
     active_tasks: boundedList(summary.active_tasks, 4).map(compactTask),
+    route_feasibility: boundedList(summary.route_feasibility, 12),
     task_units: boundedList(summary.task_units, 12),
     key_units: boundedList(summary.key_units, 8).map((unit) => ({
       ...pickDefined(unit, ["unit", "position", "attack", "defense", "movement", "supply"]),
@@ -238,13 +244,23 @@ function compactAgentPayload(payload, options = {}) {
   const includeInitialMap = options.includeInitialMap !== false;
   const includeStableContext = options.includeStableContext !== false;
   const compactContext = {
-    ...(includeStableContext ? { protocol: context.protocol } : {}),
+    ...(includeStableContext ? {
+      // Tool schemas are already supplied to the harness; this illustrative
+      // wrapper only duplicates those schemas in the projected payload.
+      protocol: context.protocol && typeof context.protocol === "object"
+        ? Object.fromEntries(Object.entries(context.protocol).filter(([key]) => key !== "tool_call_shape"))
+        : context.protocol
+    } : {}),
     game: context.game,
     game_overview: includeStableContext
       ? compactGameOverview(context.game_overview, includeInitialMap)
       : compactDynamicGameOverview(context.game_overview),
     decision_mode: context.decision_mode,
-    decision_brief: context.decision_brief,
+    // The protocol is the canonical home for scenario policy. Avoid copying
+    // the same phase policy into the decision brief for every OpenCode turn.
+    decision_brief: context.decision_brief && typeof context.decision_brief === "object"
+      ? Object.fromEntries(Object.entries(context.decision_brief).filter(([key]) => key !== "scenario_policy"))
+      : context.decision_brief,
     ...(includeStableContext ? { mission: context.mission } : {}),
     // Keep the prompt lean; authoritative rule lookup remains available through
     // the configured read-only tools, while scoring is retained in victory.
@@ -326,12 +342,12 @@ function compactAssessment(assessment) {
   if (!assessment || typeof assessment !== "object") return assessment;
   const evaluation = assessment.evaluation || {};
   return {
-    ...pickDefined(assessment, ["legal", "score", "reason", "recommended_recovery", "candidate_match"]),
+    ...pickDefined(assessment, ["legal", "score", "reason", "recommended_recovery", "candidate_match", "route_evidence"]),
     action: assessment.action,
     evaluation: pickDefined(evaluation, [
       "summary", "start", "destination", "objective", "distance_before", "distance_after",
       "progress", "odds_column", "attack", "defense", "expected_crt_score",
-      "enemy_zoc_sources", "enemy_mines", "tactical_tags"
+      "enemy_zoc_sources", "enemy_mines", "tactical_tags", "combat_risk_evidence"
     ]),
     victory_impact: compactVictoryImpact(evaluation.victory_impact),
     risks: boundedList(evaluation.risks, 4)

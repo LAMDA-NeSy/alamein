@@ -1,0 +1,16 @@
+version: 1
+
+# Copy the entries you need into model_suites.yaml. API keys remain in .env.
+models:
+  - id: mock
+    model_profile: mock_primary
+    checker_model_profile: mock_secondary
+  - id: glm53-coding-plan
+    model_profile: glm_53_flash_coding_plan
+    checker_model_profile: glm_53_flash_checker
+  - id: deepseek
+    model_profile: deepseek_flash
+    checker_model_profile: deepseek_flash_checker
+  - id: glm47
+    model_profile: glm_47_flash
+    checker_model_profile: glm_47_flash_checker

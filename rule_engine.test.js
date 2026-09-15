@@ -27,6 +27,12 @@ test("July scenario runs from turn 1 through turn 7", () => {
   assert.equal(Rules.SCENARIO_META.july.final_turn, 7);
 });
 
+test("hex distance follows the authoritative offset-column adjacency", () => {
+  assert.equal(Rules.hexDistance("3409", "3409"), 0);
+  assert.equal(Rules.hexDistance("3409", "3510"), 1);
+  assert.equal(Rules.hexDistance("3409", "3711"), 3);
+});
+
 test("September turn 1 skips Allies initial movement", () => {
   const state = baseState({ scenario: "september", turn: 1, phase: "axis_supply_movement" });
   const next = Rules.nextPhase(ctx(state));
@@ -46,6 +52,46 @@ test("October defaults do not reset the active side after turn 1", () => {
   Rules.applyStateDefaults(state);
   assert.equal(state.phase, "axis_initial_movement");
   assert.equal(state.active_side, "axis");
+});
+
+test("October keeps Allies first in every game turn", () => {
+  const state = baseState({ scenario: "october", turn: 4, phase: "allies_supply_movement", active_side: "allies" });
+  const context = ctx(state);
+  assert.equal(Rules.nextPhase(context).phase, "axis_initial_movement");
+
+  state.phase = "end_game_turn";
+  state.active_side = "axis";
+  const nextTurn = Rules.nextPhase(ctx(state));
+  assert.equal(nextTurn.phase, "allies_initial_movement");
+  assert.equal(nextTurn.active_side, "allies");
+  assert.equal(nextTurn.turn_increment, 1);
+});
+
+test("scenario setup positions and mine counts match the printed placement tables", () => {
+  const july = JSON.parse(fs.readFileSync("./scenarios/july.json", "utf8"));
+  assert.equal(july.units["july-61-It-mech-01"].hex, "2713");
+  assert.equal(july.units["july-GGFF-Mech-01"].hex, "3309");
+  assert.equal(Object.values(july.units).filter((unit) => unit.kind === "mine" && unit.side === "allies").length, 10);
+
+  const october = JSON.parse(fs.readFileSync("./scenarios/october.json", "utf8"));
+  assert.equal(october.units["october-allied-engineers-01"].hex, "4013");
+  const octoberAlliedMines = Object.values(october.units).filter((unit) => unit.kind === "mine" && unit.side === "allies");
+  assert.equal(octoberAlliedMines.length, 24);
+  assert.ok(octoberAlliedMines.some((mine) => mine.hex === "3514"));
+});
+
+test("July boxed areas restrict movement but do not add defense strength", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      attacker: { side: "axis", hex: "0202", state: "fresh", attack: 2, defense: 2, movement: 4, kind: "ground" },
+      defender: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" }
+    }
+  });
+  const context = ctx(state, { hexes: { "0302": ["alamein_box"] }, edges: {} });
+  const verdict = Rules.checkCombat(context, { attackers: ["attacker"], defender_hexes: ["0302"] });
+  assert.equal(verdict.legal, true, verdict.reason);
+  assert.equal(verdict.details.defense, 1);
 });
 
 test("scenario engineers use their printed (1)4 values", () => {
@@ -775,6 +821,29 @@ test("combat mine-clear success reports the actual die and removes the minefield
   assert.equal(result.details.cleared, true);
   assert.equal(result.details.die, 5);
   assert.equal(state.units.mine.eliminated, true);
+});
+
+test("combat-unit mine clearance is unavailable after combat has been resolved", () => {
+  const state = baseState({
+    phase: "axis_combat",
+    units: {
+      attacker: { side: "axis", hex: "0202", state: "fresh", attack: 4, defense: 2, movement: 4, kind: "ground" },
+      mine_unit: { side: "axis", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      defender: { side: "allies", hex: "0302", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      mine: { side: "allies", hex: "0302", kind: "mine" }
+    }
+  });
+  const context = ctx(state);
+  const combat = Rules.resolveCombat(context, {
+    attackers: ["attacker"],
+    defender_hexes: ["0302"],
+    die: 6,
+    advance_attacker: false
+  });
+  assert.equal(combat.legal, true, combat.reason);
+  const afterCombat = Rules.clearMine(context, "mine_unit", "0302", 6);
+  assert.equal(afterCombat.legal, false);
+  assert.match(afterCombat.reason, /已经发生战斗/);
 });
 
 test("friendly minefield doubles defender strength", () => {

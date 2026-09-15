@@ -24,6 +24,63 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+test("gateway delivery failure retains a unique request id and transport record", async () => {
+  const runtime = createModelRuntime("mock_primary", { run_id: "local-delivery-failure" });
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async () => { throw Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } }); };
+    const result = await createChatCompletionsClient(runtime).complete({ messages: [], audit_stage: "unit_plan" });
+    assert.equal(result.ok, false);
+    assert.ok(result.request_id);
+    assert.equal(runtime.transport.length, 1);
+    assert.equal(runtime.transport[0].request_id, result.request_id);
+    assert.equal(runtime.transport[0].error_class, "connection_error");
+    assert.equal(runtime.transport[0].stage, "unit_plan");
+    assert.ok(runtime.transport[0].client_delivery);
+  } finally { global.fetch = originalFetch; await closeModelRuntime(runtime); }
+});
+
+test("token usage survives redaction while credential tokens remain secret", async () => {
+  const runtime = createModelRuntime("mock_primary", { run_id: "usage-redaction", mockResponder: () => ({
+    status: 200, body: { choices: [{ message: { content: "{}" } }], access_token: "private",
+      usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, prompt_tokens_details: { cached_tokens: 70 } } }
+  }) });
+  try {
+    const result = await createChatCompletionsClient(runtime).complete({ messages: [], max_tokens: 200 });
+    assert.equal(result.response_json.access_token, "[REDACTED]");
+    assert.equal(result.response_json.usage.total_tokens, 110);
+    assert.equal(runtime.transport[0].response.usage.prompt_tokens_details.cached_tokens, 70);
+    assert.equal(result.request_body.max_tokens, 200);
+  } finally { await closeModelRuntime(runtime); }
+});
+
+test("mock planning uses current scoring and allowed intents without a fixed map target", async () => {
+  const runtime = createModelRuntime("mock_primary", { run_id: "target-autonomy" });
+  try {
+    const client = createChatCompletionsClient(runtime);
+    for (const nextColumn of [35, 38]) {
+      const result = await client.complete({ messages: [
+        { role: "system", content: "You are the Axis goal commander." },
+        { role: "user", content: JSON.stringify({ context: { game: { scenario: "july" },
+          victory: { current_scoring: { july_advance: { next_scoring_column: nextColumn } } } } }) }
+      ] });
+      const plan = JSON.parse(result.response_json.choices[0].message.content);
+      assert.equal(plan.target_column, nextColumn);
+      assert.equal(plan.sector, "");
+    }
+    for (const catalog of [["consolidate", "supply"], ["clear_mines", "protect_engineers"]]) {
+      const result = await client.complete({ messages: [{ role: "user", content: JSON.stringify({
+        context: { phase_intent_catalog: catalog }
+      }) }] });
+      const plan = JSON.parse(result.response_json.choices[0].message.content);
+      assert.ok(catalog.includes(plan.intent.type));
+      assert.equal(plan.intent.target_hex, "");
+      assert.equal(plan.intent.sector, "");
+    }
+  }
+  finally { await closeModelRuntime(runtime); }
+});
+
 test("model profiles normalize defaults and reject invalid entries", () => {
   const primary = resolveModel("mock_primary");
   assert.equal(primary.profile_id, "mock_primary");
@@ -283,17 +340,17 @@ test("all retries share one total request timeout", async () => {
     }
   });
   runtime.profile.defaults.retries = 3;
-  runtime.profile.defaults.retry_delays_ms = [30, 30, 30];
-  runtime.profile.defaults.timeout_ms = 45;
+  runtime.profile.defaults.retry_delays_ms = [1200, 1200, 1200];
+  runtime.profile.defaults.timeout_ms = 1000;
   const started = Date.now();
   try {
-    const result = await createChatCompletionsClient(runtime).complete({ messages: [], timeout_ms: 45 });
+    const result = await createChatCompletionsClient(runtime).complete({ messages: [], timeout_ms: 1000 });
     const elapsed = Date.now() - started;
     assert.equal(result.ok, false);
-    assert.equal(result.error_class, "upstream_unavailable");
+    assert.equal(result.error_class, "network_timeout");
     assert.equal(calls, 1);
-    assert.ok(elapsed < 250, `request took ${elapsed}ms`);
-    assert.ok(runtime.transport[0].elapsed_ms < 150, `upstream attempts took ${runtime.transport[0].elapsed_ms}ms`);
+    assert.ok(elapsed < 2000, `request took ${elapsed}ms`);
+    assert.ok(runtime.transport[0].elapsed_ms < 1800, `upstream attempts took ${runtime.transport[0].elapsed_ms}ms`);
   }
   finally {
     await closeModelRuntime(runtime);

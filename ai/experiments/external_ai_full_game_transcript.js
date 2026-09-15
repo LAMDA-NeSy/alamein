@@ -3,6 +3,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const RulesEngine = require("../../rule_engine.js");
 
 const { makeReplay } = require("./ai_replay.js");
 const {
@@ -42,15 +43,20 @@ const {
 } = require("../core/reasoning_memory.js");
 const { createPhaseIntentPlanner } = require("../core/phase_intent_runtime.js");
 const { createSaeRuntime, deriveActionEffect } = require("../core/sae_runtime.js");
+const { createUnitPlanRuntime } = require("../core/unit_plan_runtime.js");
+const { summarizeExecutionLedger } = require("../core/phase_execution_ledger.js");
+const { createOpportunityLedger, capabilityReferenceErrors } = require("../core/opportunity_ledger.js");
 const { createTaskCheckerRuntime } = require("../core/task_checker_runtime.js");
-const { fallbackReasonClass, isNonRetryableRequestStatus } = require("../core/transport_attribution.js");
-const { resolveSidePrompt, renderSidePrompt, sidePromptRegistryMetadata, sideStrategyConfig } = require("../core/prompt_registry.js");
+const { NETWORK_ERROR_CLASSES, fallbackReasonClass, isNonRetryableRequestStatus } = require("../core/transport_attribution.js");
+const { resolveSidePrompt, renderSidePrompt, sidePromptRegistryMetadata, sideStrategyConfig, promptValue } = require("../core/prompt_registry.js");
 const { toolPromptReference } = require("../core/agent_tools.js");
 const { PROJECT_ROOT } = require("../core/project_paths.js");
 const { resolveControllers } = require("../core/controller_config.js");
 const { infrastructureStatus } = require("../core/benchmark_comparison.js");
-const { attachRuntimeAccounting, refreshRuntimeAccounting } = require("../core/experiment_accounting.js");
+const { allocationCorrectionMetrics, attachRuntimeAccounting, refreshRuntimeAccounting } = require("../core/experiment_accounting.js");
 const { validateExperimentSelection } = require("../core/experiment_selection.js");
+const { writeJsonAtomic } = require("../core/json_file.js");
+const { validateScenarioCounterStats } = require("../core/counter_stats.js");
 
 const ROOT = PROJECT_ROOT;
 // DeepSeek rejects `required` and function-specific tool_choice in its default
@@ -258,13 +264,17 @@ const TRANSCRIPT_CHECKPOINT_INTERVAL_MS = 30000;
 function writeTranscript(outFile, transcript, { force = false } = {}) {
   if (!outFile) return;
   const now = Date.now();
-  const state = transcriptWriteState.get(transcript) || { lastWriteAt: 0 };
+  const state = transcriptWriteState.get(transcript) || { lastWriteAt: 0, totalWriteMs: 0, writes: 0 };
   if (!force && state.lastWriteAt && now - state.lastWriteAt < TRANSCRIPT_CHECKPOINT_INTERVAL_MS) return;
   state.lastWriteAt = now;
   transcriptWriteState.set(transcript, state);
   refreshRuntimeAccounting(transcript);
+  transcript.timing_totals = { ...(transcript.timing_totals || {}), log_write_ms_before_checkpoint: state.totalWriteMs,
+    completed_checkpoint_writes: state.writes };
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
-  fs.writeFileSync(outFile, JSON.stringify(transcript, null, 2));
+  writeJsonAtomic(outFile, transcript);
+  state.totalWriteMs += Date.now() - now;
+  state.writes += 1;
 }
 
 function progressLine(stepRecord, result) {
@@ -501,7 +511,8 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
   const decisionPolicy = ["direct", "candidates", "intent", "hybrid", "opportunity_aware_hybrid", "unit_plan_hybrid", "hierarchical_sae", "strategy_execute"].includes(options.decisionPolicy) ? options.decisionPolicy : "direct";
   const methodConfig = resolveAgentMethod(decisionPolicy);
   const toolProfile = resolveToolProfile(options.toolProfile || methodConfig.tool_profile);
-  const bridge = options.bridge || createRuleBridge(config, { toolProfile: toolProfile.id });
+  const bridge = options.bridge || createRuleBridge(config, { toolProfile: toolProfile.id,
+    executionLedger: methodConfig.rolling_unit?.execution_ledger === true });
   const client = options.client || createChatCompletionsClient(runtime);
   const outFile = options.outFile || "";
   const progress = options.progress !== false;
@@ -522,10 +533,23 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       client,
       taskChecker: options.taskChecker,
       decisionPolicy,
+      availableTools: toolProfile.tools,
       reasoningMemory
     })
     : null;
+  const unitPlanRuntime = ["unit_plan_hybrid", "hierarchical_sae"].includes(decisionPolicy)
+    ? createUnitPlanRuntime({
+      config,
+      runtime,
+      client,
+      bridge,
+      sessionId,
+      decisionMode: decisionPolicy,
+      settings: options.unitPlanSettings || methodConfig.rolling_unit || {}
+    })
+    : null;
   const pendingApplications = new Map();
+  const opportunities = createOpportunityLedger();
 
   function staticMapContext(payload) {
     const context = payload?.context || {};
@@ -567,10 +591,12 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       const heldCount = Number(status?.counts?.held || status?.held_units?.length || 0);
       const handledCount = predictedActed.size + heldCount + Number(status?.counts?.unavailable || 0);
       stepRecord.rolling_unit_action = {
-        protocol: "rolling-unit-action-v1",
+        protocol: "rolling-unit-action-v2",
         phase_intent: stepRecord.phase_intent?.value || null,
         selected_action: clone(action),
-        held_this_step: stepRecord.rounds.flatMap((round) => {
+        held_this_step: stepRecord.execution_ledger
+          ? stepRecord.execution_ledger.events.filter((event) => event.held).map((event) => ({ unit: event.unit, reason: event.reason }))
+          : stepRecord.rounds.flatMap((round) => {
           if (!round.tool_result?.result?.accepted) return [];
           if (round.tool_result.tool === "hold_unit") {
             return [{ unit: round.tool_result.result.unit, reason: round.tool_result.arguments?.reason || "" }];
@@ -586,6 +612,9 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       stepRecord.movement_phase = {
         movement_phase_policy: "rule_complete",
         eligible_units_at_phase_start: eligibleCount,
+        eligible_unit_ids: [...(status?.eligible_units || [])],
+        withdrawal_eligible_units: (status?.remaining_units || []).filter((unit) =>
+          RulesEngine.checkExitWest(bridge.current().built.ctx, { unit }).legal),
         acted_units: predictedActed.size,
         held_units: heldCount,
         remaining_eligible_units: predictedRemaining.size,
@@ -630,13 +659,21 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       recovered_transport_failures: stepRecord.recovered_transport_failures.length,
       protocol_failures: stepRecord.protocol_failures.length,
       error: stepRecord.error || null,
+      provider_recovery: stepRecord.provider_recovery || null,
       final_accepted: !stepRecord.fallback_used
     };
+    stepRecord.provider_result.model_tool_calls = bridge.current?.()?.tool_calls || 0;
+    stepRecord.provider_result.local_execution_calls = bridge.current?.()?.local_execution_calls || 0;
+    stepRecord.timing = { context_ms: stepRecord.prepare_ms || 0,
+      unit_plan_context_ms: stepRecord.unit_plan_context_ms || 0,
+      path_validation_ms: (bridge.records || []).filter((item) => item.step === stepRecord.step && item.origin === "local_execution" && item.tool === "act")
+        .reduce((sum, item) => sum + Number(item.elapsed_ms || 0), 0),
+      step_wall_ms: Date.now() - started };
     if (stepRecord.movement_phase) stepRecord.provider_result.movement_phase = stepRecord.movement_phase;
     if (options.taskChecker?.metadata) transcript.task_checker = options.taskChecker.metadata();
     // The replay owns mutation. Persisting the model step is deferred until the
     // replay reports the post-application snapshot through onActionApplied.
-    pendingApplications.set(Number(stepRecord.step), { stepRecord, input });
+    pendingApplications.set(Number(stepRecord.step), { stepRecord, input, built: bridge.current?.()?.built });
     writeTranscript(outFile, transcript);
     if (progress) console.log(progressLine(stepRecord, { action, model: stepRecord.provider_result }));
     return { action, candidates: stepRecord.candidates || [], model: stepRecord.provider_result };
@@ -656,19 +693,21 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       action: clone(event.action || stepRecord.final_action || {}),
       result: clone(event.result || null)
     };
+    if (stepRecord.execution_ledger) {
+      for (const entry of stepRecord.execution_ledger.events.filter((item) => item.status === "executed")) {
+        entry.application_pending = false;
+        entry.applied = event.applied !== false && event.result?.legal !== false;
+        entry.rule_result = clone(event.result || null);
+      }
+    }
     if (afterState && pending.input?.state) {
       try {
-        const effectBuilt = buildContext(config, {
-          state: pending.input.state,
-          decisionMode: stepRecord.decision_mode || "hierarchical_sae",
-          privateCandidates: false,
-          includeInitialMap: false
-        });
+        const effectBuilt = pending.built;
         stepRecord.action_effect = deriveActionEffect(
           pending.input.state,
           afterState,
           stepRecord,
-          { ctx: effectBuilt.ctx, side: stepRecord.side }
+          { ctx: effectBuilt.ctx, side: stepRecord.side, executionLedger: methodConfig.rolling_unit?.execution_ledger === true }
         );
       }
       catch (error) {
@@ -688,13 +727,20 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         active_side: afterState.active_side
       };
     }
+    if (methodConfig.rolling_unit?.execution_ledger) {
+      stepRecord.tactical_opportunity_selected = opportunities.apply(pending.input, stepRecord);
+      transcript.opportunity_ledger = opportunities.report();
+    }
     if (saeRuntime && afterState) {
       await saeRuntime.observe({
         turn: stepRecord.turn,
         side: stepRecord.side,
         phase: stepRecord.phase,
         step: stepRecord.step,
-        state: afterState
+        state: afterState,
+        ctx: pending.built ? RulesEngine.createContext({
+          state: clone(afterState), rules: pending.built.ctx.rules, terrain: pending.built.ctx.terrain
+        }) : undefined
       }, stepRecord);
       stepRecord.task_progress_delta = stepRecord.task_observation?.task_progress_delta || {};
       stepRecord.sae_replan_pending = !!saeRuntime.replanReasons?.get(`${Number(stepRecord.turn)}:${stepRecord.side}`);
@@ -719,8 +765,72 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
     return { ok: true, state_hash_after: stepRecord.state_hash_after || null };
   }
 
+  async function recoverProviderError({ error, ...input }) {
+    const reason = String(error?.message || error || "external provider failed");
+    const protocolError = error?.error_class === "model_protocol_failure" || /^(invalid hex:|hex outside map:)/i.test(reason);
+    const transportError = NETWORK_ERROR_CLASSES.has(error?.error_class);
+    // Unexpected implementation failures must remain visible, not masquerade
+    // as model errors in an otherwise ranking-eligible game.
+    if (!protocolError && !transportError) throw error;
+    const stepRecord = transcript.model_steps.findLast((step) => step.step === input.step
+      && step.side === input.side && step.turn === input.turn && step.phase === input.phase);
+    if (!stepRecord) throw new Error("provider recovery has no matching decision record", { cause: error });
+    const started = stepRecord.started_at_ms;
+    const fallbackReason = protocolError ? "model_protocol_failure" : "transport_failure";
+    const current = bridge.current?.();
+    if (!current || current.step !== Number(input.step) || current.side !== input.side
+      || current.turn !== Number(input.turn) || current.phase !== input.phase) {
+      bridge.prepareStep({
+        ...input,
+        session_id: sessionId,
+        decisionMode: decisionPolicy,
+        phaseIntent: stepRecord.phase_intent?.value || null,
+        strategicIntent: stepRecord.strategic_intent || null,
+        forceAllocation: stepRecord.force_allocation || null,
+        operationState: stepRecord.operation_state || null,
+        privateCandidates: !stepRecord.rolling_movement,
+        exposeVerifiedActions: false
+      });
+    }
+    if (protocolError) stepRecord.protocol_failures.push({ stage: "provider_recovery", reason });
+    else stepRecord.transport_failures.push({ stage: "provider_recovery", status: error.status || 0, error_class: error.error_class, reason });
+    const failedCall = stepRecord.rounds.at(-1)?.parsed_output;
+    if (protocolError && failedCall?.tool === "act" && !stepRecord.rounds.at(-1).tool_result) {
+      stepRecord.action_attempts.push({ attempt: stepRecord.action_attempts.length + 1,
+        action: clone(failedCall.arguments?.action || {}), accepted: false,
+        rejection_class: "model_protocol_failure", reason });
+    }
+    stepRecord.fallback_used = true;
+    stepRecord.fallback_reason_class = fallbackReason;
+    stepRecord.provider_exception = true;
+    stepRecord.error = reason;
+    // If a tool was accepted before a later protocol failure, apply that
+    // accepted action exactly once instead of replacing it with another one.
+    const action = bridge.current?.()?.submitted || bridge.fallbackAction();
+    stepRecord.final_action_source = "provider_error_fallback";
+    stepRecord.final_action = clone(action);
+    stepRecord.provider_recovery = {
+      recovered: true,
+      source: "method_local_fallback",
+      fallback_reason_class: fallbackReason,
+      original_error: reason
+    };
+    return await finish(stepRecord, action, started, input);
+  }
+
   const provider = async function externalAction(input) {
     const started = Date.now();
+    const stepRecord = {
+      step: input.step, controller: "external_ai", side: input.side, phase: input.phase, turn: input.turn,
+      phase_id: `${input.turn}:${input.phase}:${input.side}`,
+      started_at_ms: started,
+      context_profile: CONTEXT_PROFILE_ID, context_policy: CONTEXT_POLICY, tool_feedback_profile: TOOL_FEEDBACK_PROFILE,
+      rounds: [], action_attempts: [], transport_failures: [], recovered_transport_failures: [], protocol_failures: [],
+      fallback_used: false, local_fast_pass: false, candidates: [],
+      rolling_movement: ["unit_plan_hybrid", "hierarchical_sae"].includes(decisionPolicy)
+        && /_(initial_movement|mechanized_movement|supply_movement)$/.test(input.phase)
+    };
+    transcript.model_steps.push(stepRecord);
     const stepDeadline = started + stepTimeoutMs;
     const phasePlanStarted = Date.now();
     const phasePlan = decisionPolicy === "hierarchical_sae"
@@ -730,6 +840,12 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
     if (!saeRuntime) reasoningMemory.begin(input);
     const phasePlanMs = Date.now() - phasePlanStarted;
     const phaseIntent = saePlan?.phaseIntent || phasePlan.phaseIntent;
+    if (phasePlan.record) stepRecord.phase_intent = phasePlan.record;
+    if (saePlan) Object.assign(stepRecord, {
+      sae_plan: saePlan.record, strategic_intent: saePlan.strategic_intent,
+      goal_plan: saePlan.goal_plan, force_allocation: saePlan.force_allocation,
+      operation_state: saePlan.operation_state, phase_intent: { value: phaseIntent }
+    });
 
     const prepareStarted = Date.now();
     const movementPhase = /_(initial_movement|mechanized_movement|supply_movement)$/.test(input.phase);
@@ -790,7 +906,7 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
     const projectedContextBytes = contextBytes(projectedPayload);
     const staticContextBytes = Buffer.byteLength(openingMessage, "utf8");
     const systemContextBytes = Buffer.byteLength(systemMessage, "utf8");
-    const stepRecord = {
+    Object.assign(stepRecord, {
       step: input.step,
       controller: "external_ai",
       side: input.side,
@@ -816,7 +932,7 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
       local_fast_pass: false,
       rolling_movement: rollingMovement,
       candidates: (context.candidate_actions || []).slice(0, 5).map(compactCandidate)
-    };
+    });
     if (phasePlan.record) {
       stepRecord.phase_intent = { ...phasePlan.record, execution_candidate_count: prepared.public_payload.context.execution_candidate_count || phasePlan.record.execution_candidate_count };
     }
@@ -836,7 +952,108 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         allocation: saePlan.record.allocation
       };
     }
-    transcript.model_steps.push(stepRecord);
+    if (rollingMovement && unitPlanRuntime) {
+      const unitPlan = await unitPlanRuntime.next({
+        ...input,
+        strategicIntent: saePlan?.strategic_intent || input.strategicIntent,
+        forceAllocation: saePlan?.force_allocation || input.forceAllocation,
+        operationState: saePlan?.operation_state || input.operationState,
+        builtContext: saeRuntime?.contextFor(input) || undefined,
+        preparedStep: prepared,
+        reasoningMemory: reasoningMemoryPayload,
+        phaseStatus: bridge.phaseStatus(),
+        staticPlanningContext: openingMessage
+      }, phaseIntent, stepDeadline);
+      if (unitPlan.plan?.stagnant_replan_requested && saeRuntime?.replanReasons) {
+        saeRuntime.replanReasons.set(`${Number(input.turn)}:${input.side}`, "unit_plan_stagnation");
+      }
+      if (unitPlan.plan_created && unitPlan.plan.model_output) {
+        stepRecord.rounds.push({
+          round: 1,
+          planning_request: "phase_unit_plan",
+          model_input: unitPlan.plan.model_input,
+          model_output: unitPlan.plan.model_output,
+          parsed_output: unitPlan.plan.raw || null
+        });
+      } else if (unitPlan.plan_created) {
+        stepRecord.rounds.push({
+          round: 1,
+          planning_request: "phase_unit_plan",
+          model_input: unitPlan.plan.model_input,
+          model_output: unitPlan.plan.model_output,
+          parsed_output: unitPlan.plan.raw || null,
+          api: unitPlan.plan.api
+        });
+      }
+      stepRecord.phase_unit_plan = {
+        protocol: "phase-unit-plan-v2",
+        phase_id: unitPlan.plan.phase_id || null,
+        plan_id: unitPlan.plan.plan_id || null,
+        replaces_plan_id: unitPlan.plan.replaces_plan_id || null,
+        remaining_units_at_plan_creation: unitPlan.plan.remaining_units_at_plan_creation,
+        source: unitPlan.plan.source,
+        planning_request: "phase_unit_plan",
+        eligible_units_at_phase_start: unitPlan.plan.eligible_units_at_phase_start,
+        unit_orders: unitPlan.plan.unit_orders,
+        omitted_units: unitPlan.plan.omitted_units,
+        invalid_orders: unitPlan.plan.invalid_orders,
+        unit_plan_coverage: unitPlan.plan.unit_plan_coverage,
+        model_covered_units: unitPlan.plan.model_covered_units,
+        model_unit_plan_coverage: unitPlan.plan.model_unit_plan_coverage,
+        control_fingerprint: unitPlan.plan.control_fingerprint,
+        request_count: unitPlan.plan.request_count,
+        repair_request_count: unitPlan.plan.repair_request_count,
+        stagnant_actions: unitPlan.plan.stagnant_actions,
+        stagnant_replan_requested: unitPlan.plan.stagnant_replan_requested,
+        plan_created: unitPlan.plan_created,
+        partial_model_plan: unitPlan.plan.partial_model_plan,
+        guard_injected: unitPlan.plan.guard_injected,
+        api: unitPlan.plan.api,
+        execution: unitPlan.execution,
+        executions: unitPlan.ledger ? unitPlan.ledger.events : unitPlan.plan.executions,
+        revalidated_each_action: true,
+        execution_order: "phase_plan_priority",
+        model_input: !unitPlan.ledger || unitPlan.plan_created ? unitPlan.plan.model_input : null,
+        model_output: !unitPlan.ledger || unitPlan.plan_created ? unitPlan.plan.model_output : null
+      };
+      if (unitPlan.ledger) {
+        stepRecord.execution_ledger = unitPlan.ledger;
+        stepRecord.capability_reference_errors = capabilityReferenceErrors(unitPlan.plan.raw, toolProfile.tools);
+        if (unitPlan.plan_created) stepRecord.tactical_opportunities_seen = [
+          ...opportunities.observePlan(input, unitPlan.plan, unitPlan.plan.api?.status === 200),
+          ...opportunities.observeTacticalPayload(input, { tactical_opportunities: input.operationState?.tactical_summary?.tactical_opportunities || saePlan?.operation_state?.tactical_summary?.tactical_opportunities }, unitPlan.plan.api?.status === 200)
+        ];
+        stepRecord.unit_plan_context_ms = unitPlan.plan_created ? unitPlan.plan.context_computation_ms : 0;
+      }
+      stepRecord.final_action_source = unitPlan.execution?.execution_source || "phase_plan";
+      if (unitPlan.plan_created && unitPlan.plan.api?.error_class === "protocol_failure") {
+        stepRecord.protocol_failures ||= [];
+        stepRecord.protocol_failures.push({ request_id: unitPlan.plan.request_id,
+          stage: "unit_plan", error_class: "protocol_failure", reason: unitPlan.plan.api.error });
+      }
+      stepRecord.fallback_used = ["local_fallback", "forced_stack_repair", "local_high_priority_guard"]
+        .includes(stepRecord.final_action_source);
+      const fallbackEvent = unitPlan.ledger?.events.find((event) => event.execution_source === "local_fallback"
+        && ["executed", "held", "skipped_after_repair"].includes(event.status));
+      if (fallbackEvent || unitPlan.plan_created && unitPlan.plan.source === "local_fallback") stepRecord.fallback_used = true;
+      if (stepRecord.fallback_used) stepRecord.fallback_reason_class = fallbackEvent?.failure_class || unitPlan.execution?.failure_class
+        || (unitPlan.plan.api?.error_class && unitPlan.plan.api.error_class !== "none" ? unitPlan.plan.api.error_class : "policy_fallback");
+      stepRecord.final_action = unitPlan.action;
+      if (unitPlan.ledger) stepRecord.action_attempts.push(...unitPlan.ledger.events.filter((event) => event.status === "attempt")
+        .map((event, index) => ({ ...event, attempt: index + 1,
+          rejection_class: event.accepted ? null : event.rejection_type === "rules" ? "rule_engine_rejection"
+            : event.rejection_type === "strategy" ? "policy_rejection" : event.failure_class })));
+      else stepRecord.action_attempts.push({
+        attempt: 1,
+        action: clone(unitPlan.action),
+        accepted: unitPlan.action.type === "pass" || !!unitPlan.tool_result?.accepted,
+        reason: unitPlan.tool_result?.reason || "phase plan action revalidated",
+        rejection_type: unitPlan.tool_result?.rejection_type || "",
+        assessment: unitPlan.tool_result?.assessment || null,
+        strategic_review: unitPlan.tool_result?.strategic_review || null
+      });
+      return await finish(stepRecord, unitPlan.action, started, input);
+    }
     const rollingStatus = stepRecord.rolling_movement && typeof bridge.phaseStatus === "function"
       ? bridge.phaseStatus()
       : null;
@@ -855,8 +1072,9 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
     }
 
     const toolResults = [];
+    if (methodConfig.rolling_unit?.execution_ledger) stepRecord.tactical_opportunities_seen = opportunities.observeTacticalPayload(input, projectedPayload, true);
     const stepConversation = [
-      { role: "system", content: systemMessage },
+      { role: "system", content: systemMessage + (methodConfig.rolling_unit?.execution_ledger ? `\n${promptValue("execution_ledger.execution")}` : "") },
       ...(openingContextMessage ? [{ role: "user", content: openingMessage }] : []),
       {
         role: "user",
@@ -900,10 +1118,12 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
           : { error: `model API status ${result.status}`, failure_type: "transport", error_class: result.error_class || "network_error" };
       }
       catch (error) {
+        if (methodConfig.rolling_unit?.execution_ledger && (error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError)) throw error;
         parsed = { error: error.message, failure_type: "transport", error_class: "network_error" };
       }
       const round = {
         round: attempt + 1,
+        request_id: result?.request_id || null,
         model_input: result?.request_body || null,
         model_output: result?.response_json || null,
         parsed_output: parsed
@@ -952,6 +1172,11 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         stepRecord.continued_after_transport_failure = true;
       }
       consecutiveTransportFailureRounds = 0;
+      if (Date.now() >= deadline) {
+        timedOut = true;
+        round.expired_response_not_executed = true;
+        break;
+      }
       const toolResult = bridge.executeTool(parsed.tool, parsed.arguments, sessionId);
       round.tool_result = {
         tool: parsed.tool,
@@ -964,9 +1189,16 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
         round.tool_result,
         JSON.stringify(compactToolFeedback(round.tool_result))
       ));
-      if (parsed.tool !== "act") continue;
+      if (parsed.tool !== "act") {
+        if (toolResult.stop || toolResult.retryable === false) break;
+        continue;
+      }
       const actionAttempt = {
         attempt: stepRecord.action_attempts.length + 1,
+        event_id: `${stepRecord.phase_id}:step${input.step}:attempt${stepRecord.action_attempts.length + 1}`,
+        request_id: result?.request_id || null,
+        model_submitted: true,
+        execution_source: "model_tool",
         action: parsed.arguments?.action || {},
         accepted: !!toolResult.accepted,
         retryable: toolResult.retryable !== false,
@@ -1014,6 +1246,15 @@ function makeSingleActionProvider(config, runtime, transcript, options = {}) {
     return await finish(stepRecord, stepRecord.final_action, started, input);
   };
   provider.onActionApplied = onActionApplied;
+  provider.onTurnSettled = async (input) => {
+    if (!saeRuntime) return;
+    transcript.task_turn_settlements ||= [];
+    if (transcript.task_turn_settlements.some((event) => event.event_id === input.settlement.event_id)) return;
+    const taskPlan = await saeRuntime.settleTurn(input);
+    transcript.task_turn_settlements.push({ ...input.settlement, state_hash: sha256(input.state), task_plan: taskPlan });
+    writeTranscript(outFile, transcript);
+  };
+  provider.onProviderError = recoverProviderError;
   provider.finalize = async (input = {}) => saeRuntime?.finalize(input) || null;
   return provider;
 }
@@ -1058,7 +1299,8 @@ async function main() {
   const requestedMode = argValue("--decision-policy", argValue("--decision-mode", methodDefaults.decision_policy));
   const decisionMode = requestedMode;
   const methodConfig = validateExperimentSelection("manual_single_action", decisionMode);
-  const maxSteps = Number(argValue("--max-steps", 1000));
+  const requestedMaxSteps = argValue("--max-steps", "");
+  const maxSteps = Number(requestedMaxSteps || ({ july: 1000, september: 1500, october: 3000 }[scenario] || 1000));
   const seed = Number(argValue("--seed", 1942));
   const replicate = Number(argValue("--replicate", 1));
   const requestedModelProfile = argValue("--model-profile", "") || "";
@@ -1066,11 +1308,11 @@ async function main() {
   const toolProfile = resolveToolProfile(argValue("--tool-profile", "") || methodConfig.tool_profile);
   const stepTimeoutMs = Number(argValue("--step-timeout-ms", "") || methodConfig.step_timeout_ms);
   // Explicit disabled mode retains the historical SAE without task management.
-  const taskManagement = decisionMode === "hierarchical_sae"
+  const taskManagementDefaults = decisionMode === "hierarchical_sae"
     && argValue("--task-management", methodConfig.task_management?.mode || "disabled") === "multi_task"
     ? methodConfig.task_management || {
       mode: "multi_task",
-      protocol: "side-aware-task-v2",
+      protocol: "side-aware-task-v4",
       max_child_tasks: 6,
       max_active_child_tasks: 3,
       checker_enabled: true,
@@ -1079,11 +1321,18 @@ async function main() {
       checker_max_calls_per_turn: 4
     }
     : null;
-  const taskCheckerProfile = argValue("--task-checker-model-profile", "") || taskManagement?.checker_model_profile || "";
+  const taskCheckerProfile = taskManagementDefaults
+    ? argValue("--task-checker-model-profile", "") || taskManagementDefaults.checker_model_profile || ""
+    : "";
+  const taskManagement = taskManagementDefaults
+    ? { ...taskManagementDefaults, checker_model_profile: taskCheckerProfile }
+    : null;
   const experimentId = [scenario, `axis-${controllers.axis}`, `allies-${controllers.allies}`, seed, replicate, "manual_single_action", decisionMode, toolProfile.id, modelProfile, taskManagement ? taskCheckerProfile : "no_tasks"]
     .map((value) => String(value).replace(/[^a-zA-Z0-9_-]+/g, "_"))
     .join("__");
   const outFile = path.resolve(argValue("--out", path.join(LOG_DIR, `${experimentId}.json`)));
+  const scenarioState = JSON.parse(fs.readFileSync(path.join(ROOT, `scenarios/${scenario}.json`), "utf8"));
+  validateScenarioCounterStats(scenarioState);
   const profile = resolveModel(modelProfile);
   if (profile.adapter !== "mock" && taskManagement?.checker_enabled && !argValue("--task-checker-model-profile", "")) {
     throw new Error("real multi-task experiments require an explicit --task-checker-model-profile");
@@ -1108,7 +1357,8 @@ async function main() {
       client: createChatCompletionsClient(checkerRuntime),
       runtime: checkerRuntime,
       timeoutMs: taskManagement.checker_timeout_ms,
-      maxCallsPerTurn: taskManagement.checker_max_calls_per_turn
+      maxCallsPerTurn: taskManagement.checker_max_calls_per_turn,
+      cooldownActions: taskManagement.execution_ledger ? taskManagement.checker_cooldown_actions : 0
     })
   ]));
   const taskChecker = taskCheckers[externalSide] || taskCheckers[externalSides[0]] || null;
@@ -1167,7 +1417,7 @@ async function main() {
     outFile,
     directory: path.join(contextStoreDirectory, side)
   })]));
-  const contextStore = contextStores[externalSide] || contextStores[externalSides[0]] || null;
+  const contextStore = contextStores[externalSide] || contextStores[contextSides[0]] || null;
   const contextStoreErrors = [];
   const hashFile = (file) => {
     try { return sha256(fs.readFileSync(file, "utf8")); }
@@ -1242,16 +1492,16 @@ async function main() {
       // makes JSONL serialization dominate long runs before the model acts.
       const changedSide = event.side || event.state?.active_side;
       if (!externalSides.includes(changedSide)) return;
-      for (const store of Object.values(contextStores)) {
-        store.snapshot({
-          stage: event.stage,
-          step: event.step,
-          state: event.state,
-          turn: event.turn,
-          phase: event.phase,
-          side: event.side || event.state?.active_side
-        });
-      }
+      const store = contextStores[changedSide];
+      if (!store) return;
+      store.snapshot({
+        stage: event.stage,
+        step: event.step,
+        state: event.state,
+        turn: event.turn,
+        phase: event.phase,
+        side: changedSide
+      });
     },
     onStateChangeError: (error, event) => {
       contextStoreErrors.push({ stage: event.stage || "state_change", step: event.step ?? null, error: error.message });
@@ -1304,25 +1554,25 @@ async function main() {
     tool_feedback_profile: TOOL_FEEDBACK_PROFILE,
     movement_phase_policy: "rule_complete",
     fixed_movement_action_limits: false,
-    phase_unit_plan_protocol: null,
-    rolling_unit_action_protocol: ["unit_plan_hybrid", "hierarchical_sae"].includes(decisionMode) ? "v1" : null,
+    phase_unit_plan_protocol: ["unit_plan_hybrid", "hierarchical_sae"].includes(decisionMode) ? "phase-unit-plan-v2" : null,
+    rolling_unit_action_protocol: ["unit_plan_hybrid", "hierarchical_sae"].includes(decisionMode) ? "v2" : null,
     hierarchical_strategy_protocol: taskManagement ? "side-aware-goal-v2" : decisionMode === "hierarchical_sae" ? "sae-v1" : null,
     objective_resolution_version: taskManagement ? "objective-resolution-v3-open-goal" : decisionMode === "hierarchical_sae" ? "objective-resolution-v2" : null,
     adaptive_replanning_version: taskManagement ? "adaptive-replanning-v2-goal-events" : decisionMode === "hierarchical_sae" ? "adaptive-replanning-v1" : null,
     goal_management: taskManagement ? "open_grounded" : "disabled",
     goal_protocol: taskManagement ? "side-aware-goal-v2" : null,
     task_management: taskManagement ? "multi_task" : "disabled",
-    task_protocol: taskManagement ? "side-aware-task-v2" : null,
+    task_protocol: taskManagement?.protocol || null,
     task_dependency_policy: taskManagement ? "hard_soft_conditional_v1" : null,
     task_switching: taskManagement ? "existing_tasks_only" : null,
-    task_progress_version: taskManagement ? "evidence-grounded-model-task-progress-v6" : null,
+    task_progress_version: comparison.contract.task_progress_version,
     task_action_feedback_version: taskManagement ? "post-action-feedback-v1" : null,
     task_checker_model_profile: taskCheckerProfile || null,
     task_checker_runtime: taskChecker ? publicRuntimeMetadata(taskCheckerRuntimes[externalSide] || taskCheckerRuntimes[externalSides[0]]) : null,
     task_checker_runtimes: Object.fromEntries(Object.entries(taskCheckerRuntimes).map(([side, checkerRuntime]) => [side, publicRuntimeMetadata(checkerRuntime)])),
     strategic_planner_protocol: taskManagement ? "side-aware-goal-v2" : decisionMode === "hierarchical_sae" ? "sae-v1" : null,
     force_allocator_protocol: decisionMode === "hierarchical_sae" ? "sae-v1" : null,
-    dispatch_protocol: decisionMode === "hierarchical_sae" ? "rolling-unit-action-v1" : null,
+    dispatch_protocol: decisionMode === "hierarchical_sae" ? "rolling-unit-action-v2" : null,
     movement_metrics_version: "movement-patterns-v2",
     prompt_registry_version: comparison.contract.prompt_registry_version,
     prompt_registry_hash: comparison.contract.prompt_registry_hash,
@@ -1373,11 +1623,12 @@ async function main() {
       toolProfile: toolProfile.id,
       timeoutMs: stepTimeoutMs,
       sessionId: `manual-${experimentId}-${side}`,
-      bridge: createRuleBridge(config, { toolProfile: toolProfile.id }),
+      bridge: createRuleBridge(config, { toolProfile: toolProfile.id, executionLedger: methodConfig.rolling_unit?.execution_ledger === true }),
       taskChecker: taskCheckers[side] || null,
       contextStore: contextStores[side] || contextStore,
       contextManifest: contextManifests[side] || contextManifest,
-      reasoningMemoryConfig: methodConfig.reasoning_memory || undefined
+      reasoningMemoryConfig: methodConfig.reasoning_memory || undefined,
+      unitPlanSettings: methodConfig.rolling_unit
     });
     const externalProviders = Object.fromEntries(
       externalSides.map((side) => [side, makeSingleActionProvider(config, runtimeBySide[side] || runtime, transcript, providerOptions(side))])
@@ -1395,6 +1646,11 @@ async function main() {
     transcript.partial = false;
     transcript.status = result.status;
     transcript.summary = replay.summary(result);
+    transcript.timing_totals = { ...(transcript.timing_totals || {}),
+      rules_ai_ms: (result.log || []).filter((item) => item.controller === "rules_ai").reduce((sum, item) => sum + Number(item.controller_elapsed_ms || 0), 0),
+      context_ms: transcript.model_steps.reduce((sum, step) => sum + Number(step.timing?.context_ms || 0) + Number(step.timing?.unit_plan_context_ms || 0), 0),
+      path_validation_ms: transcript.model_steps.reduce((sum, step) => sum + Number(step.timing?.path_validation_ms || 0), 0)
+    };
     const finalTaskSettlements = {};
     for (const [side, provider] of Object.entries(externalProviders)) {
       const finalTaskPlan = await provider.finalize({
@@ -1413,7 +1669,11 @@ async function main() {
           turn: replay.state.turn,
           phase: replay.state.phase,
           parent_state: finalTaskPlan.parent?.state || null,
-          child_statuses: Object.fromEntries((finalTaskPlan.children || []).map((task) => [task.id, task.status]))
+          goal_history: finalTaskPlan.goal_history || null,
+          archived_task_plans: finalTaskPlan.archived_task_plans || [],
+          task_execution_history: finalTaskPlan.task_execution_history || {},
+          child_statuses: Object.fromEntries((finalTaskPlan.children || []).map((task) => [task.id, task.status])),
+          children: finalTaskPlan.children || []
         };
       }
     }
@@ -1425,7 +1685,7 @@ async function main() {
     const taskObservations = transcript.model_steps
       .filter((step) => step.task_observation)
       .map((step) => step.task_observation);
-    const actionAttempts = transcript.model_steps.flatMap((step) => step.action_attempts || []);
+    const actionAttempts = transcript.model_steps.flatMap((step) => step.action_attempts || []).filter((item) => item.model_submitted !== false);
     const rollingMovement = summarizeRollingMovementPhases(transcript.model_steps);
     const movementPatterns = summarizeMovementPatterns(result.log || [], "external_model", transcript.model_steps);
     const taskSwitches = [...new Map(taskObservations
@@ -1435,9 +1695,33 @@ async function main() {
     const rollingMoveSteps = transcript.model_steps.filter((step) =>
       step.rolling_movement
       && ["move", "move_intent", "exit_west"].includes(step.rolling_unit_action?.selected_action?.type));
+    const phasePlanSnapshots = new Map();
+    for (const step of transcript.model_steps) {
+      if (!step.phase_unit_plan) continue;
+      phasePlanSnapshots.set(step.phase_unit_plan.plan_id || `${step.turn}:${step.phase}:${step.side}`, step.phase_unit_plan);
+    }
+    const executionLedgerSummary = summarizeExecutionLedger(transcript.model_steps);
+    if (executionLedgerSummary.phases) transcript.execution_ledger_summary = executionLedgerSummary;
+    const finalPhasePlans = executionLedgerSummary.phases ? executionLedgerSummary.plans : [...phasePlanSnapshots.values()];
+    const plannedUnitOrders = finalPhasePlans.reduce((sum, plan) => sum + (plan.unit_orders?.length || 0), 0);
+    const plannedMoveOrders = finalPhasePlans.reduce((sum, plan) => sum
+      + (plan.unit_orders || []).filter((order) => ["move", "exit_west"].includes(order.disposition)).length, 0);
+    const unitOrderExecutions = executionLedgerSummary.phases ? executionLedgerSummary.events : finalPhasePlans.flatMap((plan) => plan.executions || []);
+    const executedUnitOrders = unitOrderExecutions.filter((execution) => execution.status === "executed").length;
+    const heldUnitOrders = unitOrderExecutions.filter((execution) => execution.status === "held").length;
+    const repairedUnitOrders = unitOrderExecutions.filter((execution) => execution.execution_source === "model_repair" && execution.status === "executed").length;
+    const skippedUnitOrders = unitOrderExecutions.filter((execution) => execution.status === "skipped_after_repair").length;
+    const unitPlanRequests = finalPhasePlans.reduce((sum, plan) => sum + Number(plan.request_count || 0), 0);
+    const unitPlanRepairRequests = finalPhasePlans.reduce((sum, plan) => sum + Number(plan.repair_request_count || 0), 0);
+    const modelUnitPlanCoverage = finalPhasePlans
+      .map((plan) => Number(plan.model_unit_plan_coverage))
+      .filter(Number.isFinite);
     transcript.counts = {
-      external_actions: (result.log || []).filter((item) => item.source === "external_model").length,
-      rules_actions: (result.log || []).filter((item) => item.controller === "rules_ai").length,
+      accounting_protocol: "action-ledger-v2",
+      phase_transition_records: (result.log || []).filter((item) => typeof item.action !== "object"
+        && (item.from || item.to || item.advance_reason)).length,
+      external_actions: (result.log || []).filter((item) => item.source === "external_model" && typeof item.action === "object").length,
+      rules_actions: (result.log || []).filter((item) => item.controller === "rules_ai" && typeof item.action === "object").length,
       heuristic_actions: (result.log || []).filter((item) => item.controller === "heuristic_ai").length,
       controller_actions: (result.log || []).reduce((counts, item) => {
         if (item.controller) counts[item.controller] = (counts[item.controller] || 0) + 1;
@@ -1445,7 +1729,9 @@ async function main() {
       }, {}),
       illegal_actions: (result.log || []).filter((item) => item.result && item.result.legal === false).length,
       fallback_actions: transcript.model_steps.filter((item) => item.fallback_used).length,
-      network_fallback_actions: transcript.model_steps.filter((item) => item.fallback_reason_class === "transport_failure").length,
+      provider_error_fallback_actions: transcript.model_steps.filter((item) => item.provider_exception && item.fallback_used).length,
+      network_fallback_actions: transcript.model_steps.filter((item) => ["transport_failure", "connection_error", "network_error", "network_timeout", "dns_error", "rate_limit", "upstream_unavailable", "upstream_5xx", "server_error", "circuit_open"].includes(item.fallback_reason_class)).length,
+      protocol_fallback_actions: transcript.model_steps.filter((item) => ["model_protocol_failure", "protocol_failure"].includes(item.fallback_reason_class)).length,
       transport_failures: transcript.model_steps.reduce((sum, step) => sum + (step.transport_failures?.length || 0), 0),
       recovered_transport_failures: transcript.model_steps.reduce((sum, step) => sum + (step.recovered_transport_failures?.length || 0), 0),
       protocol_failures: transcript.model_steps.reduce((sum, step) => sum + (step.protocol_failures?.length || 0), 0),
@@ -1454,7 +1740,7 @@ async function main() {
         + transcript.model_steps.reduce((sum, step) => sum + step.rounds.reduce((roundSum, round) => roundSum + Math.max(0, (round.attempts?.length || 1) - 1), 0), 0),
       model_tool_calls: transcript.model_steps.reduce((sum, step) => sum + step.rounds.filter((round) => round.tool_result).length, 0),
       sae_plan_calls: transcript.model_steps.reduce((sum, step) => sum + (step.sae_plan && !step.sae_plan.reused ? 2 : 0), 0),
-      sae_plan_fallbacks: transcript.model_steps.reduce((sum, step) => sum + (step.sae_plan && !step.sae_plan.reused ? Number(step.sae_plan.strategic_fallback) + Number(step.sae_plan.allocation_fallback) : 0), 0),
+      sae_plan_fallbacks: transcript.model_steps.reduce((sum, step) => sum + (step.sae_plan && (!step.sae_plan.reused || step.sae_plan.planning_attempted === true) ? Number(step.sae_plan.strategic_fallback) + Number(step.sae_plan.allocation_fallback) : 0), 0),
       sae_replans: transcript.model_steps.filter((step) => step.sae_plan?.replanned && !step.sae_plan.reused).length,
       replan_reasons: transcript.model_steps.reduce((counts, step) => {
         const reason = step.sae_plan?.reused ? "" : step.sae_plan?.replan_reason;
@@ -1464,8 +1750,17 @@ async function main() {
       route_failure_attempts: transcript.model_steps.reduce((sum, step) => sum + step.action_attempts.filter((item) => /no legal path found/.test(item.reason || "")).length, 0),
       alternative_route_feedback: transcript.model_steps.reduce((sum, step) => sum + step.action_attempts.filter((item) => item.alternatives?.length).length, 0),
       map_tool_calls: transcript.model_steps.reduce((sum, step) => sum + step.rounds.filter((round) => round.tool_result?.tool === "view_map").length, 0),
-      act_calls: transcript.model_steps.reduce((sum, step) => sum + step.action_attempts.length, 0),
-      accepted_actions: transcript.model_steps.filter((step) => !step.fallback_used && !step.local_fast_pass).length,
+      // action_attempts contains plan-derived and repair-derived proposals as
+      // well as direct act tool calls. Keep the protocol counts separate.
+      act_calls: transcript.model_steps.reduce((sum, step) => sum + step.rounds.filter((round) => round.tool_result?.tool === "act").length, 0),
+      model_submitted_actions: actionAttempts.length,
+      model_accepted_actions: actionAttempts.filter((item) => item.accepted).length,
+      model_rejected_actions: actionAttempts.filter((item) => !item.accepted).length,
+      local_fallback_actions: transcript.model_steps.filter((item) => item.fallback_used).length,
+      phase_end_actions: transcript.model_steps.filter((item) => item.final_action_source === "system_phase_end").length,
+      local_execution_calls: transcript.model_steps.reduce((sum, step) => sum + Number(step.provider_result?.local_execution_calls || 0), 0),
+      accepted_actions: (result.log || []).filter((item) => item.source === "external_model"
+        && typeof item.action === "object" && item.result?.legal === true).length,
       invalid_action_attempts: actionAttempts.filter((item) => !item.accepted).length,
       rule_invalid_action_attempts: actionAttempts.filter((item) => item.rejection_class === "rule_engine_rejection").length,
       transcript_probe_rejections: actionAttempts.filter((item) => item.rejection_class === "transcript_probe_rejection").length,
@@ -1483,11 +1778,18 @@ async function main() {
       acted_units: rollingMovement.acted,
       held_units: rollingMovement.held,
       unavailable_units: rollingMovement.unavailable,
-      omitted_units: 0,
-      repaired_orders: 0,
-      skipped_orders: 0,
-      planned_actions_executed: rollingMoveSteps.length,
-      planned_move_orders: rollingMoveSteps.length,
+      omitted_units: finalPhasePlans.reduce((sum, plan) => sum + (plan.omitted_units?.length || 0), 0),
+      repaired_orders: repairedUnitOrders,
+      skipped_orders: skippedUnitOrders,
+      planned_unit_orders: plannedUnitOrders,
+      executed_unit_orders: executedUnitOrders,
+      held_unit_orders: heldUnitOrders,
+      planned_actions_executed: executedUnitOrders,
+      planned_move_orders: plannedMoveOrders,
+      unit_plan_requests: unitPlanRequests,
+      unit_plan_repair_requests: unitPlanRepairRequests,
+      average_model_unit_plan_coverage: modelUnitPlanCoverage.length
+        ? modelUnitPlanCoverage.reduce((sum, value) => sum + value, 0) / modelUnitPlanCoverage.length : null,
       rolling_actions: transcript.model_steps.filter((step) => step.rolling_movement && step.rolling_unit_action?.selected_action?.type !== "pass").length,
       movement_phase_completion_rate: rollingMovement.completion_rate,
       immediate_reversals: movementPatterns.immediate_reversals,
@@ -1505,7 +1807,9 @@ async function main() {
       task_switch_requests: taskChecks.filter((check) => check.task_control === "switch" || check.switch_to).length,
       task_trigger_events: taskObservations.reduce((sum, item) => sum + (item.events?.length || 0), 0),
       task_blocked_events: taskObservations.filter((item) => item.events?.includes("route_blocked") || item.check?.result?.task_status === "blocked").length,
-      task_completed_events: taskObservations.filter((item) => item.events?.includes("task_completed") || (item.check?.result?.task_status === "completed" && !item.check.result.abstain) || item.progress?.parent_completed).length,
+      task_completed_events: taskObservations.filter((item) => item.events?.includes("task_completed")
+        || (item.check?.applied_task_transition?.status_after === "completed" && item.check.applied_task_transition.status_before !== "completed")
+        || item.progress?.parent_completed).length,
       task_progress_observations: taskObservations.filter((item) => item.progress?.changed).length,
       task_action_feedback_records: taskObservations.filter((item) => item.action_feedback?.accepted).length,
       action_effect_records: transcript.model_steps.filter((step) => step.action_effect).length,
@@ -1514,9 +1818,12 @@ async function main() {
         || (step.action_effect?.combat_opportunities_gained || []).length
         || (step.action_effect?.applied_result?.eliminated || []).length
       )).length,
-      tactical_opportunities_seen: transcript.model_steps.reduce((sum, step) => sum + (step.tactical_summary?.tactical_opportunities?.length || 0), 0),
-      tactical_opportunities_selected: transcript.model_steps.filter((step) => step.action_effect?.combat_opportunities_gained?.length || step.task_observation?.events?.includes("combat_target_threat_reduced")).length,
-      allocation_corrections: transcript.model_steps.reduce((sum, step) => sum + (step.force_allocation?.allocation_corrections?.length || 0), 0),
+      tactical_opportunities_discovered: transcript.opportunity_ledger?.discovery ?? null,
+      tactical_opportunities_seen: transcript.opportunity_ledger?.model_seen ?? null,
+      tactical_opportunities_selected: transcript.opportunity_ledger?.model_selected ?? null,
+      tactical_opportunities_executed: transcript.opportunity_ledger?.executed ?? null,
+      tactical_opportunities_effective: transcript.opportunity_ledger?.verified_effects ?? null,
+      allocation_corrections: allocationCorrectionMetrics(transcript.model_steps).corrections,
       next_intent_records: transcript.model_steps.filter((step) => step.next_intent).length,
       task_progress_rate: taskObservations.length
         ? Number((taskObservations.filter((item) => item.progress?.changed).length / taskObservations.length).toFixed(3)) : 0,
@@ -1547,14 +1854,14 @@ async function main() {
       transcript.sae_plan_fallbacks = transcript.counts.sae_plan_fallbacks;
     }
     transcript.game_log = result.log;
-    for (const store of Object.values(contextStores)) {
+    for (const [side, store] of Object.entries(contextStores)) {
       store.snapshot({
         stage: "final",
         step: result.steps,
         state: replay.state,
         turn: replay.state.turn,
         phase: replay.state.phase,
-        side: replay.state.active_side
+        side
       });
       store.updateMemory({
         recent_strategic_events: [{
@@ -1587,8 +1894,8 @@ async function main() {
   }
   finally {
     if (typeof replay !== "undefined" && replay?.state) {
-      for (const store of Object.values(contextStores)) {
-        store.snapshot({ stage: "shutdown", step: transcript.model_steps.length, state: replay.state });
+      for (const [side, store] of Object.entries(contextStores)) {
+        store.snapshot({ stage: "shutdown", step: transcript.model_steps.length, state: replay.state, side });
       }
     }
     for (const sideRuntime of new Set(Object.values(runtimeBySide))) await closeModelRuntime(sideRuntime);

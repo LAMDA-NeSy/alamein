@@ -2,12 +2,16 @@
 
 const RulesEngine = require("../../rule_engine.js");
 const { buildContext, publicPayload, phaseKind } = require("../experiments/external_ai_transcript.js");
-const { resolveSidePrompt } = require("./prompt_registry.js");
-const { createTaskManager, phaseDispatchTasks } = require("./task_manager.js");
+const { resolveSidePrompt, promptValue } = require("./prompt_registry.js");
+const { capabilityReferenceErrors } = require("./opportunity_ledger.js");
+const { createTaskManager, phaseDispatchTasks, groundedGoalCompleted } = require("./task_manager.js");
+const { createGoalRevisionLedger } = require("./goal_revision_ledger.js");
 const { goalIntent, groundGoalPlan, localGoalPlan } = require("./goal_manager.js");
 const { thinkingRequest } = require("./model_runtime.js");
 const { CONTEXT_PROFILE_ID, compactAgentPayload, contextBytes } = require("./agent_context.js");
+const { scenarioPolicy } = require("./scenario_policy.js");
 const crypto = require("node:crypto");
+const { parseModelObject } = require("./model_json.js");
 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
 
@@ -34,9 +38,11 @@ function battlefieldFingerprint(input, built = null, options = {}) {
       id,
       ...(options.includeEnemyPositions === false ? {} : { hex: unit.hex || "" }),
       eliminated: !!unit.eliminated,
-      state: unit.state || "",
-      status: unit.status || "",
-      supply: unit.supply_state || unit.supply || ""
+      ...(options.includeRoutineUnitState === false ? {} : {
+        state: unit.state || "",
+        status: unit.status || "",
+        supply: unit.supply_state || unit.supply || ""
+      })
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
   const control = options.includeControl === false
@@ -112,20 +118,7 @@ function parseJsonText(text) {
 }
 
 function parseJson(result, label) {
-  const message = result?.response_json?.choices?.[0]?.message || {};
-  const content = typeof message.content === "string" ? message.content.trim() : "";
-  const reasoning = typeof message.reasoning_content === "string" ? message.reasoning_content.trim() : "";
-  if (content) {
-    const parsed = parseJsonText(content);
-    if (parsed) return { ...parsed, response_source: "content" };
-    if (!reasoning) return { error: `${label} invalid JSON in content` };
-  }
-  if (reasoning) {
-    const parsed = parseJsonText(reasoning);
-    if (parsed) return { ...parsed, response_source: "reasoning_content" };
-    return { error: `${label} invalid JSON in reasoning_content` };
-  }
-  return { error: `${label} returned empty JSON` };
+  return parseModelObject(result, () => true, label);
 }
 
 function parsePlanningResponse(result, expectedType, label) {
@@ -220,7 +213,11 @@ function legalMoveDirections(ctx, id, limit = 8) {
   const unit = ctx?.state?.units?.[id];
   if (!ctx || !unit?.hex || !RulesEngine.reachableHexes) return [];
   try {
-    const reachable = RulesEngine.reachableHexes(ctx, id, { mode: "normal", maxHexes: 80 });
+    const reachable = new Map(RulesEngine.neighbors(unit.hex).map((hex) => {
+      const path = [unit.hex, hex];
+      const verdict = RulesEngine.checkMove(ctx, id, path, { mode: "normal" });
+      return [hex, verdict.legal ? { path, cost: verdict.spent ?? verdict.details?.spent ?? 1 } : null];
+    }).filter(([, route]) => route));
     return [...reachable.entries()]
       .filter(([hex, item]) => hex !== unit.hex && item?.path?.length > 1)
       .sort((left, right) => (left[1].cost || 99) - (right[1].cost || 99) || left[0].localeCompare(right[0]))
@@ -245,7 +242,80 @@ function legalMoveDirections(ctx, id, limit = 8) {
   }
 }
 
-function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocation = {}, feedback = {}) {
+function taskRouteEvidence(ctx, tasks, phase, budgetMs = 2000, deadline = null) {
+  if (!ctx?.state || !ctx?.rules || !ctx?.terrain) return [];
+  const started = Date.now();
+  const limit = Math.max(1, Math.min(2000, Number(budgetMs) || 2000));
+  const expired = () => Date.now() - started >= limit
+    || (deadline != null && remainingDeadlineMs(deadline) <= 0);
+  const routes = [];
+  const cache = ctx.task_route_evidence_cache ||= new Map();
+  const boardKey = crypto.createHash("sha256").update(JSON.stringify({ state: ctx.state, rules: ctx.rules, terrain: ctx.terrain })).digest("hex");
+  if (ctx.task_route_evidence_board_key !== boardKey) {
+    cache.clear();
+    ctx.task_route_evidence_board_key = boardKey;
+  }
+  const stateKey = (unitId, target) => JSON.stringify({
+    phase, unit: unitId, target,
+    unit_state: ctx.state.units?.[unitId],
+    active_side: ctx.state.active_side,
+    turn: ctx.state.turn,
+    scenario: ctx.state.scenario
+  });
+  const findBoundedPath = (unitId, target) => {
+    const unit = ctx.state.units?.[unitId];
+    if (!unit?.hex) return { status: "unknown", reason: "unit_not_on_map" };
+    let destination;
+    try { destination = RulesEngine.normalizeHex(target); }
+    catch { return { status: "unknown", reason: "invalid_target_hex" }; }
+    const start = RulesEngine.normalizeHex(unit.hex);
+    if (start === destination) return { status: "locally_reachable_now", path: [start], movement_cost: 0 };
+    const queue = [{ hex: start, path: [start], cost: 0 }];
+    const best = new Map([[start, 0]]);
+    while (queue.length) {
+      if (expired()) return { status: "unknown", reason: "route_search_budget_exhausted", searched_hexes: best.size };
+      queue.sort((left, right) => left.cost - right.cost);
+      const current = queue.shift();
+      for (const next of RulesEngine.neighbors(current.hex)) {
+        if (expired()) return { status: "unknown", reason: "route_search_budget_exhausted", searched_hexes: best.size };
+        const path = [...current.path, next];
+        let verdict;
+        try { verdict = RulesEngine.checkMove(ctx, unitId, path, { mode: "normal" }); }
+        catch (error) { return { status: "unknown", reason: String(error.message || error) }; }
+        if (!verdict?.legal) continue;
+        const cost = Number(verdict.details?.spent ?? verdict.spent);
+        if (!Number.isFinite(cost) || (best.has(next) && best.get(next) <= cost)) continue;
+        best.set(next, cost);
+        if (next === destination) return { status: "locally_reachable_now", path, movement_cost: cost, searched_hexes: best.size };
+        queue.push({ hex: next, path, cost });
+      }
+    }
+    return { status: "not_found_in_current_state", path: [], movement_cost: null, searched_hexes: best.size };
+  };
+  for (const task of tasks || []) {
+    const target = task.target_hex || "";
+    if (!target) continue;
+    for (const unitId of (task.assigned_units || []).slice(0, 12)) {
+      const key = stateKey(unitId, target);
+      const cached = cache.get(key);
+      if (cached) { routes.push({ ...cached, task_id: task.id, phase }); continue; }
+      if (expired()) {
+        routes.push({ task_id: task.id, unit: unitId, phase, target_hex: target, status: "unknown", reason: "route_search_budget_exhausted" });
+        continue;
+      }
+      const result = findBoundedPath(unitId, target);
+      const route = {
+        task_id: task.id, unit: unitId, phase, target_hex: target, ...result,
+        assumptions: ["current board state", "no future enemy movement", "future phase eligibility is not guaranteed"]
+      };
+      if (route.status !== "unknown") cache.set(key, { ...route, task_id: undefined, phase: undefined });
+      routes.push(route);
+    }
+  }
+  return routes;
+}
+
+function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocation = {}, feedback = {}, routeConfig = {}) {
   const state = input.state || built.ctx?.state || {};
   const side = input.side || state.active_side || "axis";
   const enemySide = side === "axis" ? "allies" : "axis";
@@ -253,9 +323,16 @@ function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocatio
   const phaseStatus = feedback.phaseStatus || {};
   const unitFacts = buildPhaseUnitFacts({ ...input, phase }, built, phaseStatus);
   const victory = built.publicContext?.victory || {};
-  const scoring = victory.current_scoring?.july_advance || {};
+  const scoring = victory.current_scoring || {};
+  const scenario = String(state.scenario || "july");
+  const julyScoring = scoring.july_advance || {};
+  const scenarioScoring = scenario === "september"
+    ? (scoring.september_mine_clearance || {})
+    : scenario === "october"
+      ? (scoring.october_withdrawal || {})
+      : julyScoring;
   const currentVp = Number(victory.current_vp ?? state.victory_points ?? state.vp ?? 0);
-  const baselineVp = Number(feedback.baselineVp ?? taskPlan?.parent?.started_vp ?? currentVp);
+  const baselineVp = Number(feedback.baselineVp ?? RulesEngine.scenarioStartingVp(scenario, 0));
   const activeTasks = (taskPlan?.children || [])
     .filter((task) => task.status === "active")
     .sort((left, right) => Number(left.priority || 99) - Number(right.priority || 99))
@@ -268,17 +345,27 @@ function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocatio
     status: task.status,
     progress: Number(task.progress || 0),
     progress_metric: task.progress_metric || "evidence",
+    completion_criteria: task.completion_criteria || null,
+    completion_evidence: task.completion_evidence || null,
     assigned_units: (task.assigned_units || []).slice(0, 12),
     applicable_phases: task.phase_scope || [],
     next_action: task.next_action || ""
   }));
+  const routeFeasibility = taskRouteEvidence(
+    built.ctx,
+    activeTasks,
+    phaseKind(phase),
+    Math.max(1, Number(routeConfig.budget_ms || 2000)),
+    feedback.deadline
+  );
   let supplyStates = {};
   try {
     if (built.ctx?.rules && built.ctx?.terrain) supplyStates = RulesEngine.checkSupply(built.ctx, side) || {};
   }
   catch {}
   const supplyBottlenecks = unitFacts.facts
-    .filter((unit) => unit.kind !== "supply" && !scoringEligibleSupply(supplyStates[unit.id] || unit.supply))
+    .filter((unit) => RulesEngine.isCombatUnit({ id: unit.id, ...state.units?.[unit.id] })
+      && !scoringEligibleSupply(supplyStates[unit.id] || unit.supply))
     .map((unit) => ({ unit: unit.id, hex: unit.hex, supply: supplyStates[unit.id] || unit.supply, reason: "not scoring-eligible" }))
     .slice(0, 12);
   const enemyThreats = [];
@@ -286,7 +373,7 @@ function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocatio
     .filter(([, unit]) => unit.side === enemySide && !unit.eliminated && unit.hex && RulesEngine.isCombatUnit(unit));
   for (const [id, unit] of enemyUnits) {
     const closest = unitFacts.facts
-      .filter((candidate) => candidate.kind !== "supply" && candidate.hex)
+      .filter((candidate) => candidate.hex && RulesEngine.isCombatUnit({ id: candidate.id, ...state.units?.[candidate.id] }))
       .map((candidate) => {
         try { return { candidate, distance: RulesEngine.hexDistance(candidate.hex, unit.hex) }; }
         catch { return { candidate, distance: 99 }; }
@@ -304,7 +391,7 @@ function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocatio
     });
   }
   enemyThreats.sort((left, right) => left.distance_to_friendly - right.distance_to_friendly || right.column - left.column);
-  const dispatch = taskPlan ? phaseDispatchTasks(taskPlan, { ...input, ctx: built.ctx }) : null;
+  const dispatch = feedback.phaseDispatch || (taskPlan ? phaseDispatchTasks(taskPlan, { ...input, ctx: built.ctx }) : null);
   const opportunities = {
     ...(taskPlan?.tactical_opportunities || {}),
     ...(dispatch?.tactical_opportunities || {}),
@@ -323,10 +410,31 @@ function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocatio
       defense: unit.defense,
       movement: unit.movement,
       supply: supplyStates[unit.id] || unit.supply,
+      legal_move_options_scope: "adjacent_hexes_only; full routes in unit planning and act",
       legal_move_options: legalMoveDirections(built.ctx, unit.id, 6)
     }));
-  const currentColumn = Number(scoring.farthest_scoring_column ?? scoring.current_column ?? 34);
-  const nextColumn = Number(scoring.next_scoring_column ?? Math.max(35, currentColumn + 1));
+  const nextScoringChange = scenario === "july"
+    ? {
+        current_scoring_column: Number(julyScoring.farthest_scoring_column ?? 34),
+        next_scoring_column: Number(julyScoring.next_scoring_column ?? 35),
+        vp_gain: Number(julyScoring.vp_gain_for_reaching_next_column ?? 3),
+        scoring_requirement: julyScoring.scoring_requirement || "surviving supplied or partially supplied Axis ground combat unit"
+      }
+    : scenario === "september"
+      ? {
+          current_scoring_column: null,
+          next_scoring_column: null,
+          vp_gain: Number(scenarioScoring.vp_per_mine ?? 3),
+          scoring_requirement: scenarioScoring.next_scoring_change || "clear an Allied minefield hex"
+        }
+      : {
+          current_scoring_column: null,
+          next_scoring_column: null,
+          vp_gain: null,
+          scoring_requirement: scenario === "october"
+            ? scenarioScoring.next_scoring_change || "legally exit Axis units through the west edge"
+            : "consult the authoritative scenario scoring rules"
+        };
   const mustProcess = phaseStatus.mandatory_actions || unitFacts.facts.filter((unit) => unit.remaining).map((unit) => unit.id);
   const canHold = unitFacts.facts.filter((unit) => unit.phase_eligible && !unit.acted && !unit.held).map((unit) => unit.id);
   const shouldNotAct = unitFacts.facts.filter((unit) => unit.should_not_act).map((unit) => unit.id);
@@ -341,13 +449,9 @@ function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocatio
     current_vp: currentVp,
     baseline_vp: baselineVp,
     vp_delta_from_baseline: currentVp - baselineVp,
-    next_scoring_change: {
-      current_scoring_column: currentColumn,
-      next_scoring_column: nextColumn,
-      vp_gain: Number(scoring.vp_gain_for_reaching_next_column ?? scoring.vp_gain ?? 3),
-      scoring_requirement: scoring.scoring_requirement || "scenario-specific authoritative scoring rule"
-    },
+    next_scoring_change: nextScoringChange,
     active_tasks: taskUnits,
+    route_feasibility: routeFeasibility,
     task_units: taskUnits.flatMap((task) => task.assigned_units.map((unit) => ({ unit, task_id: task.task_id, task_class: task.task_class }))),
     key_units: keyUnits,
     supply_bottlenecks: supplyBottlenecks,
@@ -427,6 +531,14 @@ function deriveActionEffect(beforeState, afterState, stepRecord = {}, options = 
   const acceptedAttempt = [...(stepRecord.action_attempts || [])].reverse().find((item) => item.accepted);
   const impact = acceptedAttempt?.assessment?.evaluation?.victory_impact || {};
   const result = stepRecord.action_applied?.result || null;
+  let actualVpDelta = options.executionLedger ? null : 0;
+  try {
+    if (beforeCtx && afterCtx) {
+      actualVpDelta = Number(RulesEngine.calculateVictoryPoints(afterCtx).victory_points || 0)
+        - Number(RulesEngine.calculateVictoryPoints(beforeCtx).victory_points || 0);
+    }
+  }
+  catch {}
   return {
     protocol: "sae-action-effect-v1",
     accepted: !!accepted,
@@ -435,7 +547,17 @@ function deriveActionEffect(beforeState, afterState, stepRecord = {}, options = 
     units: unitDetails,
     combat_opportunities_gained: gained.slice(0, 12),
     combat_opportunities_lost: lost.slice(0, 12),
-    self_vp_delta: Number(impact.self_vp_delta || 0),
+    // This record is written after execution. Never fall back to a proposal
+    // estimate when the before/after rule states are unavailable.
+    self_vp_delta: actualVpDelta == null ? null : (options.side === "allies" ? -actualVpDelta : actualVpDelta),
+    actual_vp_delta: actualVpDelta,
+    // A per-action effect is not the final-game result. The terminal
+    // transcript owns actual_final_vp_delta.
+    actual_final_vp_delta: null,
+    proposal_estimates: {
+      projected_vp_delta_from_current_state: impact.projected_vp_delta_from_current_state ?? impact.estimated_vp_delta ?? null,
+      axis_scoring_threat_delta: impact.axis_scoring_threat_delta ?? null
+    },
     opponent_vp_delta: Number(impact.opponent_vp_delta || 0),
     axis_scoring_threat_delta: Number(impact.axis_scoring_threat_delta || 0),
     supply_risk_delta: Number(impact.supply_risk_delta || 0),
@@ -445,11 +567,13 @@ function deriveActionEffect(beforeState, afterState, stepRecord = {}, options = 
       outcome: result.outcome || result.details?.outcome || "",
       eliminated: (result.details?.effects?.eliminated || []).slice(0, 12),
       retreated: (result.details?.effects?.retreated?.retreated || []).slice(0, 12)
-    } : null
+    } : null,
+    mine_clearance: result?.mine_clearance || result?.details?.mine_clearance || null
   };
 }
 
 function localAllocation(state, side, intent) {
+  const policy = scenarioPolicy({ ...state, active_side: side });
   const units = eligibleUnits(state, side);
   const combat = units.filter((unit) => unit.kind === "ground")
     .sort((a, b) => b.attack + b.defense - a.attack - a.defense || a.id.localeCompare(b.id));
@@ -458,10 +582,10 @@ function localAllocation(state, side, intent) {
     .sort((a, b) => Number(b.movement || 0) - Number(a.movement || 0) || a.id.localeCompare(b.id));
   return {
     type: "force_allocation",
-    operation: intent.operation || intent.type || "advance",
-    spearhead: combat.slice(0, 2).map((unit) => ({ unit: unit.id, task: "advance toward the scoring objective" })),
-    support: combat.slice(2, 5).map((unit) => ({ unit: unit.id, task: "support the spearhead and protect the corridor" })),
-    supply: supply.slice(0, 2).map((unit) => ({ unit: unit.id, task: "maintain supply to the spearhead" })),
+    operation: intent.operation || intent.type || policy.primary_metric,
+    spearhead: combat.slice(0, 2).map((unit) => ({ unit: unit.id, task: policy.phase_focus })),
+    support: combat.slice(2, 5).map((unit) => ({ unit: unit.id, task: policy.action_priorities[1] || policy.phase_focus })),
+    supply: supply.slice(0, 2).map((unit) => ({ unit: unit.id, task: policy.supply_meaning })),
     reserve: combat.slice(5, 7).map((unit) => unit.id),
     source: "local_fallback"
   };
@@ -471,12 +595,24 @@ function normalizeIntent(raw, state) {
   const value = raw?.strategic_intent
     || (raw?.intent && typeof raw.intent === "object" ? { ...raw, ...raw.intent } : raw)
     || {};
-  const operation = String(value.operation || value.operation_id || "advance").slice(0, 80);
+  const policy = scenarioPolicy(state);
+  const defaultIntent = state.scenario === "september"
+    ? (state.active_side === "axis" ? "clear_mines" : "protect_mines")
+    : state.scenario === "october"
+      ? (state.active_side === "axis" ? "prepare_withdrawal" : "block_withdrawal")
+      : state.active_side === "allies" ? "deny_frontier" : "advance";
+  const operation = String(value.operation || value.operation_id || defaultIntent).slice(0, 80);
   const targetColumn = Number(value.target_column || value.targetColumn || 0);
+  const allowedIntentTypes = new Set([
+    "advance", "pressure", "consolidate", "supply", "attack_pressure", "protect_supply", "pass",
+    ...(state.scenario === "september" ? ["clear_mines", "engineer_route", "protect_engineers", "protect_mines", "block_engineers", "protect_clearance_supply"] : []),
+    ...(state.scenario === "october" ? ["prepare_withdrawal", "withdraw", "protect_withdrawal", "block_withdrawal", "disrupt_supply"] : []),
+    ...(state.scenario === "july" && state.active_side === "allies" ? ["deny_frontier"] : [])
+  ]);
   return {
     type: "phase_intent",
     intent: {
-      type: ["advance", "pressure", "consolidate", "supply", "attack_pressure", "protect_supply", "pass"].includes(value.intent_type || value.type)
+      type: allowedIntentTypes.has(value.intent_type || value.type)
         ? (value.intent_type || value.type) : "advance",
       sector: ["north", "central", "south"].includes(value.sector) ? value.sector : "",
       target_hex: String(value.target_hex || value.targetHex || ""),
@@ -484,12 +620,12 @@ function normalizeIntent(raw, state) {
     },
     operation,
     target_column: Number.isFinite(targetColumn) && targetColumn > 0 ? targetColumn : null,
-    objective_type: String(value.objective_type || "scoring_frontier").slice(0, 60),
+    objective_type: String(value.objective_type || policy.primary_metric).slice(0, 60),
     required_support: Array.isArray(value.required_support) ? value.required_support.slice(0, 4).map(String) : [],
     priorities: Array.isArray(value.priority) ? value.priority.slice(0, 6).map(String) : [],
-    abort_condition: String(value.abort_condition || "abort if the operation cannot preserve supply").slice(0, 180),
-    success_condition: String(value.success_condition || "improve the active scoring objective while preserving supply").slice(0, 180),
-    fallback_condition: String(value.fallback_condition || "replan toward consolidation or supply if the primary route is infeasible").slice(0, 180),
+    abort_condition: String(value.abort_condition || `abort if the ${policy.primary_metric} plan cannot preserve supply`).slice(0, 180),
+    success_condition: String(value.success_condition || `${policy.phase_focus} while preserving supply`).slice(0, 180),
+    fallback_condition: String(value.fallback_condition || "replan toward a legal alternative, consolidation, or supply if the primary route is infeasible").slice(0, 180),
     source: "model"
   };
 }
@@ -601,7 +737,7 @@ function normalizeAllocation(raw, state, side, intent) {
   return allocation;
 }
 
-function operationState(intent, allocation, input, built, taskPlan = null, feedback = {}) {
+function operationState(intent, allocation, input, built, taskPlan = null, feedback = {}, routeConfig = {}) {
   const allAssigned = [
     ...allocation.spearhead,
     ...allocation.support,
@@ -630,8 +766,9 @@ function operationState(intent, allocation, input, built, taskPlan = null, feedb
     || null;
   const tacticalSummary = buildTacticalSummary(input, built, taskPlan, allocation, {
     ...feedback,
-    phaseStatus: feedback.phaseStatus || {}
-  });
+    phaseStatus: feedback.phaseStatus || {},
+    phaseDispatch
+  }, feedback.route_config || routeConfig);
   return {
     version: taskPlan ? "sae-operation-v2+side-aware-goal-v2" : "sae-operation-v1",
     operation: intent.operation,
@@ -680,25 +817,34 @@ function operationState(intent, allocation, input, built, taskPlan = null, feedb
       frontier_breakthrough: phaseDispatch?.frontier_breakthrough || null,
       avoid: [
         "Do not use a unit assigned to an inactive task unless the current task is impossible.",
-        "Do not accept a move that breaks scoring-eligible supply.",
+        `Evaluate supply changes against the ${input.state?.scenario || "current"} objective; report affected units and tradeoffs.`,
         input.side === "allies"
           ? "Do not pass over a locally verified 3:1 counterattack against a supplied Axis frontier threat without rechecking it."
           : "Do not repeat a combat below 2:1 without a concrete emergency or VP justification."
       ]
     } : null,
     warnings: [
-      "Do not advance a spearhead if projected end-turn supply becomes unsupplied.",
+      input.state?.scenario === "july"
+        ? "An unsupplied spearhead cannot establish a scoring frontier; evaluate projected end-turn supply."
+        : "Supply coverage changes are tactical risks, not universal action prohibitions; compare route and scenario gains.",
       "The dynamic frontier_breakthrough plan is evidence and sequencing guidance, not a fixed target or mandatory attack combination."
     ],
     source: "sae_runtime"
   };
 }
 
-function createSaeRuntime({ config, runtime, client, taskChecker = null, decisionPolicy = "hierarchical_sae", reasoningMemory = null }) {
+function createSaeRuntime({ config, runtime, client, taskChecker = null, decisionPolicy = "hierarchical_sae", reasoningMemory = null, availableTools = [] }) {
   const cache = new Map();
   const replanReasons = new Map();
+  const executionLedger = config.task_management_options?.execution_ledger === true;
+  const goalHistory = createGoalRevisionLedger((plan, input, goal) => ({
+    ...groundedGoalCompleted(plan, input, goal),
+    campaign_evaluation: goal.campaign_goal ? groundedGoalCompleted(plan, input, goal.campaign_goal) : null
+  }));
   const taskManager = config.task_management === "multi_task"
     ? createTaskManager({
+      executionLedger,
+      taskProtocol: config.task_management_options?.protocol || config.task_management_options?.task_protocol || "",
       taskGeneration: config.task_management_options?.task_generation || "fixed_skeleton",
       maxChildTasks: Number(config.task_management_options?.max_child_tasks || 6),
       maxActiveChildTasks: Number(config.task_management_options?.max_active_child_tasks || 3),
@@ -713,10 +859,13 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     : null;
   const openGoalEnabled = !!taskManager && config.task_management_options?.goal_management === "open_grounded";
   let lastPlan = null;
+  let failedReplanPhase = null;
+  let failedReplanReason = null;
   let pendingTaskCheck = null;
   let lastBuiltContext = null;
   let lastBuiltInput = null;
   let lastActionEffect = null;
+  let recentCombatResults = [];
   let lastTaskProgressDelta = {};
   function runtimeInput(input = {}) {
     if (!config.performance || typeof config.performance !== "object") return input;
@@ -765,19 +914,32 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       checked.consistency_warning = "checker reported preserved supply while local rule evaluation reported supply_worsened";
       return;
     }
-    pending.stepRecord.task_observation.plan = taskManager.applyCheck(checked.result)
-      || pending.stepRecord.task_observation.plan;
+    const beforeStatus = taskManager.plan?.children?.find((task) => task.id === checked.result?.task_id)?.status;
+    const checkedPlan = taskManager.applyCheck(checked.result);
+    pending.stepRecord.task_observation.plan = checkedPlan || pending.stepRecord.task_observation.plan;
+    checked.applied_task_transition = {
+      task_id: checked.result?.task_id,
+      status_before: beforeStatus,
+      status_after: checkedPlan?.children?.find((task) => task.id === checked.result?.task_id)?.status
+    };
   }
   async function plan(input, options = {}) {
     input = runtimeInput(input);
     const deadline = options.deadline == null ? null : Number(options.deadline);
     await runPendingTaskCheck(input, deadline);
+    if (taskManager?.plan) {
+      const refreshedContext = buildContext(config, { state: input.state, decisionMode: "hierarchical_sae",
+        includeInitialMap: false, privateCandidates: false });
+      rememberBuiltContext(input, refreshedContext);
+      taskManager.refresh({ ...input, ctx: refreshedContext.ctx });
+    }
     const key = phaseKey(input);
     const cached = cache.get(key);
     // Multi-task plans should survive ordinary enemy movement. Rebuild only
     // when material facts change; the execution context still contains the
     // latest enemy coordinates for tactical decisions.
     const currentFingerprint = battlefieldFingerprint(input, null, {
+      includeRoutineUnitState: !executionLedger,
       includeEnemyPositions: !taskManager,
       includeControl: !taskManager,
       includeVp: !taskManager
@@ -785,14 +947,15 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     const taskReplanReason = taskManager?.needsReplan() ? taskManager.consumeReplanReason() : "";
     const fingerprintChanged = (!!cached?.battlefield_fingerprint && cached.battlefield_fingerprint !== currentFingerprint)
       || (!!lastPlan?.battlefield_fingerprint && lastPlan.battlefield_fingerprint !== currentFingerprint);
-    const replanReason = replanReasons.get(key) || taskReplanReason || (fingerprintChanged ? "enemy_state_changed" : "");
+    const replanReason = failedReplanPhase === `${input.turn}:${input.phase}` ? ""
+      : replanReasons.get(key) || taskReplanReason || failedReplanReason || (fingerprintChanged ? "enemy_state_changed" : "");
     reasoningMemory?.begin(input, { replanned: !!replanReason, reason: replanReason });
     if (replanReason) {
       cache.delete(key);
       replanReasons.delete(key);
     }
     if (cached && !replanReason) {
-      const built = rememberBuiltContext(input, buildContext(config, {
+      const built = rememberBuiltContext(input, contextFor(input) || buildContext(config, {
         state: input.state,
         decisionMode: "hierarchical_sae",
         includeInitialMap: false,
@@ -801,8 +964,10 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       const refreshed = clone(cached);
       refreshed.reused = true;
       const taskPlan = taskManager?.refresh({ ...input, ctx: built.ctx }) || refreshed.operation_state?.task_plan || null;
-      refreshed.operation_state = operationState(refreshed.strategic_intent, refreshed.force_allocation, input, built, taskPlan, { lastActionEffect, lastTaskProgressDelta });
+      refreshed.operation_state = operationState(refreshed.strategic_intent, refreshed.force_allocation, input, built, taskPlan, { lastActionEffect, lastTaskProgressDelta, deadline }, config.task_management_options || {});
+      if (failedReplanReason) refreshed.operation_state.waiting_for_new_goal = true;
       refreshed.battlefield_fingerprint = currentFingerprint || battlefieldFingerprint(input, built, {
+        includeRoutineUnitState: !executionLedger,
         includeEnemyPositions: !taskManager,
         includeControl: !taskManager,
         includeVp: !taskManager
@@ -810,6 +975,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       refreshed.record = {
         ...refreshed.record,
         reused: true,
+        planning_attempted: false,
         replanned: false,
         replan_reason: "",
         operation: refreshed.operation_state
@@ -818,7 +984,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     }
     if (taskManager?.plan && !replanReason && lastPlan
       && (!lastPlan.battlefield_fingerprint || lastPlan.battlefield_fingerprint === currentFingerprint)) {
-      const built = rememberBuiltContext(input, buildContext(config, {
+      const built = rememberBuiltContext(input, contextFor(input) || buildContext(config, {
         state: input.state,
         decisionMode: "hierarchical_sae",
         includeInitialMap: false,
@@ -827,8 +993,10 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       const reused = clone(lastPlan);
       const taskPlan = taskManager.refresh({ ...input, ctx: built.ctx });
       reused.reused = true;
-      reused.operation_state = operationState(reused.strategic_intent, reused.force_allocation, input, built, taskPlan, { lastActionEffect, lastTaskProgressDelta });
+      reused.operation_state = operationState(reused.strategic_intent, reused.force_allocation, input, built, taskPlan, { lastActionEffect, lastTaskProgressDelta, deadline }, config.task_management_options || {});
+      if (failedReplanReason) reused.operation_state.waiting_for_new_goal = true;
       reused.battlefield_fingerprint = currentFingerprint || battlefieldFingerprint(input, built, {
+        includeRoutineUnitState: !executionLedger,
         includeEnemyPositions: !taskManager,
         includeControl: !taskManager,
         includeVp: !taskManager
@@ -836,6 +1004,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       reused.record = {
         ...reused.record,
         reused: true,
+        planning_attempted: false,
         replanned: false,
         replan_reason: "",
         task_plan: taskPlan,
@@ -855,6 +1024,14 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     }));
     const payload = publicPayload(config, built.publicContext, []);
     const strategicPayload = compactAgentPayload(payload, { includeInitialMap: false });
+    strategicPayload.request_capabilities = { tools_callable: false, output: "structured strategic JSON", facts_source: "provided state; do not invent tool results" };
+    if (taskManager?.plan) strategicPayload.previous_task_acceptance = taskManager.plan.children.map((task) => ({
+      id: task.id, title: task.title, status: task.status, acceptance_contract: task.acceptance_contract,
+      completion_criteria: task.completion_criteria, completion_evidence: task.completion_evidence,
+      failure_evidence: task.failure_evidence
+    }));
+    if (executionLedger) strategicPayload.goal_history = goalHistory.report({ ...input, ctx: built.ctx }, taskManager?.plan);
+    if (recentCombatResults.length) strategicPayload.recent_combat_results = clone(recentCombatResults);
     if (reasoningMemory) strategicPayload.context.reasoning_memory = reasoningMemory.forPrompt(input);
     // Planning has no rule-inspection tool, so retain the compact rules brief.
     strategicPayload.context.rules_brief = built.publicContext.rules_brief;
@@ -875,24 +1052,60 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     else {
       try {
         const request = {
-          messages: [{ role: "system", content: resolveSidePrompt(input.side, openGoalEnabled ? "external.goal_manager_system" : "external.strategic_planner_system") }, { role: "user", content: JSON.stringify(strategicPayload) }],
+          audit_stage: "strategic",
+          messages: [{ role: "system", content: resolveSidePrompt(input.side, openGoalEnabled ? "external.goal_manager_system" : "external.strategic_planner_system")
+            + (executionLedger ? `\n${promptValue("execution_ledger.planning")}` : "") }, { role: "user", content: JSON.stringify(strategicPayload) }],
           temperature: runtime.profile.defaults.temperature,
           max_tokens: Math.min(Number(config.context?.strategicMaxTokens || 3600), runtime.profile.limits.output),
           response_format: runtime.profile.capabilities.structured_output ? { type: "json_object" } : undefined,
           thinking: thinkingRequest(runtime)
         };
-        if (strategicTimeoutMs != null) request.timeout_ms = strategicTimeoutMs;
+        if (strategicTimeoutMs != null) { request.timeout_ms = strategicTimeoutMs; request.deadline_ms = deadline; }
         strategicResult = await client.complete(request);
+        if (deadline != null && Date.now() >= deadline) strategicResult = { ...strategicResult, ok: false, error_class: "step_timeout" };
         strategic = strategicResult.ok ? parsePlanningResponse(strategicResult, openGoalEnabled ? "goal_plan" : "strategic_intent", "strategic planner") : { error: `model API status ${strategicResult.status}` };
+        if (strategicResult.ok && strategic.error) {
+          const record = runtime.transport?.find((item) => item.request_id === strategicResult.request_id);
+          if (record) record.protocol_failure = { stage: "strategic", error: strategic.error };
+        }
       }
-      catch (error) { strategic = { error: error.message }; }
+      catch (error) {
+        if (executionLedger && (error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError)) throw error;
+        strategic = { error: error.message };
+      }
     }
+    if (executionLedger && strategic.error && lastPlan && taskManager?.plan) {
+      const retained = clone(lastPlan);
+      const taskPlan = taskManager.refresh({ ...input, ctx: built.ctx });
+      retained.operation_state = operationState(retained.strategic_intent, retained.force_allocation,
+        input, built, taskPlan, { lastActionEffect, lastTaskProgressDelta, deadline }, config.task_management_options || {});
+      retained.operation_state.waiting_for_new_goal = true;
+      retained.reused = true;
+      retained.battlefield_fingerprint = currentFingerprint;
+      retained.record = { ...retained.record, reused: true, replanned: false, replan_reason: replanReason,
+        planning_attempted: true, allocation_fallback: false, allocation_fallback_reason: "",
+        strategic_fallback: true, strategic_fallback_reason: strategic.error, retained_previous_plan: true,
+        task_plan: taskPlan, operation: retained.operation_state,
+        strategic: { raw: strategic, model_output: strategicResult?.response_json || null,
+          request_id: strategicResult?.request_id, status: strategicResult?.status ?? null } };
+      failedReplanPhase = `${input.turn}:${input.phase}`;
+      failedReplanReason = replanReason || "waiting_for_new_goal";
+      cache.set(key, retained);
+      lastPlan = clone(retained);
+      return retained;
+    }
+    failedReplanPhase = null;
+    failedReplanReason = null;
     const goalPlan = openGoalEnabled
       ? strategic.error
         ? localGoalPlan({ publicContext: built.publicContext, state: input.state, side: input.side })
         : groundGoalPlan(strategic, { publicContext: built.publicContext, state: input.state, side: input.side, ctx: built.ctx })
       : null;
     if (goalPlan && strategic.error) goalPlan.source = "local_default";
+    if (goalPlan && executionLedger) {
+      goalPlan.goal_revision = goalHistory.revise({ ...goalPlan.primary_goal, campaign_goal: goalPlan.campaign_goal }, { input: { ...input, ctx: built.ctx },
+        plan: taskManager?.plan, rulesEvaluation: built.publicContext.victory, reason: replanReason || "opening_goal" });
+    }
     const intent = normalizeIntent(goalPlan ? goalIntent(goalPlan) : strategic, input.state);
     if (goalPlan) {
       intent.source = goalPlan.source;
@@ -909,7 +1122,8 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       units: compactAllocationUnits(built.publicContext.unit_index),
       victory: built.publicContext.victory,
       objective_resolution: built.publicContext.objective_resolution,
-      rules_brief: built.publicContext.rules_brief
+      rules_brief: built.publicContext.rules_brief,
+      request_capabilities: { tools_callable: false, output: "force_allocation JSON", available_facts: "provided unit and rule context" }
     };
     let allocationResult;
     let allocation;
@@ -920,20 +1134,33 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     else {
       try {
         const request = {
+          audit_stage: "allocation",
           messages: [{ role: "system", content: resolveSidePrompt(input.side, "external.force_allocator_system") }, { role: "user", content: JSON.stringify(forcePayload) }],
           temperature: runtime.profile.defaults.temperature,
           max_tokens: Math.min(Number(config.context?.allocationMaxTokens || 3000), runtime.profile.limits.output),
           response_format: runtime.profile.capabilities.structured_output ? { type: "json_object" } : undefined,
           thinking: thinkingRequest(runtime)
         };
-        if (allocationTimeoutMs != null) request.timeout_ms = allocationTimeoutMs;
+        if (allocationTimeoutMs != null) { request.timeout_ms = allocationTimeoutMs; request.deadline_ms = deadline; }
         allocationResult = await client.complete(request);
+        if (deadline != null && Date.now() >= deadline) allocationResult = { ...allocationResult, ok: false, error_class: "step_timeout" };
         allocation = allocationResult.ok ? parsePlanningResponse(allocationResult, "force_allocation", "force allocator") : { error: `model API status ${allocationResult.status}` };
+        if (allocationResult.ok && allocation.error) {
+          const record = runtime.transport?.find((item) => item.request_id === allocationResult.request_id);
+          if (record) record.protocol_failure = { stage: "allocation", error: allocation.error };
+        }
       }
-      catch (error) { allocation = { error: error.message }; }
+      catch (error) {
+        if (executionLedger && (error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError)) throw error;
+        allocation = { error: error.message };
+      }
     }
     if (allocation.error) allocation = localAllocation(input.state, input.side, intent);
     else allocation = normalizeAllocation(allocation, input.state, input.side, intent);
+    allocation.allocation_id = allocationResult?.request_id || `${input.side}:${input.turn}:${input.step}:allocation`;
+    allocation.allocation_corrections = (allocation.allocation_corrections || []).map((correction, index) => ({
+      ...correction, allocation_id: allocation.allocation_id, event_id: `${allocation.allocation_id}:correction:${index}`
+    }));
     const priorityUnits = allocation.spearhead.concat(allocation.support, allocation.supply).map((item) => item.unit);
     const phaseIntent = {
       ...intent.intent,
@@ -948,10 +1175,11 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
         allocation,
         rawPlan: goalPlan?.task_plan || strategic,
         taskGeneration: config.task_management_options?.task_generation || "fixed_skeleton",
-        preserveParent: !!replanReason && replanReason.startsWith("task_") && replanReason !== "task_goal_completed"
+        preserveParent: executionLedger ? !!taskManager.plan
+          : !!replanReason && replanReason.startsWith("task_") && replanReason !== "task_goal_completed"
       })
       : null;
-    const state = operationState(intent, allocation, input, built, taskPlan, { lastActionEffect, lastTaskProgressDelta });
+    const state = operationState(intent, allocation, input, built, taskPlan, { lastActionEffect, lastTaskProgressDelta, deadline }, config.task_management_options || {});
     const result = {
       phaseIntent,
       strategic_intent: intent,
@@ -961,6 +1189,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       battlefield_fingerprint: currentFingerprint,
       record: {
         source: intent.source,
+        planning_attempted: true,
         context_profile: CONTEXT_PROFILE_ID,
         strategic_raw_context_bytes: contextBytes(payload),
         strategic_context_bytes: contextBytes(strategicPayload),
@@ -975,10 +1204,15 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
         strategic_fallback: intent.source !== "model",
         strategic_fallback_reason: strategic.error || "",
         goal_grounding: goalPlan?.grounding || null,
+        goal_revision: goalPlan?.goal_revision || null,
+        capability_reference_errors: executionLedger ? capabilityReferenceErrors(strategic, availableTools) : [],
+        goal_history: executionLedger ? goalHistory.report({ ...input, ctx: built.ctx }, taskPlan) : null,
         allocation_fallback: allocationResult ? allocationResult.ok !== true || allocation.source === "local_fallback" : true,
         allocation_fallback_reason: allocationResult?.error || allocation?.error || (allocation.source === "local_fallback" ? "local allocation fallback" : ""),
-        strategic: { raw: strategic, status: strategicResult?.status ?? null, elapsed_ms: strategicResult?.elapsed_ms ?? null },
-        allocation: { raw: allocationResult?.response_json || allocation, status: allocationResult?.status ?? null, elapsed_ms: allocationResult?.elapsed_ms ?? null },
+        strategic: { raw: strategic, model_output: strategicResult?.response_json || null, request_id: strategicResult?.request_id,
+          status: strategicResult?.status ?? null, elapsed_ms: strategicResult?.elapsed_ms ?? null },
+        allocation: { raw: allocationResult?.response_json || allocation, request_id: allocationResult?.request_id,
+          status: allocationResult?.status ?? null, elapsed_ms: allocationResult?.elapsed_ms ?? null },
         task_management: taskManager ? "multi_task" : "disabled",
         task_plan: taskPlan,
         operation: state,
@@ -1020,7 +1254,16 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
         replanReasons.set(key, taskManager.consumeReplanReason() || "task_requires_replanning");
       }
     }
-    lastActionEffect = stepRecord.action_effect || lastActionEffect;
+    if (stepRecord.final_action?.type === "combat" && stepRecord.action_effect?.accepted
+      && !recentCombatResults.some((record) => record.step === stepRecord.step)) {
+      recentCombatResults.push({ step: stepRecord.step, turn: stepRecord.turn,
+        attackers: stepRecord.final_action.attackers, defender_hexes: stepRecord.final_action.defender_hexes,
+        actual_result: stepRecord.action_effect.applied_result,
+        self_vp_delta: stepRecord.action_effect.self_vp_delta,
+        force_preservation_risk: stepRecord.action_effect.force_preservation_risk });
+      recentCombatResults = recentCombatResults.slice(-6);
+    }
+    lastActionEffect = stepRecord.action_effect ? { ...stepRecord.action_effect, recent_combat_results: clone(recentCombatResults) } : lastActionEffect;
     // The task manager owns task-mode recovery. Do not overwrite its reason with
     // the legacy SAE trigger, otherwise a local supply observation replaces the
     // stable parent task with a fresh strategic operation.
@@ -1040,7 +1283,12 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       includeInitialMap: false,
       privateCandidates: false
     });
-    const taskPlan = taskManager.refresh({ ...input, ctx: built.ctx });
+    const taskPlan = typeof taskManager.settle === "function"
+      ? taskManager.settle({ ...input, ctx: built.ctx })
+      : taskManager.refresh({ ...input, ctx: built.ctx });
+    if (executionLedger) taskPlan.goal_history = goalHistory.report({ ...input, ctx: built.ctx }, taskPlan);
+    if (executionLedger) taskPlan.archived_task_plans = taskManager.archives;
+    if (executionLedger) taskPlan.task_execution_history = taskManager.executionHistory;
     if (lastPlan) {
       lastPlan.operation_state = operationState(
         lastPlan.strategic_intent,
@@ -1048,7 +1296,8 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
         input,
         built,
         taskPlan,
-        { lastActionEffect, lastTaskProgressDelta }
+        { lastActionEffect, lastTaskProgressDelta },
+        config.task_management_options || {}
       );
       lastPlan.record = {
         ...lastPlan.record,
@@ -1058,18 +1307,28 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     }
     return clone(taskPlan);
   }
+  async function settleTurn(input) {
+    if (!taskManager) return null;
+    const built = buildContext(config, { state: input.state, decisionMode: "hierarchical_sae",
+      includeInitialMap: false, privateCandidates: false });
+    return taskManager.settle({ ...input, ctx: built.ctx });
+  }
   function clear() {
     cache.clear();
     replanReasons.clear();
     taskManager?.clear();
+    goalHistory.clear();
     lastPlan = null;
+    failedReplanPhase = null;
+    failedReplanReason = null;
     pendingTaskCheck = null;
     lastBuiltContext = null;
     lastBuiltInput = null;
     lastActionEffect = null;
+    recentCombatResults = [];
     lastTaskProgressDelta = {};
   }
-  return { cache, clear, contextFor, finalize, observe, plan, replanReasons, taskManager };
+  return { cache, clear, contextFor, finalize, settleTurn, observe, plan, replanReasons, taskManager };
 }
 
 module.exports = {
@@ -1080,6 +1339,7 @@ module.exports = {
   parsePlanningResponse,
   buildPhaseUnitFacts,
   buildTacticalSummary,
+  taskRouteEvidence,
   deriveActionEffect,
   operationState,
   phaseKey,

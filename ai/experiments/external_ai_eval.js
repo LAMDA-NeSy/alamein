@@ -90,8 +90,8 @@ function candidateMatch(action = {}, candidates = []) {
 function finalActionFromParsed(parsed) {
   if (!parsed || typeof parsed !== "object") return null;
   if (parsed.type === "final_action") return parsed.action || null;
-  if (["move_intent", "move", "combat", "exit_west", "pass"].includes(parsed.type)) return parsed;
-  if (parsed.action && ["move_intent", "move", "combat", "exit_west", "pass"].includes(parsed.action.type)) return parsed.action;
+  if (["move_intent", "move", "combat", "clear_mine", "exit_west", "pass"].includes(parsed.type)) return parsed;
+  if (parsed.action && ["move_intent", "move", "combat", "clear_mine", "exit_west", "pass"].includes(parsed.action.type)) return parsed.action;
   return null;
 }
 

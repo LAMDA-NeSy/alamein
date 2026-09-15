@@ -9,6 +9,10 @@
     "ai:langgraph": "node ai/harnesses/langgraph_harness.mjs",
     "ai:pydanticai": "node ai/harnesses/pydanticai_harness.mjs",
     "ai:batch": "node ai/experiments/run_ai_experiments.js",
+    "ai:acceptance": "node ai/experiments/run_sae_acceptance.js",
+    "ai:models": "node ai/experiments/run_model_suite.js",
+    "ai:audit": "node ai/experiments/audit_experiment_logs.js",
+    "ai:baselines": "node ai/experiments/run_rules_baselines.js",
     "ai:compare": "node ai/experiments/validate_benchmark_comparison.js",
     "ai:metrics": "node ai/experiments/evaluate_research_metrics.js",
     "test:pydanticai": "uv run --locked --group dev pytest ai/tests"
@@ -21,6 +25,7 @@
     "@opencode-ai/sdk": "1.18.13",
     "jstat": "^1.9.6",
     "opencode-ai": "1.18.13",
+    "stream-json": "^1.9.1",
     "yaml": "2.9.0"
   }
 }

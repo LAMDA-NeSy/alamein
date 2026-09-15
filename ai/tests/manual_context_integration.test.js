@@ -5,6 +5,42 @@ const test = require("node:test");
 
 const { readConfig } = require("../experiments/external_ai_transcript.js");
 const { makeSingleActionProvider } = require("../experiments/external_ai_full_game_transcript.js");
+const { createActionRuleBridge } = require("../core/action_rule_bridge.js");
+const RulesEngine = require("../../rule_engine.js");
+
+test("rolling provider records fallback provenance, exit eligibility and applied feedback", async () => {
+  const config = readConfig();
+  const bridge = createActionRuleBridge(config, { toolProfile: "rolling_unit_rules_tactical" });
+  const state = { scenario: "october", active_side: "axis", turn: 11, phase: "axis_initial_movement", units: {
+    a: { side: "axis", kind: "ground", hex: "0101", attack: 2, defense: 2, movement: 4, state: "fresh" }
+  } };
+  const responses = [
+    { type: "strategic_intent", operation: "withdrawal", intent_type: "withdraw" },
+    { type: "force_allocation", spearhead: [{ unit: "a", task: "withdraw" }], support: [], supply: [], reserve: [] },
+    [{ type: "phase_unit_plan", unit_orders: [] }]
+  ];
+  const transcript = { model_steps: [] };
+  const provider = makeSingleActionProvider(config, {
+    run_id: "rolling-integration",
+    profile: { provider: "local_mock", model: "mock", limits: { output: 1000 }, capabilities: {}, defaults: { temperature: 0 } }
+  }, transcript, {
+    bridge, decisionPolicy: "hierarchical_sae", progress: false,
+    unitPlanSettings: { max_recommendation_expansions: 1 },
+    client: { complete: async (request) => ({ ok: true, status: 200, request_body: request,
+      response_json: { choices: [{ message: { content: JSON.stringify(responses.shift()) } }] } }) }
+  });
+  const chosen = await provider({ state, side: "axis", turn: 11, phase: state.phase, step: 1 });
+  assert.equal(chosen.action.type, "exit_west");
+  assert.equal(transcript.model_steps[0].fallback_used, true);
+  assert.deepEqual(transcript.model_steps[0].movement_phase.withdrawal_eligible_units, ["a"]);
+  const ctx = bridge.current().built.ctx;
+  const after = structuredClone(state);
+  const result = RulesEngine.applyExitWest(RulesEngine.createContext({ state: after, rules: ctx.rules, terrain: ctx.terrain }), "a");
+  await provider.onActionApplied({ step: 1, state: after, action: chosen.action, result, applied: true });
+  assert.equal(transcript.model_steps[0].action_effect.accepted, true);
+  assert.equal(transcript.model_steps[0].action_effect.actual_vp_delta, 2);
+  assert.equal(transcript.model_steps[0].action_effect.unavailable, undefined);
+});
 
 test("manual provider sends a stable opening prefix and compact current state from step one", async () => {
   const requests = [];

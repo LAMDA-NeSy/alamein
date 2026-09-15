@@ -55,3 +55,27 @@ test("prompt rendering requires every declared variable", () => {
     stop_on_accepted: true
   }).includes("Purpose:"));
 });
+
+test("side prompts teach JSON without prescribing geographic or numeric operational targets", () => {
+  for (const side of ["axis", "allies"]) {
+    assert.match(sideStrategyConfig(side).doctrine, /do not assign objectives/);
+    for (const id of ["strategic_planner_system", "goal_manager_system", "force_allocator_system",
+      "phase_intent_system", "phase_unit_plan_system", "unit_order_repair_system", "system", "task_checker_system"]) {
+      const prompt = resolveSidePrompt(side, `external.${id}`);
+      assert.doesNotMatch(prompt, /"(?:target_hex|destination)"\s*:\s*"\d{4}"/);
+      assert.doesNotMatch(prompt, /"hexes"\s*:\s*\["\d{4}"/);
+      assert.doesNotMatch(prompt, /"target_column"\s*:\s*\d+/);
+    }
+    for (const id of ["strategic_planner_system", "goal_manager_system", "force_allocator_system"]) {
+      const prompt = resolveSidePrompt(side, `external.${id}`);
+      const line = prompt.split("\n").find((value) => value.includes("Example: {"));
+      const example = JSON.parse(line.slice(line.indexOf("{"), line.lastIndexOf("}") + 1));
+      assert.ok(example.type);
+      if (id === "goal_manager_system") {
+        assert.match(prompt, /Replace numeric placeholders with JSON numbers/);
+        assert.match(example.campaign_goal.target, /^<chosen campaign VP/);
+        assert.ok(example.task_plan.children[0].completion_criteria.all.length);
+      }
+    }
+  }
+});

@@ -32,9 +32,7 @@
     const neighbors = engine.neighbors;
 
     function distance(a, b) {
-      const [ac, ar] = engine.splitHex(a);
-      const [bc, br] = engine.splitHex(b);
-      return Math.abs(ac - bc) + Math.abs(ar - br);
+      return engine.hexDistance(a, b);
     }
 
     function column(hex) {
@@ -159,19 +157,7 @@
     }
 
     function canExitWest(unitId) {
-      const unit = state.units?.[unitId];
-      if (!unit) return { legal: false, reason: "未知单位" };
-      if (state.scenario !== "october") return { legal: false, reason: "只有 October 场景允许西边撤出" };
-      if (unit.side !== "axis" || state.active_side !== "axis") return { legal: false, reason: "只有 Axis 当前方单位可撤出" };
-      if (!["initial_movement", "mechanized_movement", "supply_movement"].includes(phaseKind())) {
-        return { legal: false, reason: "只能在移动阶段撤出" };
-      }
-      if (Number(state.turn || 1) <= 10) return { legal: false, reason: "October 第 10 回合后才可撤出" };
-      if (!unit.hex || column(unit.hex) !== 1) return { legal: false, reason: "单位必须位于西边缘" };
-      if (!(engine.isCombatUnit({ id: unitId, ...unit }) || engine.isSupplyUnit({ id: unitId, ...unit }))) {
-        return { legal: false, reason: "只有作战或补给单位计撤出 VP" };
-      }
-      return { legal: true, reason: "可从西边撤出", action: { type: "exit_west", unit: unitId } };
+      return engine.checkExitWest(ctx(), { type: "exit_west", unit: unitId });
     }
 
     function octoberWithdrawalCandidate(unit) {
@@ -289,7 +275,7 @@
       const supplyPenalty = supply === "isolated" ? 20 : supply === "unsupplied" ? 8 : ["partially_supplied", "partial"].includes(supply) ? 3 : 0;
       const roadBonus = action.mode === "road" && !zocSources.size ? (engine.isSupplyUnit(unit) ? 8 : 2) : 0;
       const tags = engine.hexTags(ctx(), destination);
-      const terrainBonus = tags.includes("hill_or_ridge") ? 2 : tags.includes("alamein_box") && state.scenario === "july" ? 3 : 0;
+      const terrainBonus = tags.includes("hill_or_ridge") ? 2 : 0;
       const spentPenalty = Number(action.verdict?.details?.spent || 0) * 0.25;
       const strength = Number(unit.attack || 0) + Number(unit.movement || 0) * 0.2;
       const usefulProgress = Math.max(0, progress);
@@ -490,13 +476,11 @@
           ...(engine.isCombatUnit(unit) || engine.isSupplyUnit(unit) ? enumerateStrategicMoves(unit.id, "road", 1) : [])
         ].map((action) => ({ score: scoreAction(action), action }));
         candidates.sort((a, b) => b.score - a.score);
-        for (const candidate of candidates.slice(0, perUnitLimit)) {
-          actions.push(candidate.action);
-          if (actions.length >= max) return actions;
-        }
+        actions.push(...candidates.slice(0, perUnitLimit).map((candidate) => candidate.action));
       }
+      actions.sort((left, right) => scoreAction(right) - scoreAction(left));
       actions.push({ type: "pass", reason: "不行动" });
-      return actions.slice(0, max);
+      return actions.slice(0, Math.max(1, max));
     }
 
     function compactAction(action) {

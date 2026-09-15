@@ -3,28 +3,15 @@
 const { resolveSidePrompt } = require("./prompt_registry.js");
 const { thinkingRequest } = require("./model_runtime.js");
 const { compactToolFeedback } = require("./agent_context.js");
+const { parseModelObject } = require("./model_json.js");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
 function parseJson(result) {
-  const message = result?.response_json?.choices?.[0]?.message || {};
-  const values = [message.content, message.reasoning_content].filter((value) => typeof value === "string" && value.trim());
-  for (const value of values) {
-    try {
-      const parsed = JSON.parse(value);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
-    }
-    catch {
-      const match = value.match(/\{[\s\S]*\}/);
-      if (match) {
-        try { return JSON.parse(match[0]); }
-        catch {}
-      }
-    }
-  }
-  return null;
+  const parsed = parseModelObject(result, (value) => value.type === "task_check" || !!value.task_check, "task checker");
+  return parsed.error ? null : parsed;
 }
 
 function normalizeCheck(raw, taskPlan) {
@@ -75,6 +62,8 @@ function compactTask(task) {
     dependency_status: task.dependency_status || null,
     phase_scope: task.phase_scope || [],
     completion_condition: task.completion_condition || "",
+    completion_criteria: task.completion_criteria || null,
+    completion_evidence: task.completion_evidence || null,
     failure_condition: task.failure_condition || "",
     current_metrics: task.current_metrics || null,
     progress_evidence: task.progress_evidence || "",
@@ -100,7 +89,9 @@ function checkerPayload({ input, taskPlan, stepRecord, events }) {
   const referencedUnits = new Set([
     ...(action?.unit ? [action.unit] : []),
     ...(action?.attackers || []),
-    ...activeTasks.flatMap((task) => task.assigned_units)
+    ...activeTasks.flatMap((task) => [...task.assigned_units,
+      ...Object.values(task.completion_criteria || {}).flat().flatMap((condition) =>
+        [...(condition.unit_ids || []), ...(condition.beneficiary_unit_ids || [])])])
   ]);
   const unitEvidence = Object.fromEntries([...referencedUnits].slice(0, 30).map((id) => {
     const unit = input?.state?.units?.[id];
@@ -160,10 +151,11 @@ function checkerPayload({ input, taskPlan, stepRecord, events }) {
   };
 }
 
-function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCallsPerTurn = 4 } = {}) {
+function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCallsPerTurn = 4, cooldownActions = 0 } = {}) {
   let callsThisTurn = 0;
   let currentTurn = null;
   const records = [];
+  const recentEvents = new Map();
   async function check({ input, taskPlan, stepRecord, events = [], timeoutMs: timeoutOverride } = {}) {
     if (!client || !runtime || !events.length) return { skipped: true, reason: "no_trigger" };
     if (currentTurn !== input?.turn) {
@@ -171,6 +163,13 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
       callsThisTurn = 0;
     }
     if (callsThisTurn >= maxCallsPerTurn) return { skipped: true, reason: "turn_check_limit" };
+    const eventKey = JSON.stringify([input?.turn, input?.phase, input?.side,
+      (taskPlan?.children || []).filter((task) => task.status === "active").map((task) => task.id).sort(), [...events].sort()]);
+    const previousStep = recentEvents.get(eventKey);
+    if (cooldownActions > 0 && previousStep != null && Number(input?.step || 0) - previousStep < cooldownActions) {
+      return { skipped: true, reason: "event_cooldown", event_key: eventKey };
+    }
+    recentEvents.set(eventKey, Number(input?.step || 0));
     callsThisTurn += 1;
     const started = Date.now();
     const requestTimeoutMs = Math.max(1, Number(timeoutOverride ?? timeoutMs));
@@ -178,6 +177,7 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
     let result;
     try {
       result = await client.complete({
+        audit_stage: "checker",
         messages: [
           { role: "system", content: resolveSidePrompt(input?.side || taskPlan?.side || "axis", "external.task_checker_system") },
           { role: "user", content: JSON.stringify(payload) }
@@ -186,8 +186,10 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
         max_tokens: Math.min(900, Number(runtime.profile.limits.output || 900)),
         response_format: runtime.profile.capabilities.structured_output ? { type: "json_object" } : undefined,
         thinking: thinkingRequest(runtime),
-        timeout_ms: requestTimeoutMs
+        timeout_ms: requestTimeoutMs,
+        deadline_ms: started + requestTimeoutMs
       });
+      if (Date.now() >= started + requestTimeoutMs) throw new Error("task checker response exceeded deadline");
       if (!result.ok) throw new Error(`task checker model status ${result.status}`);
       const parsed = parseJson(result);
       if (!parsed) throw new Error("task checker returned invalid JSON");
@@ -195,12 +197,19 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
       if (!checkResult.abstain && !checkResult.evidence.state_change) {
         throw new Error("task checker omitted state-change evidence");
       }
-      const record = { ok: true, events, result: checkResult, elapsed_ms: Date.now() - started, status: result.status ?? 200 };
+      const record = { ok: true, events, result: checkResult, request_id: result.request_id,
+        raw_output: result.response_json, elapsed_ms: Date.now() - started, status: result.status ?? 200 };
       records.push(record);
       return record;
     }
     catch (error) {
-      const record = { ok: false, events, fallback: true, reason: error.message, elapsed_ms: Date.now() - started, status: result?.status ?? 0 };
+      if (error instanceof TypeError || error instanceof ReferenceError) throw error;
+      if (result?.ok && !/deadline/i.test(error.message)) {
+        const requestRecord = runtime.transport?.find((item) => item.request_id === result.request_id);
+        if (requestRecord) requestRecord.protocol_failure = { stage: "checker", error: error.message };
+      }
+      const record = { ok: false, events, fallback: true, reason: error.message, request_id: result?.request_id,
+        raw_output: result?.response_json || null, elapsed_ms: Date.now() - started, status: result?.status ?? 0 };
       records.push(record);
       return record;
     }

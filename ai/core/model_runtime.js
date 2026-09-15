@@ -261,7 +261,9 @@ function redactValue(value, secrets = []) {
   }
   if (Array.isArray(value)) return value.map((item) => redactValue(item, secrets));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, /authorization|api[-_]?key|token/i.test(key) ? "[REDACTED]" : redactValue(item, secrets)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+      /authorization|api[-_]?key|password|secret|cookie|(^|[_-])(access|refresh|auth|bearer|session|id|local)[_-]?token$|^token$/i.test(key)
+        ? "[REDACTED]" : redactValue(item, secrets)]));
   }
   return value;
 }
@@ -329,7 +331,7 @@ function defaultMockResponse(runtime, body) {
     try { embeddedToolResults = JSON.parse(lastUserContent.slice(markerIndex + toolResultsMarker.length)); }
     catch {}
   }
-  if (planningPayload?.planning_request === "phase_unit_plan") {
+  if (["phase_unit_plan", "phase_unit_plan_repair"].includes(planningPayload?.planning_request)) {
     message = {
       role: "assistant",
       content: JSON.stringify({
@@ -379,17 +381,40 @@ function defaultMockResponse(runtime, body) {
     const content = String(item.content);
     return item.role === "system" && (content.includes("strategic commander") || content.includes("goal commander"));
   })) {
+    const strategicSystem = String(messages.find((item) => item.role === "system")?.content || "");
+    const scenario = planningPayload?.context?.game?.scenario || "july";
+    const allies = /Allied (?:goal|strategic) commander/i.test(strategicSystem);
+    const operation = scenario === "september"
+      ? allies ? "protect_minefield" : "clear_mines"
+      : scenario === "october"
+        ? allies ? "deny_withdrawal" : "withdraw_west"
+        : allies ? "deny_axis_frontier" : "eastward_breakthrough";
+    const targetColumn = scenario === "july"
+      ? planningPayload?.context?.victory?.current_scoring?.july_advance?.next_scoring_column ?? null
+      : null;
+    const metric = scenario === "september" ? "mine_clearance"
+      : scenario === "october" ? "withdrawal_vp" : "scoring_frontier";
+    const relation = allies ? "keep_below" : "at_least";
     message = {
       role: "assistant",
       content: JSON.stringify({
         type: "strategic_intent",
-        operation: "eastward_breakthrough",
+        operation,
         intent_type: "pressure",
-        sector: "central",
-        target_column: 37,
-        priority: ["cross the next scoring column", "preserve supply"],
+        sector: "",
+        target_column: targetColumn,
+        primary_metric: metric,
+        relation,
+        priority: allies
+          ? ["reduce the Axis scenario threat", "preserve Allied force"]
+          : scenario === "september"
+            ? ["clear a reachable minefield", "preserve supply"]
+            : scenario === "october"
+              ? ["prepare and execute legal west exits", "preserve high-value units"]
+              : ["cross the next scoring column", "preserve supply"],
         priority_units: [],
-        abort_condition: "abort if the spearhead becomes unsupplied"
+        abort_condition: allies ? "reassess if the Axis threat cannot be reduced"
+          : "abort if the operation becomes unsupplied or unreachable"
       })
     };
   }
@@ -397,14 +422,21 @@ function defaultMockResponse(runtime, body) {
     const activeUnits = planningPayload.units?.active || planningPayload.unit_index?.active || [];
     const combat = activeUnits.filter((unit) => unit.kind === "ground");
     const supply = activeUnits.filter((unit) => unit.kind === "supply");
+    const operation = planningPayload.strategic_intent?.operation || "operation";
+    const mainTask = operation === "clear_mines" ? "clear a reachable minefield"
+      : operation === "withdraw_west" ? "prepare a legal west withdrawal"
+        : operation === "protect_minefield" ? "protect the minefield and block Axis clearance"
+          : operation === "deny_withdrawal" ? "intercept Axis withdrawal routes"
+            : operation === "deny_axis_frontier" ? "hold the Axis scoring line"
+              : "advance toward the scoring column";
     message = {
       role: "assistant",
       content: JSON.stringify({
         type: "force_allocation",
-        operation: planningPayload.strategic_intent?.operation || "eastward_breakthrough",
-        spearhead: combat.slice(0, 2).map((unit) => ({ unit: unit.id, task: "advance toward the scoring column" })),
-        support: combat.slice(2, 5).map((unit) => ({ unit: unit.id, task: "support the spearhead" })),
-        supply: supply.slice(0, 2).map((unit) => ({ unit: unit.id, task: "maintain the supply corridor" })),
+        operation,
+        spearhead: combat.slice(0, 2).map((unit) => ({ unit: unit.id, task: mainTask })),
+        support: combat.slice(2, 5).map((unit) => ({ unit: unit.id, task: "support the main task" })),
+        supply: supply.slice(0, 2).map((unit) => ({ unit: unit.id, task: "maintain the task's supply corridor" })),
         reserve: combat.slice(5, 7).map((unit) => unit.id)
       })
     };
@@ -422,11 +454,12 @@ function defaultMockResponse(runtime, body) {
     };
   }
   else if (lastUserContent.includes('"phase_intent_catalog"') && !toolNames.size) {
+    const catalog = planningPayload?.context?.phase_intent_catalog || planningPayload?.phase_intent_catalog || [];
     message = {
       role: "assistant",
       content: JSON.stringify({
         type: "phase_intent",
-        intent: { type: "advance", sector: "central", target_hex: "3711", priority_units: [] }
+        intent: { type: catalog.includes("consolidate") ? "consolidate" : catalog[0] || "pass", sector: "", target_hex: "", priority_units: [] }
       })
     };
   }
@@ -673,19 +706,33 @@ async function callOpenAiCompatible(runtime, body, attempt, timeoutMs) {
 
 async function dispatchUpstream(runtime, body, options = {}) {
   const started = Date.now();
-  const requestId = crypto.randomUUID();
-  const totalTimeoutMs = Math.max(1, Number(options.timeoutMs || runtime.profile.defaults.timeout_ms));
-  const deadline = started + totalTimeoutMs;
+  const requestId = options.requestId || crypto.randomUUID();
+  const deadline = Math.min(started + Math.max(1, Number(options.timeoutMs || runtime.profile.defaults.timeout_ms)),
+    Number.isFinite(options.deadlineMs) ? options.deadlineMs : Infinity);
+  const totalTimeoutMs = Math.max(0, deadline - started);
+  const pauses = [];
+  let lastTick = started;
+  const pauseMonitor = setInterval(() => {
+    const now = Date.now();
+    if (now - lastTick > 5000) pauses.push({ started_at_ms: lastTick, elapsed_ms: now - lastTick,
+      attribution: "environment_or_event_loop_pause_suspected" });
+    lastTick = now;
+  }, 1000);
+  pauseMonitor.unref();
   const maxAttempts = runtime.profile.defaults.retries + 1;
   let result;
   let error;
   let attempts = 0;
   let errorClass = "none";
   const retryableFailures = [];
+  let retryWaitMs = 0;
+  const stage = ["strategic", "allocation", "unit_plan", "concentrated_repair", "checker", "tool_execution"].includes(options.stage)
+    ? options.stage : "unattributed";
   if (Date.now() < runtime.transport_health.circuit_open_until) {
     errorClass = "circuit_open";
     const record = {
       request_id: requestId,
+      stage,
       run_id: runtime.run_id,
       model_profile: runtime.profile.profile_id,
       started_at: new Date(started).toISOString(),
@@ -699,6 +746,7 @@ async function dispatchUpstream(runtime, body, options = {}) {
       response_headers: {}
     };
     runtime.transport.push(record);
+    clearInterval(pauseMonitor);
     return { result: { status: 503, headers: {}, json: record.response }, error: new Error("model transport circuit is open"), record };
   }
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -715,6 +763,11 @@ async function dispatchUpstream(runtime, body, options = {}) {
       result = runtime.profile.adapter === "mock"
         ? await callMock(runtime, body, attempt, remaining)
         : await callOpenAiCompatible(runtime, body, attempt, remaining);
+      if (Date.now() >= deadline) {
+        const expired = new Error("response arrived after the request deadline");
+        expired.name = "AbortError";
+        throw expired;
+      }
       error = null;
       errorClass = classifyTransportFailure({ status: result.status });
       if (!retryableFailure(runtime.profile, result.status, null)) break;
@@ -736,9 +789,14 @@ async function dispatchUpstream(runtime, body, options = {}) {
     }
     if (!retryableFailure(runtime.profile, result?.status || 0, error) || attempt + 1 >= maxAttempts) break;
     const delay = Number(runtime.profile.defaults.retry_delays_ms[attempt] || 0);
+    const waitStarted = Date.now();
     await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
+    retryWaitMs += Date.now() - waitStarted;
   }
   const successful = !error && Number(result?.status || 0) >= 200 && Number(result?.status || 0) < 400;
+  clearInterval(pauseMonitor);
+  if (Date.now() - lastTick > 5000) pauses.push({ started_at_ms: lastTick, elapsed_ms: Date.now() - lastTick,
+    attribution: "environment_or_event_loop_pause_suspected" });
   if (successful) {
     runtime.transport_health.consecutive_failures = 0;
   }
@@ -751,6 +809,14 @@ async function dispatchUpstream(runtime, body, options = {}) {
   }
   const record = {
     request_id: requestId,
+    stage,
+    retry_wait_ms: retryWaitMs,
+    api_ms: Date.now() - started - retryWaitMs,
+    latency_definition: "client_wall_clock_including_local_scheduling; not_server_reasoning_time",
+    environment_pauses: pauses,
+    clean_latency_eligible: pauses.length === 0,
+    deadline_ms: deadline,
+    deadline_exceeded: Date.now() >= deadline,
     run_id: runtime.run_id,
     model_profile: runtime.profile.profile_id,
     started_at: new Date(started).toISOString(),
@@ -759,18 +825,26 @@ async function dispatchUpstream(runtime, body, options = {}) {
     request: redactValue(body, [runtime._credential, runtime.local_token]),
     response: redactValue(result?.json || { error: error?.message || "upstream request failed" }, [runtime._credential, runtime.local_token]),
     status: result?.status || 502,
-    error_class: successful ? "none" : result?.status
-      ? classifyTransportFailure({ status: result.status })
-      : errorClass,
+    error_class: successful ? "none" : error ? classifyTransportFailure({ error, status: result?.status }) : errorClass,
     recovered_after_retry: successful && retryableFailures.length > 0,
     retryable_failures: retryableFailures,
     total_timeout_ms: totalTimeoutMs,
     request_headers: redactHeaders({ authorization: `Bearer ${runtime.local_token}`, "content-type": "application/json" }),
     response_headers: redactHeaders(result?.headers || {})
   };
-  runtime.transport.push(record);
+  const existing = runtime.transport.find((item) => item.request_id === requestId);
+  if (existing) {
+    const delivery = existing.client_delivery;
+    Object.assign(existing, record);
+    if (delivery) {
+      existing.client_delivery = delivery;
+      existing.upstream_error_class = record.error_class;
+      existing.error_class = delivery.error_class;
+    }
+  } else runtime.transport.push(record);
   if (result?.json) updateUsage(runtime, result.json);
-  return { result, error, record };
+  return { result: error && (!result || error.name === "AbortError")
+    ? { status: 502, headers: {}, json: { error: { message: error.message } } } : result, error, record };
 }
 
 function enforceSingleToolCall(runtime, json) {
@@ -840,7 +914,10 @@ async function startModelGateway(runtime) {
     try {
       const body = applyProfileRequestDefaults(runtime, parseBody(await readRequest(req)));
       const requestedTimeout = Number(req.headers["x-agent-request-timeout-ms"] || runtime.profile.defaults.timeout_ms);
-      const { result, error, record } = await dispatchUpstream(runtime, body, { timeoutMs: requestedTimeout });
+      const requestedDeadline = Number(req.headers["x-agent-deadline-ms"]);
+      const { result, error, record } = await dispatchUpstream(runtime, body, { timeoutMs: requestedTimeout,
+        deadlineMs: Number.isFinite(requestedDeadline) ? requestedDeadline : undefined, stage: req.headers["x-agent-request-stage"],
+        requestId: /^[a-f0-9-]{36}$/i.test(req.headers["x-agent-request-id"] || "") ? req.headers["x-agent-request-id"] : undefined });
       const forwarded = enforceSingleToolCall(runtime, result?.json);
       if (record && forwarded.dropped) {
         record.gateway_normalization = {
@@ -854,6 +931,7 @@ async function startModelGateway(runtime) {
           "cache-control": "no-cache",
           connection: "keep-alive",
           "x-agent-error-class": record.error_class,
+          "x-agent-request-id": record.request_id,
           "x-agent-attempts": String(record.attempts || 0),
           "x-agent-recovered-after-retry": String(!!record.recovered_after_retry)
         });
@@ -863,6 +941,7 @@ async function startModelGateway(runtime) {
         res.writeHead(result?.status || 502, {
           "content-type": "application/json",
           "x-agent-error-class": record.error_class,
+          "x-agent-request-id": record.request_id,
           "x-agent-attempts": String(record.attempts || 0),
           "x-agent-recovered-after-retry": String(!!record.recovered_after_retry)
         });
@@ -949,25 +1028,49 @@ function createChatCompletionsClient(runtime) {
       await startModelGateway(runtime);
       const body = buildChatCompletionsBody(runtime, request);
       const started = Date.now();
-      const timeoutMs = Math.max(1, Number(request.timeout_ms || runtime.profile.defaults.timeout_ms));
+      const requestId = crypto.randomUUID();
+      const recordDeliveryFailure = (errorClass, message) => {
+        let record = runtime.transport.find((item) => item.request_id === requestId);
+        if (!record) {
+          record = { request_id: requestId, stage: request.audit_stage || "tool_execution", status: 0,
+            attempts: 0, elapsed_ms: Date.now() - started, request: redactValue(body, [runtime.local_token, runtime._credential]),
+            response: null, upstream_delivery: "unknown", created_at: new Date(started).toISOString() };
+          runtime.transport.push(record);
+        }
+        record.upstream_error_class = record.error_class || null;
+        record.error_class = errorClass;
+        record.client_delivery = { error_class: errorClass, message, elapsed_ms: Date.now() - started };
+      };
+      const deadline = Math.min(started + Math.max(1, Number(request.timeout_ms || runtime.profile.defaults.timeout_ms)),
+        Number.isFinite(request.deadline_ms) ? request.deadline_ms : Infinity);
+      const timeoutMs = Math.max(0, deadline - Date.now());
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs + 1000);
       try {
+        if (timeoutMs <= 0) { const error = new Error("request deadline exhausted"); error.name = "AbortError"; throw error; }
         const response = await fetch(`${runtime.gateway_url}/chat/completions`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
             authorization: `Bearer ${runtime.local_token}`,
-            "x-agent-request-timeout-ms": String(timeoutMs)
+            "x-agent-request-timeout-ms": String(timeoutMs),
+            "x-agent-deadline-ms": String(deadline),
+            "x-agent-request-stage": String(request.audit_stage || "tool_execution"),
+            "x-agent-request-id": requestId
           },
           body: JSON.stringify(body),
           signal: controller.signal
         });
         const json = parseBody(await response.text());
+        const expired = Date.now() >= deadline;
+        if (expired) recordDeliveryFailure("network_timeout", "response arrived after request deadline");
         return {
-          ok: response.ok,
+          ok: response.ok && !expired,
+          request_id: response.headers.get("x-agent-request-id") || requestId,
           status: response.status,
-          error_class: response.headers.get("x-agent-error-class") || classifyTransportFailure({ status: response.status }),
+          error_class: expired ? "network_timeout" : response.headers.get("x-agent-error-class") || classifyTransportFailure({ status: response.status }),
+          deadline_ms: deadline,
+          deadline_exceeded: expired,
           attempts: Number(response.headers.get("x-agent-attempts") || 1),
           recovered_after_retry: response.headers.get("x-agent-recovered-after-retry") === "true",
           elapsed_ms: Date.now() - started,
@@ -976,8 +1079,10 @@ function createChatCompletionsClient(runtime) {
         };
       }
       catch (error) {
+        recordDeliveryFailure(classifyTransportFailure({ error }), error.message);
         return {
           ok: false,
+          request_id: requestId,
           status: 0,
           error_class: classifyTransportFailure({ error }),
           elapsed_ms: Date.now() - started,

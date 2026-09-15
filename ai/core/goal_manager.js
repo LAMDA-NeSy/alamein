@@ -79,21 +79,37 @@ function normalizePolicy(raw = {}) {
 function hardFacts(publicContext = {}) {
   const scoring = publicContext.victory?.current_scoring || {};
   const advance = scoring.july_advance || {};
+  const scenario = publicContext.game?.scenario || "";
+  const scenarioScoring = scenario === "september"
+    ? scoring.september_mine_clearance || {}
+    : scenario === "october"
+      ? scoring.october_withdrawal || {}
+      : {};
+  const confirmedFrontierRoutes = (publicContext.objective_resolution?.candidates || [])
+    .filter((item) => item.crosses_frontier && ["supplied", "partially_supplied", "partial"].includes(item.projected_supply));
+  const locallyConfirmedMaxColumn = confirmedFrontierRoutes.reduce((max, item) => {
+    const column = Number(item.target_column || String(item.destination || "").slice(0, 2));
+    return Number.isFinite(column) ? Math.max(max, column) : max;
+  }, scenario === "july" ? integer(advance.farthest_scoring_column, 34) : 0);
   return {
-    scenario: publicContext.game?.scenario || "",
+    scenario,
     side: publicContext.game?.active_side || "",
     turn: Number(publicContext.game?.turn || 1),
     turns_remaining: Number(publicContext.game?.turns_remaining || 0),
     current_vp: Number(scoring.total_vp ?? publicContext.victory?.current_vp ?? 0),
     current_level: scoring.current_level || publicContext.victory?.current_level || "",
     next_threshold: clone(scoring.next_axis_threshold || {}),
-    current_scoring_column: Number.isInteger(Number(advance.farthest_scoring_column)) ? Number(advance.farthest_scoring_column) : null,
-    next_scoring_column: Number.isInteger(Number(advance.next_scoring_column)) ? Number(advance.next_scoring_column) : null,
+    current_scoring_column: scenario === "july" ? integer(advance.farthest_scoring_column) : null,
+    next_scoring_column: scenario === "july" ? integer(advance.next_scoring_column) : null,
     next_column_vp_gain: Number(advance.vp_gain_for_reaching_next_column || 0),
     scoring_requirement: advance.scoring_requirement || "",
-    confirmed_frontier_routes: (publicContext.objective_resolution?.candidates || [])
-      .filter((item) => item.crosses_frontier && ["supplied", "partially_supplied"].includes(item.projected_supply))
-      .slice(0, 8)
+    scenario_metric: scenario === "september" ? "mine_clearance" : scenario === "october" ? "withdrawal_vp" : scenario === "july" ? "scoring_frontier" : "scenario_scoring",
+    scenario_scoring: clone(scenarioScoring),
+    confirmed_frontier_routes: confirmedFrontierRoutes.slice(0, 8),
+    july_locally_confirmed_max_column: scenario === "july" ? locallyConfirmedMaxColumn : null,
+    july_target_maintenance_evidence: scenario === "july" && confirmedFrontierRoutes.length > 0
+      ? "at least one current legal route preserves scoring-eligible supply; future turn-end maintenance remains conditional"
+      : scenario === "july" ? "no current legal route with scoring-eligible supply was verified" : null
   };
 }
 
@@ -129,15 +145,132 @@ function groundGoalPlan(raw, { publicContext = {}, state = {}, side = "", ctx = 
     if (!goal.subject_side) goal.subject_side = side;
     if (!goal.evaluation_scope) goal.evaluation_scope = goal === campaign ? "game_end" : "turn_end";
     if (!goal.metric) goal.metric = goal.target_vp != null ? "axis_vp" : goal.target_column != null ? "scoring_frontier" : "scenario_scoring";
-    if (goal.metric === "axis_vp" && goal.target_vp == null && Number.isInteger(Number(goal.target))) {
-      goal.target_vp = Number(goal.target);
+    if (facts.scenario !== "july" && goal.metric === "scoring_frontier") {
+      // A column number is not a mine count or a withdrawal VP target.
+      const requestedTarget = goal.target ?? goal.target_column;
+      corrections.push({ field: `${goal.id}.metric`, requested: "scoring_frontier", grounded: facts.scenario_metric, reason: `scoring frontier is not a ${facts.scenario} objective` });
+      goal.metric = facts.scenario_metric;
+      goal.target_column = null;
+      goal.target = null;
+      goal.expected_vp_delta = null;
+      corrections.push({ field: `${goal.id}.target`, requested: requestedTarget, grounded: null, reason: "incompatible column target removed; scenario target will use current scoring facts" });
     }
-    if (goal.metric === "scoring_frontier" && goal.target_column == null && Number.isInteger(Number(goal.target))) {
-      goal.target_column = Number(goal.target);
+    if (["september", "october"].includes(facts.scenario)
+      && goal.metric === "scenario_scoring"
+      && goal.target_vp != null) {
+      corrections.push({
+        field: `${goal.id}.metric`,
+        requested: "scenario_scoring",
+        grounded: "axis_vp",
+        reason: "an explicit VP target is a campaign evaluation, not a scenario-specific score"
+      });
+      goal.metric = "axis_vp";
+    }
+    if (["september", "october"].includes(facts.scenario)
+      && goal.metric === "scenario_scoring"
+      && goal.target_vp == null) {
+      // Keep the model's open-ended scenario intent, but give the local task
+      // evaluator the authoritative fact that the scenario actually scores.
+      const groundedMetric = facts.scenario_metric;
+      const current = groundedMetric === "mine_clearance"
+        ? Number(facts.scenario_scoring.mines_cleared || 0)
+        : Number(facts.scenario_scoring.vp_from_withdrawal || 0);
+      const compatibleRelations = side === "allies" ? ["at_most", "keep_below"] : ["at_least"];
+      const groundedRelation = compatibleRelations.includes(goal.relation)
+        ? goal.relation
+        : side === "allies" ? "at_most" : "at_least";
+      const requestedTarget = goal.target;
+      const requestedTargetVp = goal.target_vp;
+      const hasExplicitTarget = requestedTarget != null
+        && requestedTarget !== ""
+        && Number.isFinite(Number(requestedTarget));
+      const groundedTarget = hasExplicitTarget
+        ? Number(requestedTarget)
+        : current + (side === "axis" || groundedRelation === "keep_below" ? 1 : 0);
+      corrections.push({
+        field: `${goal.id}.metric`,
+        requested: "scenario_scoring",
+        grounded: groundedMetric,
+        reason: `the ${facts.scenario} rules expose ${groundedMetric} as the authoritative scenario score`
+      });
+      goal.metric = groundedMetric;
+      goal.subject_side = "axis";
+      goal.relation = groundedRelation;
+      goal.target = groundedTarget;
+      if (goal.target_vp != null) {
+        corrections.push({
+          field: `${goal.id}.target_vp`,
+          requested: goal.target_vp,
+          grounded: null,
+          reason: "target_vp is not a valid target for a scenario_scoring metric"
+        });
+        goal.target_vp = null;
+      }
+      goal.observable_conditions.unshift({
+        kind: groundedMetric,
+        description: side === "allies"
+          ? `Keep the authoritative Axis ${groundedMetric} result at or below ${groundedTarget}`
+          : `Increase the authoritative Axis ${groundedMetric} result to at least ${groundedTarget}`,
+        target: groundedTarget,
+        subject_side: "axis",
+        relation: groundedRelation
+      });
+      corrections.push({
+        field: `${goal.id}.target`,
+        requested: requestedTarget ?? requestedTargetVp,
+        grounded: groundedTarget,
+        reason: hasExplicitTarget
+          ? "numeric model target retained after grounding it to the authoritative scenario metric"
+          : side === "allies" ? "defensive scenario target freezes the current Axis score" : "offensive scenario target advances the current Axis score by one scoring event"
+      });
+    }
+    if (goal.metric === "axis_vp" && goal.target_vp == null) {
+      goal.target_vp = integer(goal.target);
+    }
+    if (goal.metric === "scoring_frontier" && goal.target_column == null) {
+      goal.target_column = integer(goal.target);
     }
     if (!goal.relation) goal.relation = goal.metric === "axis_vp"
       ? (side === "axis" ? "at_least" : "at_most")
       : (side === "axis" ? "at_least" : "keep_below");
+    if (["mine_clearance", "withdrawal_vp"].includes(goal.metric)) {
+      const expectedRelation = side === "allies" ? "at_most" : "at_least";
+      if (goal.subject_side !== "axis") {
+        corrections.push({
+          field: `${goal.id}.subject_side`,
+          requested: goal.subject_side,
+          grounded: "axis",
+          reason: `${goal.metric} is an Axis-scored scenario fact observed by either side`
+        });
+      }
+      const compatibleRelations = side === "allies" ? ["at_most", "keep_below"] : ["at_least"];
+      if (!compatibleRelations.includes(goal.relation)) {
+        corrections.push({
+          field: `${goal.id}.relation`,
+          requested: goal.relation,
+          grounded: expectedRelation,
+          reason: `the active ${side} side uses the scenario metric as ${expectedRelation}`
+        });
+      }
+      goal.subject_side = "axis";
+      if (!compatibleRelations.includes(goal.relation)) goal.relation = expectedRelation;
+      if (side === "allies") goal.evaluation_scope = "game_end";
+      if (integer(goal.target) == null) {
+        const current = Number(goal.metric === "mine_clearance"
+          ? facts.scenario_scoring.mines_cleared || 0
+          : facts.scenario_scoring.vp_from_withdrawal || 0);
+        goal.target = current + (side === "axis" || goal.relation === "keep_below" ? 1 : 0);
+      }
+      goal.observable_conditions.unshift({
+        kind: goal.metric,
+        description: expectedRelation === "at_most"
+          ? `Keep the authoritative Axis ${goal.metric} result ${goal.relation === "keep_below" ? "below" : "at or below"} ${goal.target}`
+          : `Reach at least ${goal.target} on the authoritative Axis ${goal.metric} result`,
+        target: goal.target,
+        subject_side: "axis",
+        relation: goal.relation
+      });
+    }
     if (goal.target == null) goal.target = goal.metric === "scoring_frontier" ? goal.target_column : goal.target_vp;
     if (facts.scenario === "july" && side === "allies" && goal.target_column != null && goal.metric === "scoring_frontier") {
       if (goal.subject_side !== "axis" || goal.relation !== "keep_below") {
@@ -160,6 +293,24 @@ function groundGoalPlan(raw, { publicContext = {}, state = {}, side = "", ctx = 
       goal.target_hex = normalized;
     }
     if (facts.scenario === "july" && goal.metric === "scoring_frontier" && goal.target_column != null) {
+      const currentColumn = Number(facts.current_scoring_column || 34);
+      // Keep one next-column checkpoint as a hypothesis when no direct route
+      // was verified; remote multi-column jumps still require evidence.
+      const confirmedMax = facts.confirmed_frontier_routes.length
+        ? Number(facts.july_locally_confirmed_max_column || currentColumn)
+        : currentColumn + 1;
+      if (goal.subject_side === "axis" && goal.relation === "at_least"
+        && goal.target_column > confirmedMax) {
+        const requestedTarget = goal.target_column;
+        goal.target_column = Math.max(currentColumn, confirmedMax);
+        goal.target = goal.target_column;
+        corrections.push({
+          field: `${goal.id}.target_column`,
+          requested: requestedTarget,
+          grounded: goal.target_column,
+          reason: "target exceeds the furthest current legal route with scoring-eligible supply; future targets require a new verified route"
+        });
+      }
       const requestedDelta = goal.expected_vp_delta;
       const groundedDelta = goal.subject_side === "axis" && goal.relation === "at_least"
         ? Math.max(0, goal.target_column - Number(facts.current_scoring_column || 34)) * 3
@@ -233,23 +384,42 @@ function groundGoalPlan(raw, { publicContext = {}, state = {}, side = "", ctx = 
 function localGoalPlan({ publicContext = {}, state = {}, side = "" } = {}) {
   const facts = hardFacts(publicContext);
   const defensive = side === "allies";
-  const targetColumn = facts.scenario === "july"
-    ? defensive
-      ? facts.next_scoring_column
-      : Math.max(Number(facts.next_scoring_column || 35), 37)
-    : null;
+  const targetColumn = facts.scenario === "july" ? facts.next_scoring_column : null;
+  const scenarioPrimary = facts.scenario === "september"
+    ? {
+        id: defensive ? "protect_minefields" : "clear_allied_mines",
+        title: defensive ? "保护 Allied 雷区并阻止 Axis 清雷" : "清除 Allied 雷区获取场景 VP",
+        goal_type: defensive ? "protect_minefields" : "mine_clearance",
+        subject_side: "axis",
+        metric: "mine_clearance",
+        relation: defensive ? "at_most" : "at_least",
+        target: Number(facts.scenario_scoring.mines_cleared || 0) + (defensive ? 0 : 1),
+        evaluation_scope: "game_end"
+      }
+    : facts.scenario === "october"
+      ? {
+          id: defensive ? "deny_west_withdrawal" : "withdraw_west",
+          title: defensive ? "限制 Axis 西侧撤退得分" : "将有价值的 Axis 单位从西侧撤出",
+          goal_type: defensive ? "deny_axis_withdrawal" : "west_edge_withdrawal",
+          subject_side: "axis",
+          metric: "withdrawal_vp",
+          relation: defensive ? "at_most" : "at_least",
+          target: Number(facts.scenario_scoring.vp_from_withdrawal || 0) + (defensive ? 0 : 1),
+          evaluation_scope: "game_end"
+        }
+      : null;
   const plan = groundGoalPlan({
     type: "open_goal_plan",
     operation: "local_scoring_recovery",
     campaign_goal: {
       title: defensive ? "Minimize final Axis VP" : (facts.next_threshold?.level ? `Reach ${facts.next_threshold.level}` : "Improve the scenario result"),
-      target_vp: defensive ? 29 : (facts.next_threshold?.vp || null),
+      target_vp: defensive ? facts.current_vp : (facts.next_threshold?.vp || null),
       subject_side: "axis",
       metric: "axis_vp",
       relation: defensive ? "at_most" : "at_least",
       evaluation_scope: "game_end"
     },
-    primary_goal: targetColumn ? {
+    primary_goal: scenarioPrimary || (targetColumn ? {
       id: defensive ? `deny_column_${targetColumn}` : `secure_column_${targetColumn}`,
       title: defensive ? `Prevent Axis from entering column ${targetColumn}` : `Establish a scoring-eligible unit in column ${targetColumn}`,
       goal_type: defensive ? "deny_scoring_frontier" : "secure_scoring_frontier",
@@ -266,7 +436,7 @@ function localGoalPlan({ publicContext = {}, state = {}, side = "" } = {}) {
       title: "Improve the current scenario score",
       goal_type: "scenario_scoring",
       rationale: "Use the authoritative scoring rules and current force state."
-    },
+    }),
     supporting_goals: [{
       id: "preserve_supply",
       title: defensive ? "Preserve the Allied defensive supply network" : "Preserve the operational supply network",
@@ -285,6 +455,8 @@ function goalIntent(goalPlan) {
   const primary = goalPlan.primary_goal || {};
   const axis = goalPlan.operation_policy?.main_axis || "flexible";
   const type = goalPlan.side === "allies" && goalPlan.strategy_mode === "recover_result" ? "pressure"
+    : /withdraw|exit/.test(primary.goal_type || "") || primary.metric === "withdrawal_vp"
+      ? goalPlan.side === "axis" ? "prepare_withdrawal" : "block_withdrawal"
     : /deny|block|hold|preserv/i.test(primary.goal_type) && goalPlan.side === "allies" ? "consolidate"
     : /supply/i.test(primary.goal_type) ? "supply"
     : /attack|isolate|combat|break/i.test(primary.goal_type) ? "attack_pressure"

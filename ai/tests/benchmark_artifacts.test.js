@@ -9,6 +9,11 @@ const {
   validateArtifactManifest
 } = require("../core/benchmark_artifacts.js");
 const {
+  COMPARISON_CONTRACT_VERSION,
+  comparisonContractHash
+} = require("../core/comparison_contract.js");
+const {
+  buildComparisonCells,
   buildPairedResults,
   comparisonCellId,
   infrastructureStatus,
@@ -18,12 +23,18 @@ const {
 function row(overrides = {}) {
   const manifest = createArtifactManifest("july", { includeGitMetadata: false });
   const contract = {
-    version: "single-action-comparison-v14-benchmark-integrity",
+    version: COMPARISON_CONTRACT_VERSION,
     scenario: "july",
     external_side: "axis",
     controllers: { axis: "external_ai", allies: "rules_ai" },
     artifact_manifest: manifest,
     model_configuration: { identity: { profile_id: "mock_primary" }, defaults: { thinking: "disabled" } },
+    model_profile: "mock_primary",
+    tool_profile: "map_and_action",
+    tool_config_hash: "tools-v1",
+    context_profile: "compact-v1",
+    prompt_profile_hash: "prompt-v1",
+    harness_prompt_hash: "harness-v1",
     max_steps: 1000,
     max_calls_per_step: 6,
     step_timeout_ms: 180000
@@ -34,6 +45,7 @@ function row(overrides = {}) {
     artifact_manifest_hash: manifest.artifact_manifest_hash,
     artifact_manifest: manifest,
     comparison_contract: contract,
+    comparison_contract_hash: comparisonContractHash(contract),
     scenario: "july",
     external_side: "axis",
     controllers: { axis: "external_ai", allies: "rules_ai" },
@@ -64,6 +76,8 @@ test("artifact manifest covers the fixed rules and scenario inputs", () => {
   assert.match(manifest.artifact_manifest_hash, /^[a-f0-9]{64}$/);
   assert.match(manifest.files.rule_engine.sha256, /^[a-f0-9]{64}$/);
   assert.equal(manifest.files.scenario.path, "scenarios/july.json");
+  assert.equal(manifest.files.counter_stats.path, "counter_stats.json");
+  assert.match(manifest.files.counter_stats.sha256, /^[a-f0-9]{64}$/);
   assert.equal(compareArtifactManifests([manifest, structuredClone(manifest)]).comparable, true);
   const changed = structuredClone(manifest);
   changed.artifact_manifest_hash = "different";
@@ -72,6 +86,12 @@ test("artifact manifest covers the fixed rules and scenario inputs", () => {
   const tampered = structuredClone(manifest);
   tampered.files.replay.sha256 = "0".repeat(64);
   assert.equal(validateArtifactManifest(tampered, tampered.artifact_manifest_hash), false);
+  for (const key of ["sae_runtime", "task_manager", "goal_manager", "reasoning_memory", "model_runtime", "method_configuration", "package_lock"]) {
+    assert.match(manifest.files[key].sha256, /^[a-f0-9]{64}$/, key);
+    const changedRuntime = structuredClone(manifest);
+    changedRuntime.files[key].sha256 = "0".repeat(64);
+    assert.equal(validateArtifactManifest(changedRuntime, changedRuntime.artifact_manifest_hash), false, key);
+  }
 });
 
 test("comparison validator accepts complete paired variants that used declared fallback", () => {
@@ -84,8 +104,23 @@ test("comparison validator accepts complete paired variants that used declared f
   assert.equal(validation.valid, true);
   assert.equal(validation.infrastructure_affected_rows, 1);
   assert.equal(validation.ranking_eligible_rows, 2);
+  assert.equal(validation.clean_ranking_eligible_rows, 1);
   assert.equal(infrastructureStatus({ status: "harness_error" }), "harness_error");
   assert.equal(infrastructureStatus({ status: "step_limit", partial: true }), "partial");
+});
+
+test("network-affected method fallback ranks end to end but is excluded from clean paired statistics", () => {
+  const direct = row({ decision_policy: "direct", experiment_id: "direct", final_vp: 20 });
+  const hybrid = row({ decision_policy: "hybrid", experiment_id: "hybrid", final_vp: 25, sample_status: "infrastructure_affected" });
+  const [cell] = buildComparisonCells([direct, hybrid], "method");
+  assert.equal(cell.validation.valid, true);
+  assert.equal(cell.paired_results[0].comparisons[0].ranking_eligible, true);
+  assert.equal(cell.paired_results[0].comparisons[0].clean_ranking_eligible, false);
+  assert.equal(cell.paired_statistics[0].vp_difference.mean, 5);
+  assert.equal(cell.clean_paired_statistics[0].vp_difference.count, 0);
+  hybrid.sample_status = "clean";
+  const [clean] = buildComparisonCells([direct, hybrid], "method");
+  assert.equal(clean.clean_paired_statistics[0].vp_difference.mean, 5);
 });
 
 test("comparison validator rejects missing artifacts and unpaired replicates", () => {

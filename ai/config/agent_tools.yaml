@@ -11,11 +11,11 @@ action_schema: &action_schema
   properties:
     type:
       type: string
-      enum: [move_intent, move, combat, exit_west, pass]
-      description: Action type.
+      enum: [move_intent, move, combat, clear_mine, exit_west, pass]
+      description: Action type. Use clear_mine for a unit already in an enemy minefield.
     unit:
       type: string
-      description: Exact unit id for move_intent, move, or exit_west.
+      description: Exact unit id for move_intent, move, clear_mine, or exit_west.
     destination:
       type: string
       description: Destination hex for move_intent or move.
@@ -42,6 +42,9 @@ action_schema: &action_schema
       description: >-
         Exact target hexes for combat. This field name is required; do not use
         target, target_hex, defender, or hex.
+    hex:
+      type: string
+      description: Minefield hex for clear_mine. Defaults to the unit's current hex.
     reason:
       type: string
       description: Short reason, especially for pass.
@@ -390,9 +393,9 @@ tool_docs:
       - '{"unit":"unit-id"} before moving a spearhead across the scoring frontier'
 
   phase_status:
-    purpose: Read authoritative phase progress and determine which units or combat opportunities remain.
+    purpose: Read authoritative phase progress, mine-clearance options, and determine which units or combat opportunities remain.
     input_guide: This tool takes no parameters.
-    output_guide: Returns phase-start eligible units, acted units, held units, remaining units, mandatory repairs, pass eligibility, and in combat phases grouped targets with eligible attackers.
+    output_guide: Returns phase-start eligible units, acted units, held units, remaining units, mandatory repairs, pass eligibility, combat targets with eligible attackers, and combat units that can attempt clear_mine.
     decision_effect: Use it to choose the next unit, avoid ending a phase early, and select any useful subset for a joint attack.
     examples:
       - "{} at the beginning of a rolling movement or combat phase"
@@ -417,12 +420,14 @@ tool_docs:
     purpose: Submit exactly one proposed game action to the authoritative rules bridge.
     input_guide: >-
       action must use the canonical schema: move_intent or move for movement,
-      combat with attackers and defender_hexes, exit_west when legal, or pass.
+      combat with attackers and defender_hexes, clear_mine with unit and hex
+      for a unit already in an enemy minefield, exit_west when legal, or pass.
     output_guide: Returns accepted, canonical_action, legality or rejection reason, normalized evaluation, victory impact, and whether tool calls must stop.
     decision_effect: accepted=true changes the replay-owned game state exactly once and ends the current model step; accepted=false leaves the state unchanged and provides a repair reason.
     examples:
       - '{"action":{"type":"move_intent","unit":"unit-id","destination":"3511","mode":"auto"}}'
       - '{"action":{"type":"combat","attackers":["unit-a"],"defender_hexes":["3716"]}}'
+      - '{"action":{"type":"clear_mine","unit":"unit-a","hex":"3319"}}'
       - '{"action":{"type":"pass","reason":"no useful legal action remains"}}'
 
   inspect:

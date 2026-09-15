@@ -40,22 +40,34 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000) throw new Error(`agent method ${methodId} step_timeout_ms must be at least 1000`);
   const rollingUnitSettings = ["unit_plan_hybrid", "hierarchical_sae"].includes(methodId)
     ? Object.freeze({
-      protocol: String(raw.rolling_unit_protocol || "v1"),
+      protocol: String(raw.rolling_unit_protocol || "v2"),
+      execution_ledger: raw.execution_ledger === true,
+      repair_policy: String(raw.repair_policy || "per_order"),
+      phase_repair_timeout_ms: Math.max(1000, Number(raw.phase_repair_timeout_ms || 30000)),
       phase_status_first: raw.phase_status_first !== false,
-      execution_order: String(raw.execution_order || "model_tool_call_order"),
-      accepted_actions_per_replay_step: Number(raw.accepted_actions_per_replay_step || 1)
+      planning_mode: String(raw.planning_mode || "phase_batch"),
+      execution_order: String(raw.execution_order || "phase_plan_priority"),
+      revalidate_each_action: raw.revalidate_each_action !== false,
+      accepted_actions_per_replay_step: Number(raw.accepted_actions_per_replay_step || 1),
+      max_recommendation_expansions: Math.max(1, Number(raw.max_recommendation_expansions || 32)),
+      max_evaluated_options_per_unit: Math.max(3, Number(raw.max_evaluated_options_per_unit || 12)),
+      max_stagnant_actions: Math.max(1, Number(raw.max_stagnant_actions || 25))
     })
     : null;
   const taskManagement = raw.task_management === "multi_task"
     ? Object.freeze({
       mode: "multi_task",
-      protocol: String(raw.task_protocol || "side-aware-task-v2"),
+      execution_ledger: raw.execution_ledger === true,
+      protocol: String(raw.task_protocol || "side-aware-task-v4"),
       max_child_tasks: Math.max(3, Math.min(6, Number(raw.max_child_tasks || 6))),
       max_active_child_tasks: Math.max(1, Math.min(3, Number(raw.max_active_child_tasks || 3))),
       checker_enabled: raw.task_checker_enabled !== false,
       checker_model_profile: String(raw.task_checker_model_profile || "mock_secondary"),
       checker_timeout_ms: Math.max(1000, Number(raw.task_checker_timeout_ms || 60000)),
       checker_max_calls_per_turn: Math.max(1, Number(raw.task_checker_max_calls_per_turn || 4)),
+      checker_cooldown_actions: Math.max(0, Number(raw.task_checker_cooldown_actions ?? 3)),
+      route_feasibility_budget_ms: Math.max(1, Number(raw.route_feasibility_budget_ms || 2000)),
+      route_feasibility_scope: String(raw.route_feasibility_scope || "task_units_only"),
       task_generation: String(raw.task_generation || "fixed_skeleton"),
       dependency_policy: String(raw.task_dependency_policy || "hard_soft_conditional_v1"),
       task_switching: String(raw.task_switching || "existing_tasks_only"),
@@ -82,8 +94,8 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
       reset_on_replanning: raw.reasoning_memory.reset_on_replanning !== false
     })
     : null;
-  if (taskManagement && !["hierarchical-task-v1", "side-aware-task-v2"].includes(taskManagement.protocol)) {
-    throw new Error(`agent method ${methodId} task_protocol must be hierarchical-task-v1 or side-aware-task-v2`);
+  if (taskManagement && !["hierarchical-task-v1", "side-aware-task-v2", "side-aware-task-v3", "side-aware-task-v4"].includes(taskManagement.protocol)) {
+    throw new Error(`agent method ${methodId} task_protocol must be hierarchical-task-v1 or side-aware-task-v2/v3/v4`);
   }
   if (taskManagement && !["fixed_skeleton", "model_defined"].includes(taskManagement.task_generation)) {
     throw new Error(`agent method ${methodId} task_generation must be fixed_skeleton or model_defined`);
@@ -100,11 +112,20 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
   if (reasoningMemory && !["none", "summary_only", "summary_plus_excerpt"].includes(reasoningMemory.cross_step)) {
     throw new Error(`agent method ${methodId} reasoning_memory.cross_step is invalid`);
   }
-  if (rollingUnitSettings && rollingUnitSettings.protocol !== "v1") {
-    throw new Error(`agent method ${methodId} rolling_unit_protocol must be v1`);
+  if (rollingUnitSettings && !["v1", "v2"].includes(rollingUnitSettings.protocol)) {
+    throw new Error(`agent method ${methodId} rolling_unit_protocol must be v1 or v2`);
   }
-  if (rollingUnitSettings && rollingUnitSettings.execution_order !== "model_tool_call_order") {
-    throw new Error(`agent method ${methodId} execution_order must be model_tool_call_order`);
+  if (rollingUnitSettings && !["per_order", "phase_batch_once"].includes(rollingUnitSettings.repair_policy)) {
+    throw new Error(`agent method ${methodId} repair_policy is invalid`);
+  }
+  if (raw.execution_ledger && raw.decision_policy !== "hierarchical_sae") {
+    throw new Error("execution_ledger is only available for hierarchical_sae");
+  }
+  if (rollingUnitSettings && !["model_tool_call_order", "phase_plan_priority"].includes(rollingUnitSettings.execution_order)) {
+    throw new Error(`agent method ${methodId} execution_order is invalid`);
+  }
+  if (rollingUnitSettings && !["phase_batch", "single_action"].includes(rollingUnitSettings.planning_mode)) {
+    throw new Error(`agent method ${methodId} planning_mode is invalid`);
   }
   if (rollingUnitSettings && rollingUnitSettings.accepted_actions_per_replay_step !== 1) {
     throw new Error(`agent method ${methodId} accepted_actions_per_replay_step must be 1`);

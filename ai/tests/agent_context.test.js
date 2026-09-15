@@ -204,3 +204,13 @@ test("compact action feedback retains rejection and bounded repair guidance", ()
   assert.equal(feedback.result.alternatives[0].evaluation.victory_impact.verbose_internal_trace, undefined);
   assert.ok(contextBytes(feedback) < 2000);
 });
+
+test("compaction preserves task, route and combat risk evidence", () => {
+  const route = { status: "no_verified_current_phase_path", target: "3511", diagnostics: [] };
+  const risk = { attacker_retreat_probability: 2 / 3, outcome_distribution: { A2: { faces: 2, probability: 1 / 3 } } };
+  const feedback = compactToolFeedback({ tool: "act", result: { accepted: false,
+    assessment: { route_evidence: route, evaluation: { combat_risk_evidence: risk } }
+  } });
+  assert.deepEqual(feedback.result.assessment.route_evidence, route);
+  assert.deepEqual(feedback.result.assessment.evaluation.combat_risk_evidence, risk);
+});

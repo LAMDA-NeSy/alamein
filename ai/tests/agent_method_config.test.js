@@ -40,24 +40,44 @@ test("YAML config resolves every decision method and harness", () => {
     assert.equal(method.step_timeout_ms, 180000);
   }
   assert.deepEqual(resolveAgentMethod("unit_plan_hybrid", { config }).rolling_unit, {
-    protocol: "v1",
+    execution_ledger: false,
+    repair_policy: "per_order",
+    phase_repair_timeout_ms: 30000,
+    protocol: "v2",
     phase_status_first: true,
-    execution_order: "model_tool_call_order",
-    accepted_actions_per_replay_step: 1
+    planning_mode: "phase_batch",
+    execution_order: "phase_plan_priority",
+    revalidate_each_action: true,
+    accepted_actions_per_replay_step: 1,
+    max_recommendation_expansions: 32,
+    max_evaluated_options_per_unit: 12,
+    max_stagnant_actions: 25
   });
   assert.deepEqual(resolveAgentMethod("hierarchical_sae", { config }).rolling_unit, {
-    protocol: "v1",
+    execution_ledger: true,
+    repair_policy: "phase_batch_once",
+    phase_repair_timeout_ms: 30000,
+    protocol: "v2",
     phase_status_first: true,
-    execution_order: "model_tool_call_order",
-    accepted_actions_per_replay_step: 1
+    planning_mode: "phase_batch",
+    execution_order: "phase_plan_priority",
+    revalidate_each_action: true,
+    accepted_actions_per_replay_step: 1,
+    max_recommendation_expansions: 32,
+    max_evaluated_options_per_unit: 12,
+    max_stagnant_actions: 25
   });
   assert.deepEqual(resolveAgentMethod("hierarchical_sae", { config }).task_management, {
+    execution_ledger: true,
     mode: "multi_task",
-    protocol: "side-aware-task-v2",
+    protocol: "side-aware-task-v4",
     max_child_tasks: 6,
     max_active_child_tasks: 3,
       checker_enabled: true,
-      checker_model_profile: "mock_secondary",
+    checker_model_profile: "mock_secondary",
+    checker_cooldown_actions: 3,
+    route_feasibility_budget_ms: 2000,
+    route_feasibility_scope: "task_units_only",
       task_generation: "model_defined",
       dependency_policy: "hard_soft_conditional_v1",
       task_switching: "existing_tasks_only",
