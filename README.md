@@ -59,6 +59,104 @@ cp .env.example .env
 
 然后编辑 `.env`，只填写自己使用的变量。不要提交 `.env`、真实请求、真实响应或 `log/`。GLM-5.3-Flash 的 thinking 和 reasoning 配置由模型档案控制，不要在命令行强行覆盖。
 
+## 给同学的运行清单
+
+从仓库根目录执行。默认 Mock 不收费；真实模型只需要在本机 `.env` 中配置对应密钥。
+
+```bash
+git clone https://github.com/LAMDA-NeSy/alamein.git
+cd alamein
+pnpm install --frozen-lockfile
+uv sync --locked --group dev
+pnpm test
+uv run --locked --group dev pytest ai/tests
+```
+
+先做不调用真实模型的预检和短局：
+
+```bash
+pnpm run ai:models -- --config ai/config/model_suites.yaml \
+  --out-dir log/model_suite_preview --dry-run
+pnpm run ai:full-game -- \
+  --scenario july --external-side axis \
+  --decision-policy hierarchical_sae --task-management multi_task \
+  --model-profile mock_primary --task-checker-model-profile mock_secondary \
+  --seed 1942 --max-steps 20 --out log/smoke_july_axis.json
+```
+
+真实模型必须显式指定主模型和独立 checker：
+
+```bash
+pnpm run ai:full-game -- \
+  --scenario july --external-side axis \
+  --decision-policy hierarchical_sae --task-management multi_task \
+  --model-profile glm_53_flash_coding_plan \
+  --task-checker-model-profile glm_53_flash_checker \
+  --seed 1942 --replicate 1 --step-timeout-ms 180000 \
+  --max-steps 1000 --out log/july_axis_glm53.json
+```
+
+三场景双方各运行一局时使用验收入口。`--concurrency 1` 表示串行，适合真实模型：
+
+```bash
+pnpm run ai:acceptance -- \
+  --out-dir log/sae_acceptance_glm53_$(date +%Y%m%d_%H%M%S) \
+  --model-profile glm_53_flash_coding_plan \
+  --task-checker-model-profile glm_53_flash_checker \
+  --concurrency 1
+```
+
+需要同时测试两个真实对局时，可以显式使用双并发。下面的命令会并发运行 July 的 Axis 和 Allies 两局；每局仍由规则引擎独立验证动作，输出不会互相覆盖：
+
+```bash
+OUT_DIR="log/paid_july_pair_$(date +%Y%m%d_%H%M%S)"
+pnpm run ai:acceptance -- \
+  --out-dir "$OUT_DIR" \
+  --model-profile glm_53_flash_coding_plan \
+  --task-checker-model-profile glm_53_flash_checker \
+  --concurrency 2
+```
+
+后台运行时，将命令最后一行改为：
+
+```bash
+pnpm run ai:acceptance -- \
+  --out-dir "$OUT_DIR" \
+  --model-profile glm_53_flash_coding_plan \
+  --task-checker-model-profile glm_53_flash_checker \
+  --concurrency 2 > "$OUT_DIR/launcher.console.log" 2>&1 &
+echo $! > "$OUT_DIR/launcher.pid"
+```
+
+查看状态或等待结束：
+
+```bash
+cat "$OUT_DIR/batch_manifest.json"
+ps -p "$(cat "$OUT_DIR/launcher.pid")" -o pid=,stat=,etime=,command=
+```
+
+不要在同一个输出目录重复启动。若进程中断，保留该目录供诊断并换一个新的 `OUT_DIR`。
+
+查看后台批次并生成报告：
+
+```bash
+pnpm run ai:models -- --status log/model_suite_YYYYMMDD_HHMMSS
+pnpm run ai:metrics -- log/*.json \
+  --judge --judge-model-profile mock_secondary \
+  --out log/all_scenarios_metrics.json
+pnpm run ai:audit -- log/*.json --out log/run_audit.json
+```
+
+对一个验收批次生成审计和指标报告：
+
+```bash
+pnpm run ai:audit -- "$OUT_DIR"/*.json --out "$OUT_DIR/audit.json"
+pnpm run ai:metrics -- "$OUT_DIR"/*.json \
+  --out "$OUT_DIR/metrics.json"
+```
+
+不要提交 `.env`、`log/`、真实请求或响应。每次实验使用新的输出目录；日志中的 `ranking_eligibility`、artifact 哈希和比较合同用于判断结果是否可进入正式排名。
+
 ## 我们的方法和 Harness
 
 本项目自己的 SAE 方法使用 `manual_single_action` 运行器，入口是 `ai/experiments/external_ai_full_game_transcript.js`。OpenCode、LangGraph 和 PydanticAI 是可选 Harness，不等同于 SAE 方法本身。
