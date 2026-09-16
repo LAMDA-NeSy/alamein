@@ -53,6 +53,8 @@ python3 -m http.server 8000 --bind 127.0.0.1
 | `deepseek_flash` | DeepSeek Flash | `DEEPSEEK_API_KEY` |
 | `claude_opus_51` | Claude Opus 5.1 | `ANTHROPIC_API_KEY` |
 | `gpt_6` | GPT 6 | `OPENAI_API_KEY` |
+| `kimi_k3` | Kimi K3 示例配置 | `KIMI_API_KEY` |
+| `kimi_k3_checker` | Kimi K3 独立任务检查模型 | `KIMI_API_KEY` |
 
 真实模型只在命令行显式指定。配置密钥：
 
@@ -192,7 +194,61 @@ models:
   - id: deepseek
     model_profile: deepseek_flash
     checker_model_profile: deepseek_flash_checker
+  - id: kimi-k3
+    model_profile: kimi_k3
+    checker_model_profile: kimi_k3_checker
 ```
+
+Kimi K3 当前只作为显式 opt-in 示例加入。使用前请根据飞书实验表或实际服务协议核对模型 ID、endpoint 和计费渠道；若使用中转服务，只需在本地未跟踪的模型注册表中同步修改对应 profile，不要把密钥写入 YAML。
+
+Kimi K3 单局示例（July，Axis SAE 对阵复杂规则 AI）：
+
+```bash
+pnpm run ai:full-game -- \
+  --scenario july \
+  --external-side axis \
+  --decision-policy hierarchical_sae \
+  --task-management multi_task \
+  --model-profile kimi_k3 \
+  --task-checker-model-profile kimi_k3_checker \
+  --tool-profile rolling_unit_rules_tactical \
+  --seed 1942 \
+  --replicate 1 \
+  --step-timeout-ms 180000 \
+  --max-steps 1000 \
+  --out "log/kimi_k3_july_axis_$(date +%Y%m%d_%H%M%S).json"
+```
+
+Kimi K3 三场景、双方各一局示例：
+
+```bash
+pnpm run ai:acceptance -- \
+  --out-dir "log/kimi_k3_six_$(date +%Y%m%d_%H%M%S)" \
+  --model-profile kimi_k3 \
+  --task-checker-model-profile kimi_k3_checker \
+  --concurrency 1
+```
+
+或者使用模型套件入口，只选择 Kimi，避免误跑示例中的其他模型：
+
+```bash
+pnpm run ai:models -- \
+  --config ai/config/model_suites.example.yaml \
+  --models kimi-k3 \
+  --out-dir "log/kimi_k3_suite_$(date +%Y%m%d_%H%M%S)" \
+  --concurrency 1 \
+  --case-concurrency 1
+```
+
+实验日志从命令的 `--out` 或 `--out-dir` 获取。单局日志就是指定的 JSON 文件；六局批量则在输出目录下按场景和阵营生成六个 JSON，并同时生成 `suite_manifest.json`、每个模型目录的 `batch_manifest.json`、`model_steps.jsonl`、`state_snapshots.jsonl` 和控制台日志。常用查看命令：
+
+```bash
+ls -lt log/
+jq '{status,summary,counts,model_usage,ranking_eligibility}' log/kimi_k3_july_axis_*.json
+find log/kimi_k3_suite_* -maxdepth 3 -type f | sort
+```
+
+`log/` 默认被 `.gitignore` 忽略，不会随代码上传；把结果交给其他同学时，应提供完整实验输出目录和对应 commit，不要提供 `.env`。
 
 ## 批量实验与 Baseline
 

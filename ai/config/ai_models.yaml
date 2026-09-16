@@ -338,6 +338,55 @@ models:
       circuit_breaker_failures: 3
       circuit_breaker_cooldown_ms: 30000
 
+  # Explicit opt-in example. Confirm endpoint and model id before real use.
+  kimi_k3:
+    adapter: openai_compatible
+    provider: kimi
+    model: kimi-k3
+    base_url: https://api.moonshot.ai/v1
+    api_key_env: KIMI_API_KEY
+    limits:
+      context: 256000
+      output: 8192
+    capabilities:
+      tool_calling: true
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: false
+    defaults:
+      temperature: 0.25
+      thinking: omitted
+      timeout_ms: 120000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [5000, 15000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 60000
+
+  kimi_k3_checker:
+    adapter: openai_compatible
+    provider: kimi
+    model: kimi-k3
+    base_url: https://api.moonshot.ai/v1
+    api_key_env: KIMI_API_KEY
+    limits:
+      context: 128000
+      output: 4096
+    capabilities:
+      tool_calling: false
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: false
+    defaults:
+      temperature: 0
+      thinking: omitted
+      timeout_ms: 60000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [5000, 15000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 30000
+
   mock_primary:
     adapter: mock
     provider: local_mock

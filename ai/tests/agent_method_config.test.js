@@ -111,6 +111,8 @@ test("configuration directory contains YAML documents only", () => {
   assert.ok(configFiles.length >= 5);
   assert.deepEqual(configFiles.filter((file) => !/\.ya?ml$/i.test(file)), []);
   assert.equal(loadRegistryDocument().models.deepseek_flash.model, "deepseek-v4-flash");
+  assert.equal(loadRegistryDocument().models.kimi_k3.model, "kimi-k3");
+  assert.equal(loadRegistryDocument().models.kimi_k3_checker.api_key_env, "KIMI_API_KEY");
   assert.deepEqual(loadToolProfiles().map_and_action.tools, ["view_map", "act"]);
   assert.match(loadToolCatalog().tools.view_map.description, /current board/);
   assert.equal(readConfigFile(path.join(CONFIG_DIR, "ai_config.yaml")).context.maxCandidateActions, 48);

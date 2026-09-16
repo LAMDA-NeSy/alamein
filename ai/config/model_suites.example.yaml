@@ -24,3 +24,6 @@ models:
   - id: gpt6
     model_profile: gpt_6
     checker_model_profile: gpt_6_checker
+  - id: kimi-k3
+    model_profile: kimi_k3
+    checker_model_profile: kimi_k3_checker

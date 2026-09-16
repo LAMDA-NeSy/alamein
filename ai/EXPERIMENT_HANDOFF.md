@@ -38,8 +38,11 @@ test -f log/model_suites.local.yaml || cp ai/config/model_suites.example.yaml lo
 | `glm53-coding-plan` | `glm_53_flash_coding_plan` | `glm_53_flash_checker` | `ZHIPU_CODING_API_KEY`，Coding Plan |
 | `deepseek` | `deepseek_flash` | `deepseek_flash_checker` | `DEEPSEEK_API_KEY` |
 | `glm47` | `glm_47_flash` | `glm_47_flash_checker` | `ZHIPU_API_KEY` |
+| `kimi-k3` | `kimi_k3` | `kimi_k3_checker` | `KIMI_API_KEY`，需先核对 endpoint、模型 ID 和计费渠道 |
 
 Profile 的 URL、模型名、thinking、超时和重试策略统一在 `ai/config/ai_models.yaml`。独立 checker 是独立配置和独立请求，不要求另一个供应商或另一把密钥。若增加新模型，先由项目维护者提交主模型和 checker 配置，所有同学同步同一 commit 后再跑。
+
+Kimi K3 是显式 opt-in 示例，当前注册为 OpenAI-compatible profile。飞书实验表若使用中转服务或不同模型 ID，应先在本地未跟踪的模型注册表中核对并修改 `kimi_k3`、`kimi_k3_checker` 的 `base_url` 和 `model`；不要把真实密钥提交到 YAML 或日志。
 
 `log/model_suites.local.yaml` 可以只保留需要的模型；也可以保留示例，使用 `--models` 显式选择。**不要对含多个真实模型的示例省略 `--models`，否则会运行配置中的全部模型。**
 
@@ -121,6 +124,34 @@ pnpm run ai:full-game -- \
 ```
 
 更改 `--external-side allies` 测试防守方；更改场景时同步设置 `--max-steps`。`max_steps` / 部分对局不等于终局成功。完整结果须有 `status=final_victory` 和 `summary.victory.final=true`。
+
+Kimi K3 单局命令：
+
+```bash
+pnpm run ai:full-game -- \
+  --scenario july --external-side axis \
+  --decision-policy hierarchical_sae --task-management multi_task \
+  --model-profile kimi_k3 --task-checker-model-profile kimi_k3_checker \
+  --tool-profile rolling_unit_rules_tactical \
+  --seed 1942 --replicate 1 --step-timeout-ms 180000 --max-steps 1000 \
+  --out "log/kimi_k3_july_axis_$(date +%Y%m%d_%H%M%S).json"
+```
+
+Kimi K3 六局批量命令。直接使用仓库示例并显式选择 `kimi-k3`，不会误跑其他模型：
+
+```bash
+pnpm run ai:models -- \
+  --config ai/config/model_suites.example.yaml --models kimi-k3 \
+  --out-dir "log/kimi_k3_six_$(date +%Y%m%d_%H%M%S)" \
+  --concurrency 1 --case-concurrency 1
+```
+
+单局日志位于 `--out` 指定的 JSON；批量日志位于 `--out-dir` 下，六个对局 JSON 与 `suite_manifest.json`、`batch_manifest.json`、每局上下文目录中的 `model_steps.jsonl` 和 `state_snapshots.jsonl` 一起保留。查看批次状态：
+
+```bash
+pnpm run ai:models -- --status log/kimi_k3_six_YYYYMMDD_HHMMSS
+find log/kimi_k3_six_* -maxdepth 3 -type f | sort
+```
 
 ## 6. Baseline 和重复实验
 
