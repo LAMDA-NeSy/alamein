@@ -64,7 +64,7 @@ cp .env.example .env
 
 然后编辑 `.env`，只填写自己使用的变量。不要提交 `.env`、真实请求、真实响应或 `log/`。GLM-5.3-Flash 的 thinking 和 reasoning 配置由模型档案控制，不要在命令行强行覆盖。
 
-## 给同学的运行清单
+## 运行清单
 
 完整操作说明见 [实验交接手册](ai/EXPERIMENT_HANDOFF.md)，包括环境安装、密钥配置、Mock 预检、多模型后台双并发、单局、baseline、日志审计、Judge 和结果打包。
 
