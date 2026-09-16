@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const http = require("node:http");
 const RulesEngine = require("../../rule_engine.js");
 const { promptValue } = require("./prompt_registry.js");
+const { phaseAllowedActions: scenarioPhaseAllowedActions, scenarioPolicy } = require("./scenario_policy.js");
 
 const {
   getToolDefinitions,
@@ -124,7 +125,7 @@ function reviewStrategicCombat({ decisionMode, action, assessment, operationStat
   };
 }
 
-function reviewStrategicMovement({ decisionMode, action, assessment, operationState, history = [], state, ctx } = {}) {
+function reviewStrategicMovement({ decisionMode, action, assessment, operationState, history = [], state, ctx, executionLedger = false } = {}) {
   if (decisionMode !== "hierarchical_sae" || action?.type !== "move") return { accept: true, issues: [], warnings: [], exemptions: [] };
   const unit = state?.units?.[action.unit] || {};
   const evaluation = assessment?.evaluation || {};
@@ -183,7 +184,9 @@ function reviewStrategicMovement({ decisionMode, action, assessment, operationSt
     issues.push(`repeated destination ${destination} has appeared in recent movement history without VP, supply, ZOC, or stack-repair benefit`);
   }
   if (isSupply && Number(impact.supply_coverage?.delta || 0) < 0) {
-    issues.push(`supply move would reduce scoring-eligible combat coverage by ${Math.abs(Number(impact.supply_coverage.delta))} unit(s)`);
+    const message = `supply move reduces combat supply coverage by ${Math.abs(Number(impact.supply_coverage.delta))} unit(s); evaluate affected units against the ${state?.scenario || "current"} task`;
+    if (executionLedger) warnings.push(message);
+    else issues.push(`supply move would reduce scoring-eligible combat coverage by ${Math.abs(Number(impact.supply_coverage.delta))} unit(s)`);
   }
 
   const primaryGoal = operationState?.goal_plan?.primary_goal || {};
@@ -278,6 +281,22 @@ function reviewTaskDispatch({ decisionMode, action, assessment, operationState, 
   };
 }
 
+// Strategic reviews explain risk to the model, but do not override a legal
+// choice. Rule legality and phase invariants remain enforced by assessment.
+function advisoryStrategicReview(...reviews) {
+  const issues = reviews.flatMap((review) => review?.issues || []);
+  const warnings = reviews.flatMap((review) => review?.warnings || []);
+  const alternatives = reviews.flatMap((review) => review?.alternatives || []).slice(0, 3);
+  const exemptions = reviews.flatMap((review) => review?.exemptions || []);
+  return {
+    accept: true,
+    issues: [],
+    warnings: [...new Set([...warnings, ...issues])],
+    alternatives,
+    exemptions
+  };
+}
+
 function readBody(req, maxBytes = 2 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -328,6 +347,7 @@ function normalizeNextIntent(value, operationState) {
 function createActionRuleBridge(config, options = {}) {
   const profile = resolveToolProfile(options.toolProfile || "map_and_action", options.toolProfileOptions);
   const hasHoldTool = profile.tools.includes("hold_unit") || profile.tools.includes("hold_units");
+  const ledgerEnabled = () => options.executionLedger === true && current?.decisionMode === "hierarchical_sae";
   const token = options.token || crypto.randomBytes(24).toString("base64url");
   const records = [];
   const phaseSnapshots = new Map();
@@ -363,6 +383,7 @@ function createActionRuleBridge(config, options = {}) {
     payload.context.protocol.canonical_action_shapes = {
       move_intent: { type: "move_intent", unit: "unit-id", destination: "hex", mode: "auto" },
       combat: { type: "combat", attackers: ["unit-id"], defender_hexes: ["hex"] },
+      clear_mine: { type: "clear_mine", unit: "unit-id", hex: "hex-id" },
       exit_west: { type: "exit_west", unit: "unit-id" },
       pass: { type: "pass", reason: "short reason" }
     };
@@ -399,6 +420,7 @@ function createActionRuleBridge(config, options = {}) {
       submitted: null,
       accepted_at_record: -1,
       tool_calls: 0,
+      local_execution_calls: 0,
       rejection_counts: new Map(),
       read_only_cache: new Map(),
       duplicate_read_only_calls: new Map()
@@ -419,7 +441,13 @@ function createActionRuleBridge(config, options = {}) {
     if (decisionMode === "hierarchical_sae" || input.operationState?.tactical_summary) {
       try {
         const { buildTacticalSummary } = require("./sae_runtime.js");
-        payload.context.tactical_summary = buildTacticalSummary(
+        payload.context.tactical_summary = input.operationState?.tactical_summary ? {
+          ...input.operationState.tactical_summary,
+          remaining_action_opportunities: payload.context.phase_status.remaining_units.length,
+          must_process_units: payload.context.phase_status.mandatory_actions,
+          can_hold_units: payload.context.phase_status.remaining_units,
+          should_not_act_units: [...payload.context.phase_status.acted_units, ...payload.context.phase_status.held_units]
+        } : buildTacticalSummary(
           input,
           built,
           input.operationState?.task_plan || null,
@@ -603,13 +631,19 @@ function createActionRuleBridge(config, options = {}) {
         catch { verdict = { legal: false, reason: "combat verification failed" }; }
         const ratio = oddsIndex(verdict.details?.odds_column);
         if (verdict.legal && ratio >= oddsIndex("2-1")) {
+          const verifiedCombat = runTool({ ctx, allUnits: current.built.allUnits }, current.built.publicContext,
+            "check_combat", { attackers: selected, defender_hexes: defenderHexList });
           recommendation = {
             recommended_attackers: selected,
             recommended_defender_hexes: defenderHexList,
             recommended_odds: verdict.details?.odds_column || "",
+            recommended_attack_total: verdict.details?.attack ?? null,
+            recommended_defense_total: verdict.details?.defense ?? null,
+            recommended_crt: verifiedCombat.details?.risk_evidence?.outcome_distribution || null,
+            attacker_retreat_probability: verifiedCombat.details?.risk_evidence?.attacker_retreat_probability ?? null,
             recommendation_reason: count === 1
-              ? "a single locally verified attacker reaches the strategic minimum"
-              : `the smallest strongest-attacker prefix reaching at least 2-1 uses ${count} attackers`
+              ? "a locally verified option, not a mandatory choice or safety guarantee; inspect its CRT risks"
+              : `a bounded strongest-attacker prefix search found ${count} attackers; odds are not success probability`
           };
           break;
         }
@@ -650,10 +684,20 @@ function createActionRuleBridge(config, options = {}) {
     const phaseKind = current.built.publicContext.game?.phase_kind || "";
     const movementPhase = ["initial_movement", "mechanized_movement", "supply_movement"].includes(phaseKind);
     const currentlyActionable = actionableUnits().filter((unit) => eligibleSet.has(unit.id) && !held.has(unit.id));
+    current.legal_move_cache ||= new Map();
     const hasLegalMove = new Map(currentlyActionable.map((unit) => {
       if (!movementPhase) return [unit.id, true];
-      const reachable = RulesEngine.reachableHexes(current.built.ctx, unit.id, { mode: "normal", maxHexes: 2 });
-      return [unit.id, [...reachable.keys()].some((hex) => hex !== unit.hex)];
+      if (current.legal_move_cache.has(unit.id)) return [unit.id, current.legal_move_cache.get(unit.id)];
+      // reachableHexes extends only legal prefixes. A legal first edge is
+      // sufficient for existence; do not enumerate the full movement range.
+      const reachable = RulesEngine.checkExitWest(current.built.ctx, { type: "exit_west", unit: unit.id }).legal
+        || ["normal", "road"].some((mode) => [...RulesEngine.reachableHexes(
+          current.built.ctx,
+          unit.id,
+          { mode, maxHexes: 2 }
+        ).keys()].some((hex) => hex !== unit.hex));
+      current.legal_move_cache.set(unit.id, reachable);
+      return [unit.id, reachable];
     }));
     const remaining = currentlyActionable.filter((unit) => hasLegalMove.get(unit.id));
     const remainingIds = new Set(remaining.map((unit) => unit.id));
@@ -672,13 +716,68 @@ function createActionRuleBridge(config, options = {}) {
     const actedIds = new Set(acted);
     const unavailable = eligible.filter((unitId) => !remainingIds.has(unitId) && !actedIds.has(unitId) && !held.has(unitId));
     const mandatoryActions = movementPhase
-      ? RulesEngine.temporaryOverstackGroups(current.built.ctx, current.side).map((group) => ({
-        type: "stack_repair",
-        hex: group.hex,
-        units: [...(group.removable_unit_ids || [])],
-        excess: Number(group.excess || 0),
-        reason: "temporary overstack must be repaired before ordinary movement"
-      }))
+      ? RulesEngine.temporaryOverstackGroups(current.built.ctx, current.side).map((group) => {
+        // The rule engine is authoritative for repair eligibility. Expose its
+        // validated one-step options so a local fallback never mistakes a
+        // repair obligation for an ordinary pass/fallback action.
+        const repairOptions = [];
+        for (const unitId of group.removable_unit_ids || []) {
+          const unit = current.built.ctx.state.units?.[unitId];
+          if (!unit || unit.eliminated || !unit.hex || (unit.state || "fresh") !== "fresh") continue;
+          if (!RulesEngine.canMoveInCurrentPhase(current.built.ctx, { ...unit, id: unitId })
+            || Number(unit.movement || 0) <= 0) continue;
+          for (const destination of RulesEngine.neighbors(group.hex)) {
+            let verdict;
+            try {
+              verdict = RulesEngine.checkMove(current.built.ctx, unitId, [group.hex, destination], { mode: "normal" });
+            }
+            catch {
+              verdict = { legal: false };
+            }
+            if (!verdict.legal) continue;
+            repairOptions.push({
+              unit: unitId,
+              destination,
+              path: [group.hex, destination],
+              mode: "normal",
+              spent: Number(verdict.details?.spent || 0),
+              verdict
+            });
+          }
+        }
+        const eliminationOptions = [];
+        if (!repairOptions.length) {
+          for (const unitId of group.removable_unit_ids || []) {
+            const projected = clone(current.built.ctx.state);
+            let verdict;
+            try {
+              verdict = RulesEngine.eliminateTemporaryOverstackUnit(
+                RulesEngine.createContext({ state: projected, rules: current.built.ctx.rules, terrain: current.built.ctx.terrain }),
+                unitId
+              );
+            }
+            catch {
+              verdict = { legal: false };
+            }
+            if (verdict.legal) eliminationOptions.push({ unit: unitId, verdict });
+          }
+        }
+        const first = repairOptions[0]
+          ? { type: "move", ...repairOptions[0] }
+          : eliminationOptions[0]
+            ? { type: "eliminate_temporary_overstack", unit: eliminationOptions[0].unit }
+            : null;
+        return {
+          type: "stack_repair",
+          hex: group.hex,
+          units: [...(group.removable_unit_ids || [])],
+          excess: Number(group.excess || 0),
+          action: first,
+          repair_options: repairOptions,
+          elimination_options: eliminationOptions,
+          reason: "temporary overstack must be repaired before ordinary movement"
+        };
+      })
       : [];
     const hasLegalNonPass = mandatoryActions.length > 0 || remaining.length > 0;
     // Unit-by-unit completion is a movement protocol. Combat is voluntary and
@@ -702,11 +801,27 @@ function createActionRuleBridge(config, options = {}) {
       remaining_units: remaining.map((unit) => unit.id),
       unavailable_units: unavailable,
       remaining_unit_details: remaining,
+      scenario_policy: scenarioPolicy(current.built.ctx.state),
+      scenario_allowed_actions: scenarioPhaseAllowedActions(current.built.ctx.state),
       mandatory_actions: mandatoryActions,
       ...(combatStatus ? {
         combat_targets: combatStatus.targets,
         combat_rules: combatStatus.rules,
         combat_target_count: combatStatus.targets.length
+      } : {}),
+      ...(phaseKind === "combat" ? {
+        clear_mine_options: eligible
+          .map((unitId) => current.built.ctx.state.units?.[unitId])
+          .filter((unit) => unit && !unit.eliminated && unit.hex
+            && RulesEngine.isCombatUnit({ id: unit.id, ...unit })
+            && RulesEngine.enemyMinesAt(current.built.ctx, unit.side, unit.hex).length
+            && !unit.mine_cleared_this_turn && !unit.cleared_mine_this_turn && !unit.just_cleared_mine_hex)
+          .map((unit) => ({
+            unit: unit.id,
+            hex: unit.hex,
+            action: { type: "clear_mine", unit: unit.id, hex: unit.hex },
+            note: "Combat unit may attempt one rule-authorized mine clearance roll; the replay supplies the die."
+          }))
       } : {}),
       has_legal_non_pass_action: hasLegalNonPass,
       can_pass: canPass,
@@ -736,7 +851,7 @@ function createActionRuleBridge(config, options = {}) {
       .filter((task) => (task.assigned_units || []).includes(unitId));
     const activeTasks = tasks.filter((task) => task.status === "active");
     const rolePattern = /block|line|screen|anchor|reserve|flank|supply|zoc|counter|preserv|protect|deny|hold.*route|阻断|防线|掩护|锚定|预备|侧翼|补给|控制区|反击|保存|保护|封锁/i;
-    if (!rolePattern.test(reason)) {
+    if (!rolePattern.test(reason) && !ledgerEnabled()) {
       return {
         accepted: false,
         reason: `${unitId} hold lacks a concrete defensive role; name the blocking line, supply protection, reserve response, flank screen, force preservation, or counterattack purpose`
@@ -751,7 +866,8 @@ function createActionRuleBridge(config, options = {}) {
     return {
       accepted: true,
       defensive_role: (activeTasks[0] || tasks[0])?.type || "defensive_hold",
-      task_ids: tasks.map((task) => task.id)
+      task_ids: tasks.map((task) => task.id),
+      warnings: rolePattern.test(reason) ? [] : ["hold reason has no explicit task role; legal hold retained"]
     };
   }
 
@@ -798,6 +914,7 @@ function createActionRuleBridge(config, options = {}) {
       status: "held",
       defensive_role: holdReview.defensive_role,
       task_ids: holdReview.task_ids,
+      warnings: holdReview.warnings || [],
       phase_complete: status.can_pass,
       phase_status: status,
       instruction: status.can_pass
@@ -851,6 +968,7 @@ function createActionRuleBridge(config, options = {}) {
       units: normalized.map((order) => order.unit),
       newly_held: normalized.filter((order) => !order.idempotent).map((order) => order.unit),
       defensive_roles: Object.fromEntries(normalized.map((order) => [order.unit, order.holdReview.defensive_role])),
+      warnings: normalized.flatMap((order) => (order.holdReview.warnings || []).map((reason) => ({ unit: order.unit, reason }))),
       phase_complete: status.can_pass,
       phase_status: status,
       instruction: status.can_pass
@@ -875,6 +993,7 @@ function createActionRuleBridge(config, options = {}) {
   function fallbackAction() {
     if (!current) return { type: "pass", reason: "local fallback" };
     if (!hasHoldTool) return clone(current.fallback);
+    if (ledgerEnabled() && /movement$/.test(current.phase)) return ledgerMovementFallback();
     const status = phaseStatus();
     const phaseKind = current.built.publicContext.game?.phase_kind || "";
     const acceptCandidate = (candidate) => {
@@ -939,6 +1058,54 @@ function createActionRuleBridge(config, options = {}) {
     // A rolling movement phase cannot legally pass while a unit remains. Keep
     // the rule-generated legal action as the final execution guardrail.
     return acceptCandidate(current.fallback) || clone(current.fallback);
+  }
+
+  function ledgerMovementFallback() {
+    const status = phaseStatus();
+    if (status.mandatory_actions?.length) {
+      for (const mandatory of status.mandatory_actions) {
+        const options = [
+          ...(mandatory.action ? [mandatory.action] : []),
+          ...(mandatory.repair_options || []).map((option) => ({ type: "move", ...option }))
+        ];
+        for (const action of options) {
+          const checked = reviewForExecution(action);
+          if (checked.assessment.legal && checked.canonicalAction.type !== "pass") {
+            return clone(checked.canonicalAction);
+          }
+        }
+      }
+      // Do not replace a mandatory repair with hold/pass. Keep an unresolved
+      // rule state explicit so it is not misclassified as a provider error.
+      throw Object.assign(new Error("mandatory movement repair has no rule-authorized resolution"), {
+        error_class: "rule_repair_unavailable"
+      });
+    }
+    for (const candidate of current.evaluationContext.candidate_actions || []) {
+      const action = candidate.action || candidate;
+      if (!status.remaining_units.includes(action.unit)) continue;
+      const checked = reviewForExecution(action);
+      const impact = checked.assessment?.evaluation?.victory_impact || {};
+      const task = (current.operationState?.task_plan?.children || []).find((item) =>
+        item.status === "active" && item.assigned_units?.includes(action.unit) && RulesEngine.onMap(item.target_hex));
+      const from = current.built.ctx.state.units?.[action.unit]?.hex;
+      const to = checked.canonicalAction.destination;
+      const taskGain = task && from && to && RulesEngine.hexDistance(to, task.target_hex) < RulesEngine.hexDistance(from, task.target_hex)
+        && ["supplied", "partially_supplied", "partial"].includes(impact.projected_supply_after_move);
+      const verifiedGain = action.type === "exit_west" || taskGain || Number(impact.supply_coverage?.delta) > 0
+        || Number(impact.projected_vp_delta_from_current_state ?? impact.estimated_vp_delta) > 0
+        || (current.side === "allies" && Number(impact.axis_scoring_threat_delta) < 0);
+      if (verifiedGain && checked.assessment.legal && checked.review.accept && checked.strategicReview.accept) return clone(checked.canonicalAction);
+    }
+    // No directional guess: a failed plan may preserve units without inventing
+    // eastward movement. The ordinary plan supplies productive legal routes.
+    for (const unit of status.remaining_units || []) {
+      const held = executeTool("hold_unit", { unit, reason: "preserve force after plan failure; no verified task gain" }, current.session_id, "local_execution");
+      if (!held.accepted) throw new Error(`local hold bookkeeping failed: ${held.reason}`);
+    }
+    const finalStatus = phaseStatus();
+    if (!finalStatus.can_pass) throw new Error("movement fallback cannot end an unhandled phase");
+    return { type: "pass", reason: "local fallback: remaining units preserved without verified task gain" };
   }
 
   function combatContacts(units) {
@@ -1087,30 +1254,26 @@ function createActionRuleBridge(config, options = {}) {
   }
 
   function checkExitWest(action = {}) {
-    const state = current.built.ctx.state;
-    const unit = state.units?.[action.unit];
-    if (!unit) return { legal: false, reason: "unknown unit", action };
-    if (state.scenario !== "october") return { legal: false, reason: "exit_west is only legal in October", action };
-    if (state.active_side !== "axis" || unit.side !== "axis") return { legal: false, reason: "exit_west is only legal for the active Axis side", action };
-    if (!["initial_movement", "mechanized_movement", "supply_movement"].includes(String(state.phase || "").replace(/^(axis|allies)_/, ""))) {
-      return { legal: false, reason: "exit_west is only legal in an Axis movement phase", action };
-    }
-    if (Number(state.turn || 1) <= 10) return { legal: false, reason: "exit_west is legal after turn 10 only", action };
-    if (!unit.hex) return { legal: false, reason: "unit is not on the map", action };
-    try {
-      if (RulesEngine.splitHex(unit.hex)[0] !== 1) return { legal: false, reason: "exit_west requires a west-edge unit", action };
-    }
-    catch (error) {
-      return { legal: false, reason: error.message, action };
-    }
-    if (!(RulesEngine.isCombatUnit({ id: action.unit, ...unit }) || RulesEngine.isSupplyUnit({ id: action.unit, ...unit }))) {
-      return { legal: false, reason: "exit_west requires a combat or supply unit", action };
-    }
-    return { legal: true, reason: "exit west", action: { type: "exit_west", unit: action.unit } };
+    return RulesEngine.checkExitWest(current.built.ctx, action);
   }
 
   function assessAction(action = {}) {
     if (action.type === "exit_west") return checkExitWest(action);
+    if (action.type === "eliminate_temporary_overstack") {
+      const projected = clone(current.built.ctx.state);
+      try {
+        return {
+          ...RulesEngine.eliminateTemporaryOverstackUnit(
+            RulesEngine.createContext({ state: projected, rules: current.built.ctx.rules, terrain: current.built.ctx.terrain }),
+            action.unit
+          ),
+          action
+        };
+      }
+      catch (error) {
+        return { legal: false, reason: error.message, action };
+      }
+    }
     return evaluateProbeAction(current.evaluationContext, action, current.built.ctx);
   }
 
@@ -1125,7 +1288,8 @@ function createActionRuleBridge(config, options = {}) {
       operationState: current.operationState,
       history: movementHistory.get(canonicalAction.unit) || [],
       state: current.built.ctx.state,
-      ctx: current.built.ctx
+      ctx: current.built.ctx,
+      executionLedger: ledgerEnabled()
     });
     const taskDispatchReview = reviewTaskDispatch({
       decisionMode: current.decisionMode,
@@ -1147,13 +1311,7 @@ function createActionRuleBridge(config, options = {}) {
       assessment,
       review,
       canonicalAction,
-      strategicReview: {
-        accept: movementReview.accept && combatReview.accept && taskDispatchReview.accept,
-        issues: [...movementReview.issues, ...combatReview.issues, ...taskDispatchReview.issues],
-        warnings: [...(movementReview.warnings || []), ...(combatReview.warnings || []), ...(taskDispatchReview.warnings || [])],
-        alternatives: [...(movementReview.alternatives || []), ...(combatReview.alternatives || [])].slice(0, 3),
-        exemptions: [...movementReview.exemptions, ...combatReview.exemptions, ...taskDispatchReview.exemptions]
-      }
+      strategicReview: advisoryStrategicReview(movementReview, combatReview, taskDispatchReview)
     };
   }
 
@@ -1242,7 +1400,8 @@ function createActionRuleBridge(config, options = {}) {
       operationState: current.operationState,
       history: movementHistory.get(canonicalAction.unit) || [],
       state: current.built.ctx.state,
-      ctx: current.built.ctx
+      ctx: current.built.ctx,
+      executionLedger: ledgerEnabled()
     });
     const combatReview = reviewStrategicCombat({
       decisionMode: current.decisionMode,
@@ -1259,13 +1418,7 @@ function createActionRuleBridge(config, options = {}) {
       operationState: current.operationState,
       candidates: current.evaluationContext.candidate_actions || []
     });
-    const strategicReview = {
-      accept: movementReview.accept && combatReview.accept && taskDispatchReview.accept,
-      issues: [...movementReview.issues, ...combatReview.issues, ...taskDispatchReview.issues],
-      warnings: [...(movementReview.warnings || []), ...(combatReview.warnings || []), ...(taskDispatchReview.warnings || [])],
-      alternatives: [...(movementReview.alternatives || []), ...(combatReview.alternatives || [])].slice(0, 3),
-      exemptions: [...movementReview.exemptions, ...combatReview.exemptions, ...taskDispatchReview.exemptions]
-    };
+    const strategicReview = advisoryStrategicReview(movementReview, combatReview, taskDispatchReview);
     const passStatus = action.type === "pass" && hasHoldTool ? phaseStatus() : null;
     const rollingPassAllowed = action.type === "pass"
       && hasHoldTool
@@ -1321,19 +1474,23 @@ function createActionRuleBridge(config, options = {}) {
     };
   }
 
-  function executeTool(tool, args = {}, sessionId = "") {
+  function executeTool(tool, args = {}, sessionId = "", origin = "model") {
     assertCurrent(sessionId);
+    if (!["model", "local_execution"].includes(origin)) throw new Error("invalid execution origin");
+    if (origin !== "model" && !ledgerEnabled()) throw new Error("local execution requires SAE execution ledger");
+    const local = origin === "local_execution";
+    if (local) current.local_execution_calls += 1;
     if (!profile.tools.includes(tool)) throw new Error(`tool ${tool} is not enabled by profile ${profile.id}`);
-    if (current.tool_calls >= profile.max_calls_per_step) {
-      return { accepted: false, retryable: false, stop: true, reason: `tool call limit ${profile.max_calls_per_step} reached` };
+    if (!local && current.tool_calls >= profile.max_calls_per_step) {
+      return { accepted: false, retryable: false, stop: true, error_class: "tool_budget_exhausted", reason: `tool call limit ${profile.max_calls_per_step} reached` };
     }
     const started = Date.now();
     const readOnly = new Set(["phase_status", "view_map", "inspect_rules", "inspect_supply", "check_combat", "inspect", "plan_route", "evaluate_maneuver"]);
     const cacheKey = readOnly.has(tool) ? `${tool}:${JSON.stringify(args || {})}` : "";
     if (current.submitted) {
       const result = { accepted: false, retryable: false, stop: true, reason: "an action was already accepted for this step" };
-      current.tool_calls += 1;
-      records.push({ step: current.step, turn: current.turn, phase: current.phase, session_id: sessionId, tool, arguments: clone(args), result, elapsed_ms: Date.now() - started, after_submission: true });
+      if (!local) current.tool_calls += 1;
+      records.push({ step: current.step, turn: current.turn, phase: current.phase, session_id: sessionId, origin, tool, arguments: clone(args), result, elapsed_ms: Date.now() - started, after_submission: true });
       return result;
     }
     if (cacheKey && current.read_only_cache.has(cacheKey)) {
@@ -1348,8 +1505,8 @@ function createActionRuleBridge(config, options = {}) {
           message: "This exact read-only query was already answered in this step. Use the cached result and call act now."
         }
       };
-      current.tool_calls += 1;
-      records.push({ step: current.step, turn: current.turn, phase: current.phase, session_id: sessionId, tool, arguments: clone(args), result: clone(result), elapsed_ms: Date.now() - started, cached: true, after_submission: false });
+      if (!local) current.tool_calls += 1;
+      records.push({ step: current.step, turn: current.turn, phase: current.phase, session_id: sessionId, origin, tool, arguments: clone(args), result: clone(result), elapsed_ms: Date.now() - started, cached: true, after_submission: false });
       return result;
     }
     let result;
@@ -1394,12 +1551,13 @@ function createActionRuleBridge(config, options = {}) {
     else if (tool === "submit_action") result = submit(args);
     else result = { accepted: false, reason: `unknown bridge tool ${tool}` };
     if (cacheKey && result && result.read_only) current.read_only_cache.set(cacheKey, clone(result));
-    current.tool_calls += 1;
+    if (!local) current.tool_calls += 1;
     records.push({
       step: current.step,
       turn: current.turn,
       phase: current.phase,
       session_id: sessionId,
+      origin,
       tool,
       arguments: clone(args),
       result: clone(result),
@@ -1464,6 +1622,7 @@ function createActionRuleBridge(config, options = {}) {
     submittedAction: () => current?.submitted ? clone(current.submitted) : null,
     submittedNextIntent: () => current?.next_intent ? clone(current.next_intent) : null,
     fallbackAction,
+    executeLocalTool: (tool, args, sessionId) => executeTool(tool, args, sessionId, "local_execution"),
     current: () => current,
     start,
     close,

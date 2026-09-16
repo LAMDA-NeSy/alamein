@@ -9,7 +9,7 @@ const { readConfigFile } = require("./config_file.js");
 const { CONFIG_DIR, PROJECT_ROOT } = require("./project_paths.js");
 
 const REGISTRY_FILE = path.join(CONFIG_DIR, "ai_models.yaml");
-const ADAPTERS = new Set(["openai_compatible", "mock"]);
+const ADAPTERS = new Set(["openai_compatible", "anthropic_messages", "mock"]);
 const THINKING_MODES = new Set(["disabled", "enabled", "omitted"]);
 
 function clone(value) {
@@ -48,7 +48,9 @@ function normalizeProfile(profileId, raw) {
   assertPositiveInteger(raw.limits?.context, `${profileId}.limits.context`);
   assertPositiveInteger(raw.limits?.output, `${profileId}.limits.output`);
   if (Number(raw.limits.output) >= Number(raw.limits.context)) throw new Error(`${profileId}.limits.output must be smaller than context`);
-  if (raw.adapter === "openai_compatible" && !raw.api_key_env) throw new Error(`model profile ${profileId} requires api_key_env`);
+  if (["openai_compatible", "anthropic_messages"].includes(raw.adapter) && !raw.api_key_env) {
+    throw new Error(`model profile ${profileId} requires api_key_env`);
+  }
   return {
     profile_id: profileId,
     adapter: raw.adapter,
@@ -261,7 +263,9 @@ function redactValue(value, secrets = []) {
   }
   if (Array.isArray(value)) return value.map((item) => redactValue(item, secrets));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, /authorization|api[-_]?key|token/i.test(key) ? "[REDACTED]" : redactValue(item, secrets)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+      /authorization|api[-_]?key|password|secret|cookie|(^|[_-])(access|refresh|auth|bearer|session|id|local)[_-]?token$|^token$/i.test(key)
+        ? "[REDACTED]" : redactValue(item, secrets)]));
   }
   return value;
 }
@@ -309,7 +313,7 @@ function defaultMockResponse(runtime, body) {
   const messages = body.messages || [];
   const lastUserIndex = messages.reduce((latest, message, index) => message.role === "user" ? index : latest, -1);
   const lastUserContent = String(messages[lastUserIndex]?.content || "");
-  const lastTool = [...messages.slice(lastUserIndex + 1)].reverse().find((message) => message.role === "tool");
+  const lastTool = [...messages].reverse().find((message) => message.role === "tool");
   let toolPayload = null;
   try { toolPayload = lastTool ? JSON.parse(lastTool.content) : null; }
   catch {}
@@ -329,7 +333,7 @@ function defaultMockResponse(runtime, body) {
     try { embeddedToolResults = JSON.parse(lastUserContent.slice(markerIndex + toolResultsMarker.length)); }
     catch {}
   }
-  if (planningPayload?.planning_request === "phase_unit_plan") {
+  if (["phase_unit_plan", "phase_unit_plan_repair"].includes(planningPayload?.planning_request)) {
     message = {
       role: "assistant",
       content: JSON.stringify({
@@ -379,17 +383,40 @@ function defaultMockResponse(runtime, body) {
     const content = String(item.content);
     return item.role === "system" && (content.includes("strategic commander") || content.includes("goal commander"));
   })) {
+    const strategicSystem = String(messages.find((item) => item.role === "system")?.content || "");
+    const scenario = planningPayload?.context?.game?.scenario || "july";
+    const allies = /Allied (?:goal|strategic) commander/i.test(strategicSystem);
+    const operation = scenario === "september"
+      ? allies ? "protect_minefield" : "clear_mines"
+      : scenario === "october"
+        ? allies ? "deny_withdrawal" : "withdraw_west"
+        : allies ? "deny_axis_frontier" : "eastward_breakthrough";
+    const targetColumn = scenario === "july"
+      ? planningPayload?.context?.victory?.current_scoring?.july_advance?.next_scoring_column ?? null
+      : null;
+    const metric = scenario === "september" ? "mine_clearance"
+      : scenario === "october" ? "withdrawal_vp" : "scoring_frontier";
+    const relation = allies ? "keep_below" : "at_least";
     message = {
       role: "assistant",
       content: JSON.stringify({
         type: "strategic_intent",
-        operation: "eastward_breakthrough",
+        operation,
         intent_type: "pressure",
-        sector: "central",
-        target_column: 37,
-        priority: ["cross the next scoring column", "preserve supply"],
+        sector: "",
+        target_column: targetColumn,
+        primary_metric: metric,
+        relation,
+        priority: allies
+          ? ["reduce the Axis scenario threat", "preserve Allied force"]
+          : scenario === "september"
+            ? ["clear a reachable minefield", "preserve supply"]
+            : scenario === "october"
+              ? ["prepare and execute legal west exits", "preserve high-value units"]
+              : ["cross the next scoring column", "preserve supply"],
         priority_units: [],
-        abort_condition: "abort if the spearhead becomes unsupplied"
+        abort_condition: allies ? "reassess if the Axis threat cannot be reduced"
+          : "abort if the operation becomes unsupplied or unreachable"
       })
     };
   }
@@ -397,14 +424,21 @@ function defaultMockResponse(runtime, body) {
     const activeUnits = planningPayload.units?.active || planningPayload.unit_index?.active || [];
     const combat = activeUnits.filter((unit) => unit.kind === "ground");
     const supply = activeUnits.filter((unit) => unit.kind === "supply");
+    const operation = planningPayload.strategic_intent?.operation || "operation";
+    const mainTask = operation === "clear_mines" ? "clear a reachable minefield"
+      : operation === "withdraw_west" ? "prepare a legal west withdrawal"
+        : operation === "protect_minefield" ? "protect the minefield and block Axis clearance"
+          : operation === "deny_withdrawal" ? "intercept Axis withdrawal routes"
+            : operation === "deny_axis_frontier" ? "hold the Axis scoring line"
+              : "advance toward the scoring column";
     message = {
       role: "assistant",
       content: JSON.stringify({
         type: "force_allocation",
-        operation: planningPayload.strategic_intent?.operation || "eastward_breakthrough",
-        spearhead: combat.slice(0, 2).map((unit) => ({ unit: unit.id, task: "advance toward the scoring column" })),
-        support: combat.slice(2, 5).map((unit) => ({ unit: unit.id, task: "support the spearhead" })),
-        supply: supply.slice(0, 2).map((unit) => ({ unit: unit.id, task: "maintain the supply corridor" })),
+        operation,
+        spearhead: combat.slice(0, 2).map((unit) => ({ unit: unit.id, task: mainTask })),
+        support: combat.slice(2, 5).map((unit) => ({ unit: unit.id, task: "support the main task" })),
+        supply: supply.slice(0, 2).map((unit) => ({ unit: unit.id, task: "maintain the task's supply corridor" })),
         reserve: combat.slice(5, 7).map((unit) => unit.id)
       })
     };
@@ -422,11 +456,12 @@ function defaultMockResponse(runtime, body) {
     };
   }
   else if (lastUserContent.includes('"phase_intent_catalog"') && !toolNames.size) {
+    const catalog = planningPayload?.context?.phase_intent_catalog || planningPayload?.phase_intent_catalog || [];
     message = {
       role: "assistant",
       content: JSON.stringify({
         type: "phase_intent",
-        intent: { type: "advance", sector: "central", target_hex: "3711", priority_units: [] }
+        intent: { type: catalog.includes("consolidate") ? "consolidate" : catalog[0] || "pass", sector: "", target_hex: "", priority_units: [] }
       })
     };
   }
@@ -438,7 +473,12 @@ function defaultMockResponse(runtime, body) {
         : ["hold_unit", "hold_units"].includes(record.tool)
           ? record.result?.phase_status
           : null
-    )).find(Boolean);
+    )).find(Boolean)
+      || (lastTool?.name === "phase_status"
+        ? (toolPayload?.result || toolPayload)
+        : ["hold_unit", "hold_units"].includes(lastTool?.name)
+          ? (toolPayload?.result?.phase_status || toolPayload?.phase_status)
+          : null);
     if (!latestStatus) {
       message = {
         role: "assistant",
@@ -666,21 +706,182 @@ async function callOpenAiCompatible(runtime, body, attempt, timeoutMs) {
   }
 }
 
+function textContent(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map((item) => {
+    if (typeof item === "string") return item;
+    if (item?.type === "text") return String(item.text || "");
+    return "";
+  }).join("");
+  return String(value);
+}
+
+function anthropicSystem(messages) {
+  const system = messages.filter((message) => message.role === "system").map((message) => textContent(message.content)).filter(Boolean);
+  return system.length ? system.join("\n\n") : undefined;
+}
+
+function anthropicMessages(messages = []) {
+  const output = [];
+  for (const message of messages.filter((item) => item.role !== "system")) {
+    if (message.role === "tool") {
+      const toolResult = {
+        type: "tool_result",
+        tool_use_id: String(message.tool_call_id || ""),
+        content: textContent(message.content)
+      };
+      const previous = output[output.length - 1];
+      if (previous?.role === "user" && Array.isArray(previous.content) && previous.content.every((item) => item.type === "tool_result")) {
+        previous.content.push(toolResult);
+      } else output.push({ role: "user", content: [toolResult] });
+      continue;
+    }
+    const content = Array.isArray(message.content)
+      ? message.content.map((item) => {
+        if (item?.type === "text") return { type: "text", text: String(item.text || "") };
+        if (item?.type === "tool_use") return { type: "tool_use", id: item.id, name: item.name, input: item.input || {} };
+        return item;
+      })
+      : textContent(message.content);
+    if (Array.isArray(message.tool_calls)) {
+      const blocks = [];
+      if (content) blocks.push({ type: "text", text: content });
+      for (const call of message.tool_calls) {
+        blocks.push({
+          type: "tool_use",
+          id: String(call.id || crypto.randomUUID()),
+          name: String(call.function?.name || ""),
+          input: typeof call.function?.arguments === "string" ? parseBody(call.function.arguments) : (call.function?.arguments || {})
+        });
+      }
+      output.push({ role: "assistant", content: blocks });
+    } else output.push({ role: message.role === "assistant" ? "assistant" : "user", content });
+  }
+  return output;
+}
+
+function anthropicTools(tools = []) {
+  return tools.map((tool) => ({
+    name: String(tool.function?.name || tool.name || ""),
+    description: String(tool.function?.description || tool.description || ""),
+    input_schema: tool.function?.parameters || tool.input_schema || { type: "object", properties: {} }
+  }));
+}
+
+function anthropicRequestBody(runtime, body) {
+  const request = {
+    model: runtime.profile.model,
+    max_tokens: Number(body.max_tokens || body.max_completion_tokens || runtime.profile.limits.output),
+    messages: anthropicMessages(body.messages || [])
+  };
+  const system = anthropicSystem(body.messages || []);
+  if (system) request.system = system;
+  if (body.temperature != null) request.temperature = Number(body.temperature);
+  if (body.top_p != null) request.top_p = Number(body.top_p);
+  if (body.tools?.length) request.tools = anthropicTools(body.tools);
+  if (body.tool_choice === "required") request.tool_choice = { type: "any" };
+  else if (body.tool_choice === "auto") request.tool_choice = { type: "auto" };
+  else if (body.tool_choice?.function?.name) request.tool_choice = { type: "tool", name: body.tool_choice.function.name };
+  if (body.thinking?.type === "enabled") {
+    request.thinking = {
+      type: "enabled",
+      budget_tokens: Math.min(Number(body.thinking.budget_tokens || 4096), Math.max(1024, request.max_tokens - 1))
+    };
+    delete request.temperature;
+  }
+  return request;
+}
+
+function openAiCompatibleResponseFromAnthropic(json = {}) {
+  const text = (json.content || []).filter((item) => item.type === "text").map((item) => item.text || "").join("");
+  const reasoning = (json.content || []).filter((item) => item.type === "thinking").map((item) => item.thinking || "").join("");
+  const toolCalls = (json.content || []).filter((item) => item.type === "tool_use").map((item) => ({
+    id: String(item.id || crypto.randomUUID()),
+    type: "function",
+    function: { name: String(item.name || ""), arguments: JSON.stringify(item.input || {}) }
+  }));
+  const message = { role: "assistant", content: text || null };
+  if (reasoning) message.reasoning_content = reasoning;
+  if (toolCalls.length) message.tool_calls = toolCalls;
+  return {
+    id: json.id || `anthropic-${crypto.randomUUID()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: json.model,
+    choices: [{ index: 0, finish_reason: toolCalls.length ? "tool_calls" : "stop", message }],
+    usage: json.usage || {}
+  };
+}
+
+async function callAnthropicMessages(runtime, body, attempt, timeoutMs) {
+  const controller = new AbortController();
+  const effectiveTimeoutMs = Math.max(1, Number(timeoutMs || runtime.profile.defaults.timeout_ms));
+  const timeout = setTimeout(() => controller.abort(), effectiveTimeoutMs);
+  let timeoutId;
+  try {
+    const request = (async () => {
+      const { response, responseText } = await requestHttps(`${runtime.profile.base_url}/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": runtime._credential,
+          "anthropic-version": "2023-06-01"
+        },
+        signal: controller.signal
+      }, JSON.stringify(anthropicRequestBody(runtime, body)));
+      const json = parseBody(responseText);
+      const successful = Number(response.statusCode || 0) >= 200 && Number(response.statusCode || 0) < 300;
+      return { response, responseText, json: successful ? openAiCompatibleResponseFromAnthropic(json) : json };
+    })();
+    const result = await Promise.race([
+      request,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();
+          const error = new Error(`upstream request exceeded ${effectiveTimeoutMs}ms`);
+          error.name = "AbortError";
+          reject(error);
+        }, effectiveTimeoutMs);
+      })
+    ]);
+    return { status: result.response.statusCode, headers: normalizeHttpsHeaders(result.response.headers), json: result.json, attempt };
+  }
+  finally {
+    clearTimeout(timeout);
+    clearTimeout(timeoutId);
+  }
+}
+
 async function dispatchUpstream(runtime, body, options = {}) {
   const started = Date.now();
-  const requestId = crypto.randomUUID();
-  const totalTimeoutMs = Math.max(1, Number(options.timeoutMs || runtime.profile.defaults.timeout_ms));
-  const deadline = started + totalTimeoutMs;
+  const requestId = options.requestId || crypto.randomUUID();
+  const deadline = Math.min(started + Math.max(1, Number(options.timeoutMs || runtime.profile.defaults.timeout_ms)),
+    Number.isFinite(options.deadlineMs) ? options.deadlineMs : Infinity);
+  const totalTimeoutMs = Math.max(0, deadline - started);
+  const pauses = [];
+  let lastTick = started;
+  const pauseMonitor = setInterval(() => {
+    const now = Date.now();
+    if (now - lastTick > 5000) pauses.push({ started_at_ms: lastTick, elapsed_ms: now - lastTick,
+      attribution: "environment_or_event_loop_pause_suspected" });
+    lastTick = now;
+  }, 1000);
+  pauseMonitor.unref();
   const maxAttempts = runtime.profile.defaults.retries + 1;
   let result;
   let error;
   let attempts = 0;
   let errorClass = "none";
   const retryableFailures = [];
+  let retryWaitMs = 0;
+  const stage = ["strategic", "allocation", "unit_plan", "concentrated_repair", "checker", "tool_execution"].includes(options.stage)
+    ? options.stage : "unattributed";
   if (Date.now() < runtime.transport_health.circuit_open_until) {
     errorClass = "circuit_open";
     const record = {
       request_id: requestId,
+      stage,
       run_id: runtime.run_id,
       model_profile: runtime.profile.profile_id,
       started_at: new Date(started).toISOString(),
@@ -694,6 +895,7 @@ async function dispatchUpstream(runtime, body, options = {}) {
       response_headers: {}
     };
     runtime.transport.push(record);
+    clearInterval(pauseMonitor);
     return { result: { status: 503, headers: {}, json: record.response }, error: new Error("model transport circuit is open"), record };
   }
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -709,7 +911,14 @@ async function dispatchUpstream(runtime, body, options = {}) {
     try {
       result = runtime.profile.adapter === "mock"
         ? await callMock(runtime, body, attempt, remaining)
-        : await callOpenAiCompatible(runtime, body, attempt, remaining);
+        : runtime.profile.adapter === "anthropic_messages"
+          ? await callAnthropicMessages(runtime, body, attempt, remaining)
+          : await callOpenAiCompatible(runtime, body, attempt, remaining);
+      if (Date.now() >= deadline) {
+        const expired = new Error("response arrived after the request deadline");
+        expired.name = "AbortError";
+        throw expired;
+      }
       error = null;
       errorClass = classifyTransportFailure({ status: result.status });
       if (!retryableFailure(runtime.profile, result.status, null)) break;
@@ -731,9 +940,14 @@ async function dispatchUpstream(runtime, body, options = {}) {
     }
     if (!retryableFailure(runtime.profile, result?.status || 0, error) || attempt + 1 >= maxAttempts) break;
     const delay = Number(runtime.profile.defaults.retry_delays_ms[attempt] || 0);
+    const waitStarted = Date.now();
     await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
+    retryWaitMs += Date.now() - waitStarted;
   }
   const successful = !error && Number(result?.status || 0) >= 200 && Number(result?.status || 0) < 400;
+  clearInterval(pauseMonitor);
+  if (Date.now() - lastTick > 5000) pauses.push({ started_at_ms: lastTick, elapsed_ms: Date.now() - lastTick,
+    attribution: "environment_or_event_loop_pause_suspected" });
   if (successful) {
     runtime.transport_health.consecutive_failures = 0;
   }
@@ -746,6 +960,14 @@ async function dispatchUpstream(runtime, body, options = {}) {
   }
   const record = {
     request_id: requestId,
+    stage,
+    retry_wait_ms: retryWaitMs,
+    api_ms: Date.now() - started - retryWaitMs,
+    latency_definition: "client_wall_clock_including_local_scheduling; not_server_reasoning_time",
+    environment_pauses: pauses,
+    clean_latency_eligible: pauses.length === 0,
+    deadline_ms: deadline,
+    deadline_exceeded: Date.now() >= deadline,
     run_id: runtime.run_id,
     model_profile: runtime.profile.profile_id,
     started_at: new Date(started).toISOString(),
@@ -754,18 +976,26 @@ async function dispatchUpstream(runtime, body, options = {}) {
     request: redactValue(body, [runtime._credential, runtime.local_token]),
     response: redactValue(result?.json || { error: error?.message || "upstream request failed" }, [runtime._credential, runtime.local_token]),
     status: result?.status || 502,
-    error_class: successful ? "none" : result?.status
-      ? classifyTransportFailure({ status: result.status })
-      : errorClass,
+    error_class: successful ? "none" : error ? classifyTransportFailure({ error, status: result?.status }) : errorClass,
     recovered_after_retry: successful && retryableFailures.length > 0,
     retryable_failures: retryableFailures,
     total_timeout_ms: totalTimeoutMs,
     request_headers: redactHeaders({ authorization: `Bearer ${runtime.local_token}`, "content-type": "application/json" }),
     response_headers: redactHeaders(result?.headers || {})
   };
-  runtime.transport.push(record);
+  const existing = runtime.transport.find((item) => item.request_id === requestId);
+  if (existing) {
+    const delivery = existing.client_delivery;
+    Object.assign(existing, record);
+    if (delivery) {
+      existing.client_delivery = delivery;
+      existing.upstream_error_class = record.error_class;
+      existing.error_class = delivery.error_class;
+    }
+  } else runtime.transport.push(record);
   if (result?.json) updateUsage(runtime, result.json);
-  return { result, error, record };
+  return { result: error && (!result || error.name === "AbortError")
+    ? { status: 502, headers: {}, json: { error: { message: error.message } } } : result, error, record };
 }
 
 function enforceSingleToolCall(runtime, json) {
@@ -835,7 +1065,10 @@ async function startModelGateway(runtime) {
     try {
       const body = applyProfileRequestDefaults(runtime, parseBody(await readRequest(req)));
       const requestedTimeout = Number(req.headers["x-agent-request-timeout-ms"] || runtime.profile.defaults.timeout_ms);
-      const { result, error, record } = await dispatchUpstream(runtime, body, { timeoutMs: requestedTimeout });
+      const requestedDeadline = Number(req.headers["x-agent-deadline-ms"]);
+      const { result, error, record } = await dispatchUpstream(runtime, body, { timeoutMs: requestedTimeout,
+        deadlineMs: Number.isFinite(requestedDeadline) ? requestedDeadline : undefined, stage: req.headers["x-agent-request-stage"],
+        requestId: /^[a-f0-9-]{36}$/i.test(req.headers["x-agent-request-id"] || "") ? req.headers["x-agent-request-id"] : undefined });
       const forwarded = enforceSingleToolCall(runtime, result?.json);
       if (record && forwarded.dropped) {
         record.gateway_normalization = {
@@ -849,6 +1082,7 @@ async function startModelGateway(runtime) {
           "cache-control": "no-cache",
           connection: "keep-alive",
           "x-agent-error-class": record.error_class,
+          "x-agent-request-id": record.request_id,
           "x-agent-attempts": String(record.attempts || 0),
           "x-agent-recovered-after-retry": String(!!record.recovered_after_retry)
         });
@@ -858,6 +1092,7 @@ async function startModelGateway(runtime) {
         res.writeHead(result?.status || 502, {
           "content-type": "application/json",
           "x-agent-error-class": record.error_class,
+          "x-agent-request-id": record.request_id,
           "x-agent-attempts": String(record.attempts || 0),
           "x-agent-recovered-after-retry": String(!!record.recovered_after_retry)
         });
@@ -944,25 +1179,49 @@ function createChatCompletionsClient(runtime) {
       await startModelGateway(runtime);
       const body = buildChatCompletionsBody(runtime, request);
       const started = Date.now();
-      const timeoutMs = Math.max(1, Number(request.timeout_ms || runtime.profile.defaults.timeout_ms));
+      const requestId = crypto.randomUUID();
+      const recordDeliveryFailure = (errorClass, message) => {
+        let record = runtime.transport.find((item) => item.request_id === requestId);
+        if (!record) {
+          record = { request_id: requestId, stage: request.audit_stage || "tool_execution", status: 0,
+            attempts: 0, elapsed_ms: Date.now() - started, request: redactValue(body, [runtime.local_token, runtime._credential]),
+            response: null, upstream_delivery: "unknown", created_at: new Date(started).toISOString() };
+          runtime.transport.push(record);
+        }
+        record.upstream_error_class = record.error_class || null;
+        record.error_class = errorClass;
+        record.client_delivery = { error_class: errorClass, message, elapsed_ms: Date.now() - started };
+      };
+      const deadline = Math.min(started + Math.max(1, Number(request.timeout_ms || runtime.profile.defaults.timeout_ms)),
+        Number.isFinite(request.deadline_ms) ? request.deadline_ms : Infinity);
+      const timeoutMs = Math.max(0, deadline - Date.now());
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs + 1000);
       try {
+        if (timeoutMs <= 0) { const error = new Error("request deadline exhausted"); error.name = "AbortError"; throw error; }
         const response = await fetch(`${runtime.gateway_url}/chat/completions`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
             authorization: `Bearer ${runtime.local_token}`,
-            "x-agent-request-timeout-ms": String(timeoutMs)
+            "x-agent-request-timeout-ms": String(timeoutMs),
+            "x-agent-deadline-ms": String(deadline),
+            "x-agent-request-stage": String(request.audit_stage || "tool_execution"),
+            "x-agent-request-id": requestId
           },
           body: JSON.stringify(body),
           signal: controller.signal
         });
         const json = parseBody(await response.text());
+        const expired = Date.now() >= deadline;
+        if (expired) recordDeliveryFailure("network_timeout", "response arrived after request deadline");
         return {
-          ok: response.ok,
+          ok: response.ok && !expired,
+          request_id: response.headers.get("x-agent-request-id") || requestId,
           status: response.status,
-          error_class: response.headers.get("x-agent-error-class") || classifyTransportFailure({ status: response.status }),
+          error_class: expired ? "network_timeout" : response.headers.get("x-agent-error-class") || classifyTransportFailure({ status: response.status }),
+          deadline_ms: deadline,
+          deadline_exceeded: expired,
           attempts: Number(response.headers.get("x-agent-attempts") || 1),
           recovered_after_retry: response.headers.get("x-agent-recovered-after-retry") === "true",
           elapsed_ms: Date.now() - started,
@@ -971,8 +1230,10 @@ function createChatCompletionsClient(runtime) {
         };
       }
       catch (error) {
+        recordDeliveryFailure(classifyTransportFailure({ error }), error.message);
         return {
           ok: false,
+          request_id: requestId,
           status: 0,
           error_class: classifyTransportFailure({ error }),
           elapsed_ms: Date.now() - started,
@@ -998,6 +1259,7 @@ async function closeModelRuntime(runtime) {
 
 module.exports = {
   applyProfileRequestDefaults,
+  anthropicRequestBody,
   buildChatCompletionsBody,
   closeModelRuntime,
   classifyTransportFailure,
@@ -1007,6 +1269,7 @@ module.exports = {
   loadRegistry,
   loadRegistryDocument,
   modelContractConfiguration,
+  openAiCompatibleResponseFromAnthropic,
   publicRuntimeMetadata,
   resolveModel,
   startModelGateway,

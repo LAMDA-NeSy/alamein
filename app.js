@@ -107,23 +107,7 @@ const AI_PLAYBACK_SPEED_STORAGE_KEY = "alamein_judge_studio.ai_playback_speed.v1
 const MAX_SAVE_SLOTS = 12;
 const MAX_ARCHIVED_GAMES = 24;
 
-const COUNTER_PRINTED_STATS = {
-  "allied-engineers.png": { attack: 1, movement: 4, parenthesizedAttack: true },
-  "axis-engineers.png": { attack: 1, movement: 4, parenthesizedAttack: true },
-  "62-It-mech.png": { attack: 1, movement: 6 },
-  "186-Para-Rgt.png": { attack: 2, movement: 6 },
-  "187-Para-Rgt.png": { attack: 2, movement: 6 },
-  "89-It-inf.png": { attack: 1, movement: 3 },
-  "87-It-inf.png": { attack: 1, movement: 3 },
-  "Ram-pzg.png": { attack: 2, movement: 10 },
-  "346-pzg.png": { attack: 2, movement: 10 },
-  "2-10-pzg.png": { attack: 2, movement: 10 },
-  "200-pzg.png": { attack: 2, movement: 10 },
-  "115-panzer.png": { attack: 4, movement: 10 },
-  "5-panzer-b.png": { attack: 4, movement: 10 },
-  "61-It-mech.png": { attack: 1, movement: 6 },
-  "GGFF-Mech.png": { attack: 2, movement: 6 }
-};
+let COUNTER_PRINTED_STATS = {};
 
 const DEFAULT_COUNTER_IMAGES = {
   axis: {
@@ -154,6 +138,7 @@ const DEFAULT_COUNTER_IMAGES = {
 let rules = structuredClone(DEFAULT_RULES);
 let terrain = { hexes: {}, edges: {} };
 let state = structuredClone(FALLBACK_STATE);
+const aiMovementPhaseRecords = new Map();
 let aiSuggestion = null;
 let selectedUnitId = null;
 let selectedHexId = null;
@@ -759,9 +744,7 @@ function resetUiComputationCaches() {
 }
 
 function hexDistance(a, b) {
-  const [ac, ar] = splitHex(a);
-  const [bc, br] = splitHex(b);
-  return Math.abs(ac - bc) + Math.abs(ar - br);
+  return RulesEngine.hexDistance(a, b);
 }
 
 function isInActiveBox(hex) {
@@ -894,8 +877,6 @@ function checkCombat(action) {
 }
 
 function terrainDefenseBonus(hex) {
-  const tags = hexTags(hex);
-  if (tags.includes("alamein_box")) return 3;
   return 0;
 }
 
@@ -3507,7 +3488,6 @@ function renderCombatOverview() {
   const defenseModifiers = [];
   const targetTags = [...new Set(defenderHexes.flatMap((hex) => hexTags(hex)))];
   if (targetTags.includes("hill_or_ridge")) defenseModifiers.push("山脊 ×2");
-  if (targetTags.includes("alamein_box")) defenseModifiers.push("方框 +3");
   const canceledMineHexes = new Set(details.mine_defense_canceled_hexes || []);
   if (defenderHexes.some((hex) => !canceledMineHexes.has(hex) && minesAt(hex).some((mine) => mine.side !== state.active_side && !mine.cleared))) {
     defenseModifiers.push("雷区 ×2");
@@ -3524,7 +3504,6 @@ function renderCombatOverview() {
     : "未选择";
   const locationEffects = [];
   if (targetTags.includes("hill_or_ridge")) locationEffects.push("防御加倍，D 类撤退结果无效");
-  if (targetTags.includes("alamein_box")) locationEffects.push("方框区域防御加成");
   if (defenderHexes.some((hex) => minesAt(hex).some((mine) => !mine.cleared))) locationEffects.push("存在雷区");
   panel.className = `combat-overview ${verdict?.legal ? "ok" : verdict ? "bad" : "muted"}`;
   panel.innerHTML = `
@@ -4915,7 +4894,7 @@ function phaseStepUiParts(phase) {
 }
 
 function phaseProgressMeta() {
-  const sequence = rules.turn_sequence?.length ? rules.turn_sequence : DEFAULT_RULES.turn_sequence;
+  const sequence = RulesEngine.turnSequence(rulesContext());
   const index = Math.max(0, sequence.indexOf(state.phase));
   return {
     sequence,
@@ -7018,7 +6997,7 @@ function renderState() {
   syncPhaseRecommendedTab();
   el("turnInput").value = state.turn || 1;
   el("activeSideSelect").value = state.active_side || "axis";
-  el("phaseSelect").value = state.phase || rules.turn_sequence[0];
+  el("phaseSelect").value = state.phase || RulesEngine.turnSequence(rulesContext())[0];
   const combat = combatUnitsArray();
   const axis = combat.filter((u) => u.side === "axis").length;
   const allies = combat.filter((u) => u.side === "allies").length;
@@ -7937,9 +7916,7 @@ function focusMapOnHex(hex, options = {}) {
 }
 
 function distance(a, b) {
-  const [ac, ar] = splitHex(a);
-  const [bc, br] = splitHex(b);
-  return Math.abs(ac - bc) + Math.abs(ar - br);
+  return RulesEngine.hexDistance(a, b);
 }
 
 function enumerateMoveActions(unitId, mode = "normal", limit = 80) {
@@ -8244,44 +8221,33 @@ function enumerateLegalAiActions(limit = 50) {
   const kind = phaseKind();
   if (kind === "combat") actions.push(...enumerateCombatActions(limit));
   else if (kind === "initial_movement" || kind === "mechanized_movement" || kind === "supply_movement") {
+    const movementCandidates = [];
     if (state.scenario === "october" && state.active_side === "axis" && Number(state.turn || 1) > 10) {
       for (const unit of unitsArray().filter((u) => u.side === "axis" && canExitWest(u.id).legal)) {
-        actions.push({ type: "exit_west", unit: unit.id });
-        if (actions.length >= limit) return actions.slice(0, limit);
+        const action = { type: "exit_west", unit: unit.id };
+        movementCandidates.push({ score: rulesAiScore(action), action });
       }
     }
-    const phaseLimit = aiPhaseActionLimit(state.active_side, kind);
-    const remainingBudget = phaseLimit > 0 ? Math.max(1, phaseLimit - aiPhaseActionCount()) : 4;
     const octoberScenario = state.scenario === "october";
     const octoberWithdrawal = octoberScenario && state.active_side === "axis" && Number(state.turn || 1) > 10;
     const perUnitLimit = octoberScenario ? 1 : kind === "initial_movement" ? 3 : 2;
-    const maxUnits = octoberWithdrawal
-      ? (kind === "supply_movement" ? Math.min(2, remainingBudget + 1) : Math.min(4, remainingBudget + 1))
-      : kind === "supply_movement"
-      ? Math.min(state.scenario === "october" && state.active_side === "axis" ? 4 : 2, remainingBudget + 1)
-      : kind === "mechanized_movement"
-        ? Math.min(3, remainingBudget + 1)
-        : Math.min(state.active_side === "axis" ? 6 : 5, remainingBudget + 3);
     const movableUnits = unitsArray()
       .filter((u) => u.side === state.active_side && isMovableUnit(u) && u.state === "fresh" && canMoveInCurrentPhase(u))
       .filter((u) => !octoberWithdrawal || octoberAxisWithdrawalCandidate(u))
-      .sort((a, b) => aiUnitPriority(b) - aiUnitPriority(a))
-      .slice(0, maxUnits);
+      .sort((a, b) => aiUnitPriority(b) - aiUnitPriority(a));
     for (const unit of movableUnits) {
-      const remaining = limit - actions.length;
-      if (remaining <= 0) break;
       const unitActions = [
         ...(isSupplyUnit(unit) ? enumerateTargetReachableActions(unit.id, "normal", 2) : []),
         ...enumerateStrategicMoveActions(unit.id, "normal", perUnitLimit),
         ...(isCombatUnit(unit) || isSupplyUnit(unit) ? enumerateAiRoadLineActions(unit.id, 2) : []),
         ...(isCombatUnit(unit) || isSupplyUnit(unit) ? enumerateStrategicMoveActions(unit.id, "road", 1) : [])
-      ].map((action) => ({ score: rulesAiScore(action), ...action }))
+      ].map((action) => ({ score: rulesAiScore(action), action }))
         .sort((a, b) => b.score - a.score)
-        .slice(0, perUnitLimit)
-        .map(({ score, ...action }) => action);
-      actions.push(...unitActions.slice(0, remaining));
-      if (actions.length >= limit) break;
+        .slice(0, perUnitLimit);
+      movementCandidates.push(...unitActions);
     }
+    movementCandidates.sort((a, b) => b.score - a.score);
+    actions.push(...movementCandidates.slice(0, limit).map((candidate) => candidate.action));
   }
   actions.push({ type: "pass", reason: "不行动" });
   return actions.slice(0, limit);
@@ -8381,7 +8347,7 @@ function combatStrategicValue(action) {
   const stats = combatOutcomeStats(details.crt_column || {});
   const targetIntel = combatTargetIntelForAi(action);
   const objectiveBonus = targetIntel.some((target) => target.is_primary_objective) ? 28 : 0;
-  const terrainBonus = targetIntel.some((target) => target.terrain.includes("alamein_box")) ? 12 : 0;
+  const terrainBonus = 0;
   const supplyTargetBonus = targetIntel.reduce((sum, target) => (
     sum + target.defenders.filter((defender) => /supply/i.test(defender.name)).length * 18
   ), 0);
@@ -8413,7 +8379,6 @@ function scoreAiAction(action) {
   if (supply === "unsupplied") score -= 2;
   if (supply === "isolated") score -= 5;
   const tags = terrain.hexes?.[destination] || [];
-  if (tags.includes("alamein_box")) score += 8;
   if (tags.includes("hill_or_ridge")) score += 1;
   if (action.mode === "road") score += 0.5;
   score += Number(unit.attack || 0) * 0.15;
@@ -8429,15 +8394,7 @@ function fixedAiTarget(side = state.active_side) {
 }
 
 function canExitWest(unitId) {
-  const unit = state.units?.[unitId];
-  if (!unit) return { legal: false, reason: "未知单位" };
-  if (state.scenario !== "october") return { legal: false, reason: "只有 October 场景使用西边撤出 VP" };
-  if (unit.side !== "axis" || state.active_side !== "axis") return { legal: false, reason: "只有 Axis 当前方单位可从西边撤出" };
-  if (!["initial_movement", "mechanized_movement", "supply_movement"].includes(phaseKind())) return { legal: false, reason: "只能在移动阶段撤出" };
-  if (Number(state.turn || 1) <= 10) return { legal: false, reason: "October 第 10 回合结束后才可撤出" };
-  if (!unit.hex || hexColumn(unit.hex) !== 1) return { legal: false, reason: "单位必须位于西边缘" };
-  if (!(isCombatUnit({ id: unitId, ...unit }) || isSupplyUnit({ id: unitId, ...unit }))) return { legal: false, reason: "只有作战或补给单位计撤出 VP" };
-  return { legal: true, reason: "可从西边撤出", action: { type: "exit_west", unit: unitId } };
+  return RulesEngine.checkExitWest(rulesContext(), { type: "exit_west", unit: unitId });
 }
 
 function exitWestUnit(unitId, source = "manual") {
@@ -8445,19 +8402,11 @@ function exitWestUnit(unitId, source = "manual") {
   if (!validation.legal) return validation;
   const action = validation.action;
   if (source !== "ai") pushHistory("exit_west");
-  const unit = state.units[action.unit];
-  unit.exit_hex = normalizeHex(unit.hex);
-  unit.exited_edge = "west";
-  unit.exit_edge = "west";
-  unit.exited = "west";
-  unit.exited_turn = Number(state.turn || 1);
-  unit.exit_turn = Number(state.turn || 1);
-  unit.off_map = true;
-  unit.hex = null;
-  unit.state = "spent";
+  const result = RulesEngine.applyExitWest(rulesContext(), action.unit);
+  if (!result.legal) return result;
   logEvent(source === "ai" ? "ai_exit_west" : "exit_west", `${source === "ai" ? "AI " : ""}撤出西边 ${action.unit}`, { action, turn: state.turn });
   renderState();
-  return { legal: true, reason: source === "ai" ? "AI 已从西边撤出单位" : "已从西边撤出单位", action, verdict: validation };
+  return { ...result, reason: source === "ai" ? "AI 已从西边撤出单位" : "已从西边撤出单位", action, verdict: validation };
 }
 
 function hexColumn(hex) {
@@ -8626,7 +8575,7 @@ function rulesAiScore(action) {
     const supply = aiScoreSupplyState(action.unit);
     const supplyPenalty = supply === "isolated" ? 20 : supply === "unsupplied" ? 8 : supply === "partially_supplied" ? 3 : 0;
     const roadBonus = action.mode === "road" && !zocSources.size ? (isSupplyUnit(unit) ? 8 : 2) : 0;
-    const terrainBonus = hexTags(destination).includes("hill_or_ridge") ? 2 : hexTags(destination).includes("alamein_box") ? 3 : 0;
+    const terrainBonus = hexTags(destination).includes("hill_or_ridge") ? 2 : 0;
     const spentPenalty = Number(action.verdict?.details?.spent || 0) * 0.25;
     const strength = Number(unit.attack || 0) + Number(unit.movement || 0) * 0.2;
     const usefulProgress = Math.max(0, progress);
@@ -9347,7 +9296,7 @@ function rulesBriefForAi() {
   return {
     game: rules.game?.title || "El Alamein",
     role: aiPrompt("context.rules_role"),
-    turn_sequence: rules.turn_sequence || DEFAULT_RULES.turn_sequence,
+    turn_sequence: RulesEngine.turnSequence(rulesContext()),
     movement: [
       "Units move only in movement phases for their side and become spent after moving.",
       `Enemy occupied hexes are ${movement.enemy_occupied_hex || "forbidden"}.`,
@@ -10095,6 +10044,8 @@ async function presentAiAction(action) {
 }
 
 async function executeAiActionWithPlayback(action, generation = aiRunGeneration) {
+  const actionSide = state.active_side;
+  aiMovementPhaseRecord(actionSide);
   const preflight = validateAiAction(action);
   if (!preflight.legal) return preflight;
   const executableAction = preflight.action || action;
@@ -10188,6 +10139,7 @@ async function executeAiActionWithPlayback(action, generation = aiRunGeneration)
   finally {
     suppressAiActionRender = false;
   }
+  if (result.legal) recordAiMovementAction(executableAction, actionSide);
   renderState();
   const resultHex = aiActionFocusHex(executableAction, true);
   if (resultHex && onMap(resultHex)) focusMapOnHex(resultHex, { behavior: "smooth" });
@@ -10247,36 +10199,108 @@ function incrementAiPhaseActionCount() {
   return state.ai_phase_action_counts[key];
 }
 
-function aiPhaseActionLimit(side = state.active_side, kind = phaseKind()) {
-  if (state.scenario === "october") {
-    if (side === "axis" && Number(state.turn || 1) > 10) {
-      if (kind === "combat") return 0;
-      if (kind === "initial_movement") return 35;
-      if (kind === "mechanized_movement") return 16;
-      if (kind === "supply_movement") return 5;
-      return 0;
+function aiMovementPhaseKey(side = state.active_side) {
+  return `${state.scenario || "custom"}:${Number(state.turn || 1)}:${state.phase}:${side}`;
+}
+
+function aiMovementPhaseRecord(side = state.active_side) {
+  const kind = phaseKind();
+  if (!["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) return null;
+  const key = aiMovementPhaseKey(side);
+  if (!aiMovementPhaseRecords.has(key)) {
+    const eligible = unitsArray()
+      .filter((unit) => unit.side === side && isMovableUnit(unit) && unit.hex && !unit.eliminated)
+      .filter((unit) => unit.state === "fresh" && RulesEngine.canMoveInCurrentPhase(rulesContext(), unit))
+      .map((unit) => unit.id);
+    aiMovementPhaseRecords.set(key, { key, eligible, acted: new Set(), held: new Map() });
+  }
+  return aiMovementPhaseRecords.get(key);
+}
+
+function aiUnitHasLegalMovement(unitId) {
+  const unit = state.units?.[unitId];
+  if (!unit || !unit.hex || unit.eliminated || unit.state !== "fresh") return false;
+  if (!RulesEngine.canMoveInCurrentPhase(rulesContext(), { id: unitId, ...unit })) return false;
+  for (const mode of ["normal", "road"]) {
+    try {
+      const reachable = RulesEngine.reachableHexes(rulesContext(), unitId, { mode, maxHexes: 240 });
+      if ([...reachable.keys()].some((hex) => normalizeHex(hex) !== normalizeHex(unit.hex))) return true;
     }
-    if (kind === "combat") return 1;
-    if (kind === "initial_movement") return 2;
-    if (kind === "mechanized_movement") return 1;
-    if (kind === "supply_movement") return side === "axis" ? 2 : 1;
-    return 0;
+    catch {}
   }
-  if (state.scenario !== "july") {
-    if (kind === "combat") return 1;
-    if (kind === "initial_movement") return 4;
-    if (kind === "mechanized_movement") return 2;
-    if (kind === "supply_movement") return 1;
-    return 0;
+  return false;
+}
+
+function aiMovementPhaseStatus(side = state.active_side) {
+  const record = aiMovementPhaseRecord(side);
+  if (!record) return null;
+  const acted = [...record.acted];
+  const held = [...record.held.keys()];
+  const remaining = [];
+  const unavailable = [];
+  for (const unitId of record.eligible) {
+    if (record.acted.has(unitId) || record.held.has(unitId)) continue;
+    if (aiUnitHasLegalMovement(unitId)) remaining.push(unitId);
+    else unavailable.push(unitId);
   }
-  if (kind === "combat") return side === "axis" ? 3 : 2;
-  if (kind === "initial_movement") return side === "axis" ? 10 : 7;
-  if (kind === "mechanized_movement") return side === "axis" ? 4 : 3;
-  if (kind === "supply_movement") return 2;
-  return 0;
+  const mandatoryRepair = temporaryOverstackRepair();
+  const hasLegalNonPassAction = !!mandatoryRepair || remaining.length > 0;
+  return {
+    movement_phase_policy: "rule_complete",
+    eligible_units_at_phase_start: record.eligible.length,
+    acted_units: acted,
+    held_units: held,
+    remaining_eligible_units: remaining.length,
+    remaining_units: remaining,
+    unavailable_units: unavailable,
+    has_legal_non_pass_action: hasLegalNonPassAction,
+    can_pass: !hasLegalNonPassAction,
+    mandatory_actions: mandatoryRepair ? [{ type: "stack_repair", hex: mandatoryRepair.hex }] : [],
+    phase_complete: !hasLegalNonPassAction
+  };
+}
+
+function recordAiMovementAction(action, side = state.active_side) {
+  if (!action || !["move", "exit_west"].includes(action.type)) return;
+  aiMovementPhaseRecord(side)?.acted.add(action.unit);
+}
+
+function recordAiMovementPass(side = state.active_side, reason = "explicit_pass") {
+  const record = aiMovementPhaseRecord(side);
+  if (!record) return null;
+  const statusBeforePass = aiMovementPhaseStatus(side);
+  if (statusBeforePass?.mandatory_actions?.length) {
+    return {
+      legal: false,
+      reason: "存在必须先处理的堆叠修复，不能结束移动阶段",
+      status_before_pass: statusBeforePass,
+      movement_phase: statusBeforePass,
+      advance_reason: null
+    };
+  }
+  for (const unitId of statusBeforePass?.remaining_units || []) record.held.set(unitId, reason);
+  const movementPhase = {
+    ...aiMovementPhaseStatus(side),
+    advance_reason: "explicit_pass",
+    held_unit_reasons: Object.fromEntries(record.held)
+  };
+  return {
+    legal: true,
+    reason,
+    status_before_pass: statusBeforePass,
+    movement_phase: movementPhase,
+    advance_reason: "explicit_pass"
+  };
+}
+
+function aiPhaseActionLimit(side = state.active_side, kind = phaseKind()) {
+  return kind === "combat"
+    ? (state.scenario === "july" ? (side === "axis" ? 3 : 2) : 1)
+    : 0;
 }
 
 function shouldAdvanceAiPhaseByBudget(side = state.active_side) {
+  if (phaseKind() !== "combat") return false;
   const kind = phaseKind();
   const limit = aiPhaseActionLimit(side, kind);
   return limit > 0 && aiPhaseActionCount() >= limit;
@@ -10302,14 +10326,15 @@ function setAiAutoplay(value) {
   else setOutput("aiOutput", { status: anySideAiControlled() ? "AI 已暂停" : "当前没有 AI 控制方" });
 }
 
-async function autoPlayAi(maxSteps = 80) {
+async function autoPlayAi(maxSteps = null) {
   if (aiAutoRunning) return { legal: false, reason: "AI 自动推进已经在运行" };
   const generation = aiRunGeneration;
+  const stepLimit = Number(maxSteps || ({ july: 1000, september: 1500, october: 3000 }[state.scenario] || 1000));
   aiAutoRunning = true;
   const log = [];
   let finalVictory = null;
   try {
-    for (let step = 0; step < maxSteps && state.ai_autoplay && generation === aiRunGeneration; step++) {
+    for (let step = 0; step < stepLimit && state.ai_autoplay && generation === aiRunGeneration; step++) {
       if (state.phase === "end_game_turn") {
         finalVictory = stopAiAtFinalVictory(log);
         if (finalVictory) break;
@@ -10322,6 +10347,7 @@ async function autoPlayAi(maxSteps = 80) {
       const side = phaseSide(state.phase);
       if (!isPlayableSide(side) || !isAiController(playerController(side))) break;
       state.active_side = side;
+      aiMovementPhaseRecord(side);
       const overstackRepair = temporaryOverstackRepair();
       if (overstackRepair && !overstackRepair.options.length) {
         const chosen = [...overstackRepair.removable_unit_ids]
@@ -10357,6 +10383,23 @@ async function autoPlayAi(maxSteps = 80) {
       const action = normalizeAiAction(suggestion.action);
       if (action.type === "pass") {
         const from = state.phase;
+        const movementPass = ["initial_movement", "mechanized_movement", "supply_movement"].includes(phaseKind())
+          ? recordAiMovementPass(side, action.reason || "explicit_pass")
+          : null;
+        if (movementPass && !movementPass.legal) {
+          setOutput("aiOutput", { status: "AI 不能结束移动阶段", side, phase: state.phase, action, reason: movementPass.reason });
+          log.push({
+            step: step + 1,
+            side,
+            phase: state.phase,
+            action: "pass_rejected",
+            reason: movementPass.reason,
+            movement_phase_policy: "rule_complete",
+            status_before_pass: movementPass.status_before_pass
+          });
+          state.ai_autoplay = false;
+          break;
+        }
         if (phaseKind() === "combat") {
           const reason = action.reason || "当前没有值得发起的攻击";
           setOutput("aiOutput", { status: "AI 跳过战斗", side, phase: state.phase, action, reason });
@@ -10364,7 +10407,17 @@ async function autoPlayAi(maxSteps = 80) {
           await waitForAiPlayback(aiPlaybackTiming().preview);
         }
         advancePhaseForAi();
-        log.push({ step: step + 1, side, action: "pass_then_advance", from, to: state.phase });
+        log.push({
+          step: step + 1,
+          side,
+          action: "pass_then_advance",
+          from,
+          to: state.phase,
+          movement_phase_policy: movementPass ? "rule_complete" : null,
+          advance_reason: movementPass?.advance_reason || "voluntary_combat_pass",
+          status_before_pass: movementPass?.status_before_pass || null,
+          movement_phase: movementPass?.movement_phase || null
+        });
         await waitForAiPlayback(aiPlaybackTiming().phase);
         continue;
       }
@@ -10380,7 +10433,9 @@ async function autoPlayAi(maxSteps = 80) {
         });
         break;
       }
-      if (result.legal) incrementAiPhaseActionCount();
+      if (result.legal) {
+        incrementAiPhaseActionCount();
+      }
       log.push({ step: step + 1, side, phase: state.phase, action: compactAction(action), result: { legal: result.legal, reason: result.reason, die: result.die } });
       if (!result.legal) {
         state.ai_autoplay = false;
@@ -10410,12 +10465,12 @@ async function autoPlayAi(maxSteps = 80) {
             ? "auto_waiting_for_human"
             : "auto_stopped",
       reason: waitingForPlayerRetreat ? "AI 战斗已经裁定，等待玩家选择己方单位的撤退路线" : undefined,
-      max_steps: maxSteps,
+      max_steps: stepLimit,
       log
     });
   if (stillCanRun) {
     setTimeout(() => {
-      if (generation === aiRunGeneration) autoPlayAi(maxSteps);
+      if (generation === aiRunGeneration) autoPlayAi(stepLimit);
     }, 250);
   }
   return { legal: true, log };
@@ -10480,6 +10535,7 @@ function applyStateDefaults(nextState) {
   state.combat_log ||= [];
   state.game_log ||= [];
   state.ai_phase_action_counts ||= {};
+  aiMovementPhaseRecords.clear();
   for (const unit of Object.values(state.units)) {
     if (isTrackMarker(unit)) {
       unit.kind = "marker";
@@ -10569,6 +10625,10 @@ async function loadScenario(name) {
 async function initData() {
   rules = await loadJson("./rules_el_alamein.json", DEFAULT_RULES);
   terrain = await loadJson("./terrain.json", { hexes: {}, edges: {} });
+  const counterStats = await loadJson("./counter_stats.json", { stats: {} });
+  if (counterStats?.stats && typeof counterStats.stats === "object" && !Array.isArray(counterStats.stats)) {
+    COUNTER_PRINTED_STATS = counterStats.stats;
+  }
   applyStateDefaults(await loadJson(SCENARIO_URLS.july, FALLBACK_STATE));
 }
 
@@ -10620,7 +10680,7 @@ function executeCurrentMove() {
 function initControls() {
   initializeVisualEffects();
   initializeAiPlaybackSpeed();
-  for (const phase of rules.turn_sequence || DEFAULT_RULES.turn_sequence) {
+  for (const phase of RulesEngine.turnSequence(rulesContext())) {
     const option = document.createElement("option");
     option.value = phase;
     option.textContent = phaseDisplayName(phase);
@@ -11073,7 +11133,7 @@ globalThis.AlameinStudioDebug = {
   checkVictory: () => checkVictory(),
   suggestRulesAction: () => suggestRulesAction(),
   enumerateLegalAiActions: (limit = 50) => enumerateLegalAiActions(limit).map(compactAction),
-  autoPlayAi: (maxSteps = 80) => autoPlayAi(maxSteps)
+  autoPlayAi: (maxSteps = null) => autoPlayAi(maxSteps)
 };
 
 main();

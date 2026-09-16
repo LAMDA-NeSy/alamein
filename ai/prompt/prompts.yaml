@@ -9,6 +9,27 @@ strategy:
   priorities: []
 
 prompts:
+  execution_ledger:
+    planning: |-
+      This is a JSON-only planning request. Tools cannot be called here. Use the supplied current state and legal
+      route evidence; do not invent tool observations. The fixed game scoring never changes. You may revise your
+      operational goal, but explain the changed battlefield facts and why the previous goal was not met.
+      Ordinary progress does not discard pending orders. Commands run one at a time against the latest rules state.
+      Failed commands wait while other executable commands continue. There is at most one concentrated repair
+      request per phase and one repair per unit, including after a goal revision. A legal hold is a valid choice.
+      Supply coverage changes are risks to evaluate by scenario, not universal prohibitions. July needs scoring-eligible
+      supply; September needs executable clearance routes; October needs legal withdrawal or interception and force
+      preservation. A bounded route search with no result means unknown beyond the searched scope, not impossible.
+      Return one unambiguous JSON answer, not multiple alternative answer objects. Task completion is decided from
+      completion_criteria evidence. Changes to those criteria revise the task; renaming alone does not create progress.
+    execution: |-
+      Read current tasks and actual action feedback. Query only tools listed in this request and only for missing facts;
+      do not repeat view_map or phase_status when the current payload already answers the question. Stop after an
+      accepted action, a nonretryable tool-budget error, or the step deadline. Legal holds require no special keywords;
+      explain their tactical purpose when possible. Mandatory rule actions cannot be bypassed by holding.
+      Read completion_evidence and current route evidence before choosing a follow-up. A maintained condition may be
+      met while still waiting for its settlement time. An unknown opportunity effect is not a confirmed failure.
+
   harness:
     agent_description: Play one legal El Alamein game action from the current authoritative state.
     tool_with_map: >-
@@ -45,7 +66,8 @@ prompts:
       accepted by the authoritative rules judge.
     rules_summary: >-
       The agent may call configured read-only tools. Final move, combat,
-      exit_west, and pass actions are validated. Combat actions never include a die.
+      clear_mine, exit_west, and pass actions are validated. Combat actions never include a die;
+      clear_mine actions never include a die because the replay supplies the rule-authorized roll.
     tool_policy_tactical: >-
       Use phase_status for phase progress, view_map for current board detail,
       inspect_supply for supply, and check_combat for a selected attacker subset.

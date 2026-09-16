@@ -213,7 +213,8 @@ async function main() {
   });
   const externalSide = controllers.external_side || "axis";
   const outFile = prepareOutputFile(argValue("--out", OUT));
-  const maxSteps = Number(argValue("--max-steps", 80));
+  const requestedMaxSteps = argValue("--max-steps", "");
+  const maxSteps = Number(requestedMaxSteps || ({ july: 1000, september: 1500, october: 3000 }[scenario] || 1000));
   const seed = Number(argValue("--seed", 1942));
   const replay = makeReplay(scenario, { seed });
   const started = Date.now();

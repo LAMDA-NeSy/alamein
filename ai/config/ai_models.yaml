@@ -240,6 +240,153 @@ models:
       circuit_breaker_failures: 3
       circuit_breaker_cooldown_ms: 60000
 
+  claude_opus_51:
+    adapter: anthropic_messages
+    provider: anthropic
+    model: claude-opus-5-1
+    base_url: https://api.anthropic.com/v1
+    api_key_env: ANTHROPIC_API_KEY
+    limits:
+      context: 200000
+      output: 8192
+    capabilities:
+      tool_calling: true
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: true
+    defaults:
+      temperature: 0.25
+      thinking: omitted
+      timeout_ms: 120000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [10000, 30000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 60000
+
+  claude_opus_51_checker:
+    adapter: anthropic_messages
+    provider: anthropic
+    model: claude-opus-5-1
+    base_url: https://api.anthropic.com/v1
+    api_key_env: ANTHROPIC_API_KEY
+    limits:
+      context: 200000
+      output: 4096
+    capabilities:
+      tool_calling: false
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: true
+    defaults:
+      temperature: 0
+      thinking: omitted
+      timeout_ms: 60000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [5000, 15000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 30000
+
+  gpt_6:
+    adapter: openai_compatible
+    provider: openai
+    model: gpt-6
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    limits:
+      context: 256000
+      output: 8192
+    capabilities:
+      tool_calling: true
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: true
+    defaults:
+      temperature: 0.25
+      reasoning_effort: medium
+      thinking: omitted
+      timeout_ms: 120000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [5000, 15000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 60000
+
+  gpt_6_checker:
+    adapter: openai_compatible
+    provider: openai
+    model: gpt-6
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    limits:
+      context: 128000
+      output: 4096
+    capabilities:
+      tool_calling: false
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: true
+    defaults:
+      temperature: 0
+      reasoning_effort: low
+      thinking: omitted
+      timeout_ms: 60000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [5000, 15000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 30000
+
+  # Explicit opt-in example. Confirm endpoint and model id before real use.
+  kimi_k3:
+    adapter: openai_compatible
+    provider: kimi
+    model: kimi-k3
+    base_url: https://api.moonshot.ai/v1
+    api_key_env: KIMI_API_KEY
+    limits:
+      context: 256000
+      output: 8192
+    capabilities:
+      tool_calling: true
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: false
+    defaults:
+      temperature: 0.25
+      thinking: omitted
+      timeout_ms: 120000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [5000, 15000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 60000
+
+  kimi_k3_checker:
+    adapter: openai_compatible
+    provider: kimi
+    model: kimi-k3
+    base_url: https://api.moonshot.ai/v1
+    api_key_env: KIMI_API_KEY
+    limits:
+      context: 128000
+      output: 4096
+    capabilities:
+      tool_calling: false
+      structured_output: json_object
+      parallel_tool_calls: false
+      prompt_cache: false
+    defaults:
+      temperature: 0
+      thinking: omitted
+      timeout_ms: 60000
+      retries: 2
+      retry_statuses: [429, 502, 503, 504]
+      retry_delays_ms: [5000, 15000]
+      circuit_breaker_failures: 3
+      circuit_breaker_cooldown_ms: 30000
+
   mock_primary:
     adapter: mock
     provider: local_mock

@@ -22,9 +22,34 @@ const { checkerPayload, createTaskCheckerRuntime, normalizeCheck } = require("..
 
 const unit = Object.keys(state.units).find((id) => state.units[id].side === state.active_side && state.units[id].hex);
 
+test("ledger manager keeps full execution history across replans but exposes compact snapshots", () => {
+  const manager = createTaskManager({ executionLedger: true, taskGeneration: "model_defined" });
+  const input = { state, side: "axis", turn: 1, phase: "axis_initial_movement" };
+  const args = { intent: { side: "axis" }, operation: "preserve_force", input,
+    rawPlan: { children: [{ id: "preserve", task_type: "reserve", assigned_unit_ids: [unit] }] },
+    allocation: { reserve: [{ unit }], support: [], supply: [], spearhead: [] }, taskGeneration: "model_defined" };
+  const initial = manager.initialize(args);
+  const taskId = initial.children.find((task) => task.assigned_units.includes(unit)).id;
+  const record = { final_action: { type: "pass" }, action_attempts: [],
+    execution_ledger: { events: Array.from({ length: 50 }, (_, i) => ({
+      event_id: `hold-${i}`, task_id: taskId, unit, status: "held", reason: "preserve force"
+    })) }, phase_unit_plan: { unit_orders: [] } };
+  const observed = manager.observe({ ...input, step: 1 }, record);
+  assert.equal(observed.plan.children.find((task) => task.id === taskId).execution_history.length, 8);
+  assert.equal(manager.executionHistory[taskId].length, 50);
+  manager.initialize({ ...args, preserveParent: true });
+  assert.equal(manager.executionHistory[taskId].length, 50);
+  assert.equal(manager.archives[0].children.find((task) => task.id === taskId).execution_history.length, 50);
+  manager.observe({ ...input, step: 2 }, record);
+  assert.equal(manager.executionHistory[taskId].length, 50);
+  const task = manager.plan.children.find((item) => item.id === taskId);
+  assert.equal(task.execution_history_summary.total_events, 50);
+  assert.equal(task.execution_history.length, 8);
+});
+
 test("Axis breakthrough skeleton contains ordered supplied column tasks and support tracks", () => {
   const skeleton = buildTaskSkeleton({
-    intent: { intent: { type: "pressure" }, success_condition: "reach the frontier" },
+    intent: { intent: { type: "pressure" }, target_column: 37, success_condition: "reach the frontier" },
     operation: "eastward_breakthrough",
     state,
     side: state.active_side
@@ -41,6 +66,83 @@ test("Axis breakthrough skeleton contains ordered supplied column tasks and supp
   assert.ok(skeleton.children.some((task) => task.type === "support"));
   assert.ok(skeleton.children.some((task) => task.type === "protect_flank"));
   assert.ok(skeleton.children.some((task) => task.type === "reserve"));
+});
+
+test("July skeleton respects model targets without raising them to a preset column", () => {
+  for (const targetColumn of [35, 36, 38]) {
+    const skeleton = buildTaskSkeleton({ state, side: "axis", intent: { target_column: targetColumn } });
+    assert.equal(skeleton.parent.target_column, targetColumn);
+    const checkpoints = skeleton.children.filter((task) => task.type === "breakthrough_step");
+    assert.equal(checkpoints.at(-1).target_column, targetColumn);
+    assert.ok(checkpoints.every((task) => task.target_column <= targetColumn));
+  }
+  const fallback = buildTaskSkeleton({ state, side: "axis" });
+  assert.equal(fallback.parent.target_column, 35);
+  const modelDefined = buildTaskSkeleton({ state, side: "axis", taskGeneration: "model_defined" });
+  assert.equal(modelDefined.parent.target_column, null);
+  assert.deepEqual(modelDefined.children, []);
+});
+
+test("model-defined July Axis plans retain a route-free scoring anchor invariant", () => {
+  const modelDefined = buildTaskSkeleton({ state, side: "axis", taskGeneration: "model_defined", scoringAnchorPolicy: "july_terminal_v1" });
+  assert.deepEqual(modelDefined.children.map((task) => task.id), ["july_scoring_anchor"]);
+  assert.equal(modelDefined.children[0].target_column, 35);
+  assert.deepEqual(modelDefined.children[0].assigned_units, []);
+  assert.equal(modelDefined.children[0].source, "local_safety_invariant");
+
+  const plan = normalizeTaskPlan({ children: Array.from({ length: 6 }, (_, index) => ({
+    id: `model_${index}`,
+    task_type: "maneuver",
+    assigned_unit_ids: []
+  })) }, modelDefined, { state, side: "axis", allocation: {}, maxChildTasks: 6 });
+  assert.equal(plan.children.length, 6);
+  assert.ok(plan.children.some((task) => task.type === "preserve_scoring_anchor"));
+  assert.ok(plan.normalization_corrections.some((item) => item.correction === "preserved_local_scoring_anchor"));
+});
+
+test("July Axis scoring anchor records secure, loss, and final settlement states", () => {
+  const manager = createTaskManager({ executionLedger: true, taskGeneration: "model_defined", replanCooldownActions: 0, scoringAnchorPolicy: "july_terminal_v1" });
+  const initial = structuredClone(state);
+  const unitId = Object.keys(initial.units).find((id) => initial.units[id].side === "axis"
+    && initial.units[id].kind !== "supply" && initial.units[id].hex);
+  manager.initialize({ input: { state: initial, side: "axis", turn: 1, phase: initial.phase },
+    intent: { side: "axis" }, operation: "july_anchor", taskGeneration: "model_defined",
+    rawPlan: { children: [{ id: "maneuver", task_type: "maneuver", assigned_unit_ids: [unitId] }] },
+    allocation: { spearhead: [{ unit: unitId }], support: [], supply: [], reserve: [] } });
+
+  const reached = structuredClone(initial);
+  reached.units[unitId].hex = "3510";
+  reached.units[unitId].supply_state = "supplied";
+  let plan = manager.refresh({ state: reached, side: "axis", turn: 1, phase: reached.phase });
+  let anchor = plan.children.find((task) => task.id === "july_scoring_anchor");
+  assert.equal(anchor.scoring_anchor_state, "secured");
+  assert.equal(anchor.status, "active");
+  assert.equal(manager.consumeReplanReason(), "");
+
+  const lost = structuredClone(reached);
+  lost.units[unitId].hex = "3410";
+  plan = manager.refresh({ state: lost, side: "axis", turn: 2, phase: lost.phase, step: 1 });
+  anchor = plan.children.find((task) => task.id === "july_scoring_anchor");
+  assert.equal(anchor.scoring_anchor_state, "lost");
+  assert.equal(manager.consumeReplanReason(), "scoring_anchor_lost");
+  manager.refresh({ state: lost, side: "axis", turn: 2, phase: lost.phase, step: 2 });
+  assert.equal(manager.consumeReplanReason(), "");
+
+  const final = structuredClone(reached);
+  final.turn = RulesEngine.scenarioFinalTurn("july");
+  final.phase = "end_game_turn";
+  plan = manager.settle({ state: final, side: "axis", turn: final.turn, phase: final.phase, status: "completed" });
+  anchor = plan.children.find((task) => task.id === "july_scoring_anchor");
+  assert.equal(anchor.status, "completed");
+  assert.equal(anchor.terminal_reason, "scoring_anchor_held_at_final_evaluation");
+});
+
+test("July scoring anchor is isolated from September and October", () => {
+  for (const scenario of ["september", "october"]) {
+    const scenarioState = JSON.parse(fs.readFileSync(path.join(__dirname, `../../scenarios/${scenario}.json`), "utf8"));
+    const skeleton = buildTaskSkeleton({ state: scenarioState, side: "axis", taskGeneration: "model_defined", scoringAnchorPolicy: "july_terminal_v1" });
+    assert.equal(skeleton.children.some((task) => task.type === "preserve_scoring_anchor"), false, scenario);
+  }
 });
 
 test("September and October local task fallbacks do not import July breakthrough checkpoints", () => {
@@ -97,6 +199,91 @@ test("model-defined task mode preserves a flexible model task tree", () => {
   assert.equal(plan.children.some((task) => task.type === "clear_blocker"), false);
 });
 
+test("July Axis model tasks use a defense-compression operation and choose exploitation columns dynamically", () => {
+  const axisUnits = Object.keys(state.units)
+    .filter((id) => state.units[id].side === "axis" && state.units[id].hex)
+    .slice(0, 4);
+  const skeleton = buildTaskSkeleton({
+    intent: { side: "axis" },
+    operation: "model_operation",
+    state,
+    side: "axis",
+    taskGeneration: "model_defined",
+    scoringAnchorPolicy: "july_terminal_v1"
+  });
+  assert.equal(skeleton.parent.operation_family, "breakthrough_and_exploit");
+  assert.equal(skeleton.parent.operation_stage, "compress_defense");
+  assert.match(skeleton.parent.title, /压缩 Allied 防线/);
+  assert.equal(skeleton.parent.target_column, null);
+  assert.deepEqual(skeleton.children.map((task) => task.id), ["july_scoring_anchor"]);
+
+  const plan = normalizeTaskPlan({
+    parent: { title: "模型选择的南侧突破" },
+    children: [
+      { id: "recon", task_type: "recon", task_role: "recon", operation_stage: "compress_defense", assigned_unit_ids: [axisUnits[0]] },
+      { id: "breach", task_type: "attack", task_role: "breach", operation_stage: "breach_window", assigned_unit_ids: [axisUnits[1]] },
+      { id: "exploit", task_type: "maneuver", task_role: "exploit", operation_stage: "exploit_frontier", assigned_unit_ids: [axisUnits[2]] }
+    ]
+  }, skeleton, { state, side: "axis", allocation: {}, maxChildTasks: 6 });
+
+  assert.equal(plan.parent.title, "压缩 Allied 防线并形成可持续突破");
+  assert.equal(plan.parent.model_title, "模型选择的南侧突破");
+  assert.equal(plan.parent.operation_family, "breakthrough_and_exploit");
+  assert.equal(plan.children.some((task) => task.type === "breakthrough_step"), false);
+  assert.equal(plan.children.filter((task) => task.type === "preserve_scoring_anchor").length, 1);
+  for (const id of ["recon", "breach", "exploit"]) {
+    const task = plan.children.find((item) => item.id === id);
+    assert.ok(task);
+    assert.equal(task.target_column, undefined);
+    assert.equal(task.target_column_source, "none");
+    assert.ok(task.task_role);
+    assert.ok(task.operation_stage);
+  }
+  assert.equal(plan.parent.operational_target_column, undefined);
+
+  const selectedTarget = normalizeTaskPlan({
+    children: [{ id: "exploit_38", task_type: "maneuver", task_role: "exploit", target_column: 38, assigned_unit_ids: [axisUnits[0]] }]
+  }, skeleton, { state, side: "axis", allocation: {}, maxChildTasks: 6 });
+  const exploit = selectedTarget.children.find((task) => task.id === "exploit_38");
+  assert.equal(exploit.target_column, 38);
+  assert.equal(exploit.target_column_source, "model_selected");
+  assert.equal(exploit.target_selection_policy, "model_selected_after_breakthrough");
+});
+
+test("July Axis operation metadata is isolated from Allies and other scenarios", () => {
+  for (const scenario of ["september", "october"]) {
+    const scenarioState = JSON.parse(fs.readFileSync(path.join(__dirname, `../../scenarios/${scenario}.json`), "utf8"));
+    const plan = buildTaskSkeleton({ state: scenarioState, side: "axis", taskGeneration: "model_defined" });
+    assert.equal(plan.parent.operation_family, undefined, scenario);
+  }
+  const allies = buildTaskSkeleton({ state, side: "allies", taskGeneration: "model_defined" });
+  assert.equal(allies.parent.operation_family, undefined);
+});
+
+test("final settlement closes non-terminal child tasks", () => {
+  const manager = createTaskManager({ executionLedger: true });
+  const input = { state, side: "axis", turn: 1, phase: "axis_initial_movement" };
+  manager.initialize({ intent: { side: "axis" }, operation: "preserve_force", input,
+    rawPlan: { children: [{ id: "task", task_type: "reserve", assigned_unit_ids: [unit] }] },
+    allocation: { reserve: [{ unit }], support: [], supply: [], spearhead: [] }, taskGeneration: "model_defined" });
+  const settled = manager.settle({ ...input, turn: 7, phase: "end_game_turn", status: "final_victory" });
+  assert.equal(settled.children.every((task) => ["completed", "failed", "skipped"].includes(task.status)), true);
+  assert.equal(settled.children.find((task) => task.id === "task").verification_status, "unverified");
+});
+
+test("model tasks retain their intent but remove invalid target coordinates", () => {
+  const skeleton = buildTaskSkeleton({ intent: { side: "axis" }, operation: "coordinate-grounding", state, side: "axis", taskGeneration: "model_defined" });
+  for (const requested of ["28xx", "9999", "2719"]) {
+    const plan = normalizeTaskPlan({ children: [{ id: "screen", task_type: "screen", title: "Screen the withdrawal route", assigned_unit_ids: [unit], target_hex: requested }] },
+      skeleton, { state, side: "axis", allocation: {} });
+    const task = plan.children.find((item) => item.id === "screen");
+    assert.equal(task.title, "Screen the withdrawal route");
+    assert.equal(task.target_hex, requested === "2719" ? requested : "");
+    assert.equal(task.normalization_corrections.some((item) => item.correction === "invalid_hex_removed"), requested !== "2719");
+    assert.equal(task.raw_model_task.target_hex, requested);
+  }
+});
+
 test("model-defined tasks distinguish hard, soft, and conditional dependencies", () => {
   const skeleton = buildTaskSkeleton({
     intent: { side: "axis" },
@@ -134,7 +321,7 @@ test("model-defined advance progress is grounded in the observed scoring frontie
     intent: { side: "axis" },
     operation: "evidence_progress",
     input: { state: before, side: "axis", turn: 1 },
-    rawPlan: { children: [{ id: "advance_east", task_type: "advance", target_column: 35, assigned_unit_ids: [advanceUnit] }] },
+    rawPlan: { children: [{ id: "advance_east", task_type: "advance", target_column: 35, assigned_unit_ids: [advanceUnit], completion_criteria: { all: [{ metric: "scoring_frontier", relation: "at_least", target: 35 }] } }] },
     allocation: { spearhead: [{ unit: advanceUnit }], support: [], supply: [], reserve: [] },
     taskGeneration: "model_defined"
   });
@@ -149,11 +336,11 @@ test("model-defined advance progress is grounded in the observed scoring frontie
   );
   assert.equal(observation.progress.changed, true);
   assert.equal(observation.progress.progress, 1);
-  assert.match(observation.progress.evidence, /frontier delta|target distance/);
+  assert.match(observation.progress.evidence, /scoring_frontier|frontier delta|target distance/);
   assert.doesNotMatch(observation.progress.evidence, /received an accepted/);
 });
 
-test("task checker can switch execution to an existing task", () => {
+test("task checker records an executable existing-task suggestion without changing state", () => {
   const manager = createTaskManager({ replanCooldownActions: 0 });
   manager.initialize({
     intent: { side: "axis" },
@@ -174,9 +361,9 @@ test("task checker can switch execution to an existing task", () => {
     confidence: 1,
     reason: "route is blocked; use the existing alternate route"
   });
-  assert.equal(switched.children.find((task) => task.id === "blocked_route").status, "blocked");
-  assert.equal(switched.children.find((task) => task.id === "alternate_route").status, "active");
-  assert.equal(switched.task_switches.at(-1).to, "alternate_route");
+  assert.equal(switched.children.find((task) => task.id === "blocked_route").status, "active");
+  assert.equal(switched.children.find((task) => task.id === "alternate_route").status, "blocked");
+  assert.equal(switched.children.find((task) => task.id === "blocked_route").checker_suggested_switch.to, "alternate_route");
 });
 
 test("model-defined tasks are dispatched by phase and remain subject to normal action progress", () => {
@@ -185,7 +372,7 @@ test("model-defined tasks are dispatched by phase and remain subject to normal a
   const ctx = RulesEngine.createContext({ state: structuredClone(state), rules, terrain });
   const unitIds = Object.keys(state.units).filter((id) => state.units[id].side === "axis" && state.units[id].hex).slice(0, 2);
   const skeleton = buildTaskSkeleton({ intent: { side: "axis" }, operation: "flexible", state, side: "axis", taskGeneration: "model_defined" });
-  const plan = normalizeTaskPlan({ children: [{ id: "recon_route", type: "recon", assigned_unit_ids: [unitIds[0]], phases: ["initial_movement"], observable_completion_condition: "侦察路线", observable_failure_condition: "路线不可用" }] }, skeleton, {
+  const plan = normalizeTaskPlan({ children: [{ id: "recon_route", type: "recon", assigned_unit_ids: [unitIds[0]], applicable_phases: ["initial_movement"], observable_completion_condition: "侦察路线", observable_failure_condition: "路线不可用" }] }, skeleton, {
     state, side: "axis", allocation: { spearhead: [{ unit: unitIds[0] }], support: [], supply: [], reserve: [] }
   });
   plan.children[0].status = "active";
@@ -251,7 +438,7 @@ test("open goal target column is decomposed into ordered breakthrough steps", ()
     skeleton.children.filter((task) => task.type === "breakthrough_step").map((task) => task.target_column),
     [35, 36, 37]
   );
-  assert.equal(skeleton.protocol, "side-aware-task-v2");
+  assert.equal(skeleton.protocol, "side-aware-task-v3");
 });
 
 test("Axis breakthrough checkpoints activate sequentially but one supplied move can complete every crossed column", () => {
@@ -287,7 +474,10 @@ test("Axis breakthrough checkpoints activate sequentially but one supplied move 
   const afterJump = manager.refresh({ state: column37, side: "axis", turn: 1 });
   assert.equal(afterJump.children.find((task) => task.id === "breakthrough_to_36").status, "completed");
   assert.equal(afterJump.children.find((task) => task.id === "breakthrough_to_37").status, "completed");
-  assert.equal(afterJump.parent.state, "completed");
+  assert.equal(afterJump.parent.state, "active");
+  const settled = manager.settle({ state: column37, side: "axis", turn: 1,
+    settlement: { kind: "turn_end", turn: 1 } });
+  assert.equal(settled.parent.state, "completed");
 });
 
 test("an isolated spearhead does not complete a breakthrough step", () => {
@@ -361,6 +551,40 @@ test("Allied denial task does not complete from Allied eastward position", () =>
   assert.ok(denial);
   assert.equal(denial.target_column, 37);
   assert.equal(denial.relation, "keep_below");
+});
+
+test("Allied model task criteria can evaluate the global Axis scoring frontier", () => {
+  const julyState = structuredClone(state);
+  julyState.active_side = "allies";
+  julyState.turn = RulesEngine.scenarioFinalTurn("july");
+  julyState.phase = "end_game_turn";
+  const axisUnit = Object.keys(julyState.units).find((id) => julyState.units[id].side === "axis"
+    && julyState.units[id].hex && RulesEngine.isCombatUnit(julyState.units[id]));
+  julyState.units[axisUnit].hex = "3711";
+  julyState.units[axisUnit].supply_state = "supplied";
+  const manager = createTaskManager({ taskGeneration: "model_defined" });
+  manager.initialize({
+    intent: { side: "allies" },
+    operation: "observe_axis_frontier",
+    input: { state: julyState, side: "allies", turn: julyState.turn },
+    rawPlan: {
+      children: [{
+        id: "deny_frontier",
+        task_type: "defend",
+        assigned_unit_ids: [],
+        completion_criteria: { all: [{
+          metric: "scoring_frontier", relation: "keep_below", target: 37,
+          subject_side: "axis", evaluation_scope: "game_end"
+        }] }
+      }]
+    },
+    taskGeneration: "model_defined"
+  });
+  const settled = manager.settle({ state: julyState, side: "allies", turn: julyState.turn, phase: julyState.phase, status: "final_victory" });
+  const task = settled.children.find((item) => item.id === "deny_frontier");
+  assert.equal(task.completion_evidence.conditions[0].value, 37);
+  assert.equal(task.status, "failed");
+  assert.notEqual(task.completion_evidence.conditions[0].status, "unknown");
 });
 
 test("Allied denial observes the Axis frontier and only completes at game end", () => {
@@ -731,7 +955,7 @@ test("a grounded primary frontier goal triggers rolling replanning when achieved
 });
 
 test("task normalization preserves ordered breakthrough reuse and rejects parallel duplicate units", () => {
-  const skeleton = buildTaskSkeleton({ intent: {}, operation: "operation", state, side: state.active_side });
+  const skeleton = buildTaskSkeleton({ intent: { target_column: 37 }, operation: "operation", state, side: state.active_side });
   const plan = normalizeTaskPlan({
     children: skeleton.children.map((task, index) => ({
       ...task,
@@ -763,7 +987,7 @@ test("task normalization assigns the spearhead to every sequential breakthrough 
     && state.units[id].kind === "ground" && state.units[id].hex);
   const support = Object.keys(state.units).find((id) => id !== spearhead && state.units[id].side === state.active_side
     && state.units[id].kind === "ground" && state.units[id].hex);
-  const skeleton = buildTaskSkeleton({ intent: {}, operation: "grounded_tasks", state, side: state.active_side });
+  const skeleton = buildTaskSkeleton({ intent: { target_column: 37 }, operation: "grounded_tasks", state, side: state.active_side });
   const plan = normalizeTaskPlan({}, skeleton, {
     state,
     side: state.active_side,

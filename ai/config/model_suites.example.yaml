@@ -1,0 +1,29 @@
+version: 1
+
+# Copy to log/model_suites.local.yaml and select ids with --models.
+# API keys remain in .env; the tracked default stays offline Mock.
+models:
+  - id: mock
+    model_profile: mock_primary
+    checker_model_profile: mock_secondary
+  - id: glm53-coding-plan
+    model_profile: glm_53_flash_coding_plan
+    checker_model_profile: glm_53_flash_checker
+  - id: glm53-api
+    model_profile: glm_53_flash_api
+    checker_model_profile: glm_53_flash_api_checker
+  - id: deepseek
+    model_profile: deepseek_flash
+    checker_model_profile: deepseek_flash_checker
+  - id: glm47
+    model_profile: glm_47_flash
+    checker_model_profile: glm_47_flash_checker
+  - id: claude-opus-51
+    model_profile: claude_opus_51
+    checker_model_profile: claude_opus_51_checker
+  - id: gpt6
+    model_profile: gpt_6
+    checker_model_profile: gpt_6_checker
+  - id: kimi-k3
+    model_profile: kimi_k3
+    checker_model_profile: kimi_k3_checker

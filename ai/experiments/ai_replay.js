@@ -8,6 +8,7 @@ const { defaultLogFile, prepareOutputFile } = require("../core/experiment_log.js
 const { PROJECT_ROOT } = require("../core/project_paths.js");
 const { resolveControllers } = require("../core/controller_config.js");
 const { createRulesAiController } = require("../core/rules_ai_controller.js");
+const { validateScenarioCounterStats } = require("../core/counter_stats.js");
 
 const ROOT = PROJECT_ROOT;
 const OUT = defaultLogFile("last_ai_replay_report.json");
@@ -37,6 +38,7 @@ function makeReplay(scenarioName, options = {}) {
   const state = readJson(SCENARIO_FILES[scenarioName] || SCENARIO_FILES.july);
   if (!state) throw new Error(`Unknown scenario ${scenarioName}`);
 
+  validateScenarioCounterStats(state);
   Rules.applyStateDefaults(state, { terrain });
   state.player_control = { axis: "rules_ai", allies: "rules_ai" };
   state.ai_autoplay = true;
@@ -114,9 +116,7 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function distance(a, b) {
-    const [ac, ar] = Rules.splitHex(a);
-    const [bc, br] = Rules.splitHex(b);
-    return Math.abs(ac - bc) + Math.abs(ar - br);
+    return Rules.hexDistance(a, b);
   }
 
   function hexColumn(hex) {
@@ -248,7 +248,6 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function terrainDefenseBonusFromTags(tags = []) {
-    if (tags.includes("alamein_box")) return 3;
     return 0;
   }
 
@@ -300,7 +299,7 @@ function makeReplay(scenarioName, options = {}) {
     const stats = combatOutcomeStats(details.crt_column || {});
     const targetIntel = combatTargetIntel(action);
     const objectiveBonus = targetIntel.some((target) => target.is_primary_objective) ? 28 : 0;
-    const terrainBonus = targetIntel.some((target) => target.terrain.includes("alamein_box")) ? 12 : 0;
+    const terrainBonus = 0;
     const blockedRetreatBonus = targetIntel.some((target) => target.retreat_options_estimate <= target.defenders.length) ? 16 : 0;
     const defenderStrength = Number(details.defense || 0);
     const attackerStrength = Number(details.attack || 0);
@@ -378,7 +377,7 @@ function makeReplay(scenarioName, options = {}) {
       const supply = aiScoreSupplyState(action.unit);
       const supplyPenalty = supply === "isolated" ? 20 : supply === "unsupplied" ? 8 : supply === "partially_supplied" ? 3 : 0;
       const roadBonus = action.mode === "road" && !zocSources.size ? (isSupplyUnit(unit) ? 8 : 2) : 0;
-      const terrainBonus = hexTags(destination).includes("hill_or_ridge") ? 2 : hexTags(destination).includes("alamein_box") ? 3 : 0;
+      const terrainBonus = hexTags(destination).includes("hill_or_ridge") ? 2 : 0;
       const spentPenalty = Number(action.verdict?.details?.spent || 0) * 0.25;
       const strength = Number(unit.attack || 0) + Number(unit.movement || 0) * 0.2;
       const progressWeight = unit.side === "axis" ? 18 : isSupplyUnit(unit) ? 12 : 8;
@@ -643,15 +642,7 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function canExitWest(unitId) {
-    const unit = state.units?.[unitId];
-    if (!unit) return { legal: false, reason: "unknown unit" };
-    if (state.scenario !== "october") return { legal: false, reason: "only october" };
-    if (unit.side !== "axis" || state.active_side !== "axis") return { legal: false, reason: "only active axis" };
-    if (!["initial_movement", "mechanized_movement", "supply_movement"].includes(phaseKind())) return { legal: false, reason: "only movement phase" };
-    if (Number(state.turn || 1) <= 10) return { legal: false, reason: "after turn 10 only" };
-    if (!unit.hex || hexColumn(unit.hex) !== 1) return { legal: false, reason: "must be west edge" };
-    if (!(isCombatUnit({ id: unitId, ...unit }) || isSupplyUnit({ id: unitId, ...unit }))) return { legal: false, reason: "combat or supply only" };
-    return { legal: true, reason: "exit west", action: { type: "exit_west", unit: unitId } };
+    return Rules.checkExitWest(ctx(), { type: "exit_west", unit: unitId });
   }
 
   function aiPhaseKey() {
@@ -723,82 +714,10 @@ function makeReplay(scenarioName, options = {}) {
 
   function enumerateLegalAiActions(limit = 50) {
     return sharedRulesAi.enumerateLegalActions(limit);
-    /* istanbul ignore next -- retained only as a readable migration fallback */
-    const actions = [];
-    const kind = phaseKind();
-    if (kind === "combat") actions.push(...enumerateCombatActions(limit));
-    else if (kind === "initial_movement" || kind === "mechanized_movement" || kind === "supply_movement") {
-      if (state.scenario === "october" && state.active_side === "axis" && Number(state.turn || 1) > 10) {
-        for (const unit of unitsArray().filter((u) => u.side === "axis" && canExitWest(u.id).legal)) {
-          actions.push({ type: "exit_west", unit: unit.id });
-          if (actions.length >= limit) return actions.slice(0, limit);
-        }
-      }
-      const phaseLimit = aiPhaseActionLimit(state.active_side, kind);
-      const remainingBudget = phaseLimit > 0 ? Math.max(1, phaseLimit - aiPhaseActionCount()) : 4;
-      const octoberScenario = state.scenario === "october";
-      const octoberWithdrawal = octoberScenario && state.active_side === "axis" && Number(state.turn || 1) > 10;
-      const perUnitLimit = octoberScenario ? 1 : kind === "initial_movement" ? 3 : 2;
-      const maxUnits = octoberWithdrawal
-        ? (kind === "supply_movement" ? Math.min(2, remainingBudget + 1) : Math.min(4, remainingBudget + 1))
-        : kind === "supply_movement"
-        ? Math.min(state.scenario === "october" && state.active_side === "axis" ? 4 : 2, remainingBudget + 1)
-        : kind === "mechanized_movement"
-          ? Math.min(3, remainingBudget + 1)
-          : Math.min(state.active_side === "axis" ? 6 : 5, remainingBudget + 3);
-      const movableUnits = unitsArray()
-        .filter((unit) => unit.side === state.active_side && (isCombatUnit(unit) || isSupplyUnit(unit) || isEngineer(unit)) && unit.state === "fresh" && Rules.canMoveInCurrentPhase(ctx(), unit))
-        .filter((unit) => !octoberWithdrawal || octoberAxisWithdrawalCandidate(unit))
-        .sort((a, b) => aiUnitPriority(b) - aiUnitPriority(a))
-        .slice(0, maxUnits);
-      for (const unit of movableUnits) {
-        const remaining = limit - actions.length;
-        if (remaining <= 0) break;
-        const unitActions = [
-          ...(isSupplyUnit(unit) ? enumerateTargetReachableActions(unit.id, "normal", 2) : []),
-          ...enumerateStrategicMoveActions(unit.id, "normal", perUnitLimit),
-          ...(isCombatUnit(unit) || isSupplyUnit(unit) ? enumerateAiRoadLineActions(unit.id, 2) : []),
-          ...(isCombatUnit(unit) || isSupplyUnit(unit) ? enumerateStrategicMoveActions(unit.id, "road", 1) : [])
-        ].map((action) => ({ score: rulesAiScore(action), ...action }))
-          .sort((a, b) => b.score - a.score)
-          .slice(0, perUnitLimit)
-          .map(({ score, ...action }) => action);
-        actions.push(...unitActions.slice(0, remaining));
-        if (actions.length >= limit) break;
-      }
-    }
-    actions.push({ type: "pass", reason: "pass" });
-    return actions.slice(0, limit);
   }
 
   function suggestRulesAction() {
     return sharedRulesAi.suggestAction();
-    /* istanbul ignore next -- retained only as a readable migration fallback */
-    aiScoreSupplyCache = aiSupplyScoreMap(state.active_side);
-    try {
-      const candidates = enumerateLegalAiActions(Math.max(80, Number(options.maxActions || 80)))
-        .map((action) => ({ score: rulesAiScore(action), ...action }))
-        .sort((a, b) => b.score - a.score);
-      const kind = phaseKind();
-      const minimumScore = kind === "combat" ? 165 : kind === "supply_movement" ? 2 : state.active_side === "axis" ? 4 : 6;
-      const best = candidates.find((action) => action.type !== "pass" && action.score >= minimumScore);
-      return {
-        action: best || { type: "pass", reason: "rules ai pass" },
-        candidates: candidates.slice(0, 5).map((action) => ({
-          score: Number(action.score.toFixed(2)),
-          type: action.type,
-          unit: action.unit,
-          destination: action.path?.at(-1),
-          odds: action.verdict?.details?.odds_column,
-          crt: action.verdict?.details?.crt_column ? combatOutcomeStats(action.verdict.details.crt_column) : null,
-          zoc: action.type === "move" && action.path?.length ? enemyZocSources(state.units[action.unit]?.side, action.path.at(-1)).size : 0,
-          mines: action.type === "move" && action.path?.length ? enemyMinesAt(state.units[action.unit]?.side, action.path.at(-1)).length : 0
-        }))
-      };
-    }
-    finally {
-      aiScoreSupplyCache = null;
-    }
   }
 
   function heuristicAiScore(action) {
@@ -857,8 +776,10 @@ function makeReplay(scenarioName, options = {}) {
     const action = raw?.action || raw;
     if (!action || typeof action !== "object") return { type: "pass", reason: "empty action" };
     if (action.type === "exit_west") return { type: "exit_west", unit: action.unit };
+    if (action.type === "eliminate_temporary_overstack") return { type: "eliminate_temporary_overstack", unit: action.unit };
     if (action.type === "move_intent") return { type: "move_intent", unit: action.unit, destination: action.destination || action.target || action.hex, mode: action.mode || "auto" };
     if (action.type === "move") return { type: "move", unit: action.unit, path: (action.path || []).map(normalizeHex), mode: action.mode || "normal" };
+    if (action.type === "clear_mine") return { type: "clear_mine", unit: action.unit, hex: normalizeHex(action.hex || state.units?.[action.unit]?.hex || "") };
     if (action.type === "combat") return { type: "combat", attackers: action.attackers || [], defender_hexes: (action.defender_hexes || []).map(normalizeHex) };
     return { type: "pass", reason: action.reason || raw?.reason || "pass" };
   }
@@ -917,8 +838,21 @@ function makeReplay(scenarioName, options = {}) {
     }
     if (action.type === "pass") return { legal: true, reason: "pass", action };
     if (action.type === "exit_west") return canExitWest(action.unit);
+    if (action.type === "eliminate_temporary_overstack") {
+      const projected = structuredClone(state);
+      const verdict = Rules.eliminateTemporaryOverstackUnit(
+        Rules.createContext({ state: projected, rules, terrain }), action.unit
+      );
+      return { ...verdict, action };
+    }
     if (action.type === "move_intent") return resolveMoveIntent(action);
     if (action.type === "move") return { ...checkMove(action.unit, action.path, { mode: action.mode || "normal" }), action };
+    if (action.type === "clear_mine") {
+      const unit = state.units?.[action.unit];
+      const probe = structuredClone(state);
+      const verdict = Rules.clearMine(Rules.createContext({ state: probe, rules, terrain }), action.unit, action.hex || unit?.hex, isEngineer({ id: action.unit, ...(unit || {}) }) ? null : 4);
+      return { ...verdict, action };
+    }
     if (action.type === "combat") return { ...publicCombatVerdict(action), action };
     return { legal: false, reason: `unknown action ${action.type}`, action };
   }
@@ -929,17 +863,12 @@ function makeReplay(scenarioName, options = {}) {
     const action = validation.action;
     if (action.type === "pass") return validation;
     if (action.type === "exit_west") {
-      const unit = state.units[action.unit];
-      unit.exit_hex = normalizeHex(unit.hex);
-      unit.exited_edge = "west";
-      unit.exit_edge = "west";
-      unit.exited = "west";
-      unit.exited_turn = Number(state.turn || 1);
-      unit.exit_turn = Number(state.turn || 1);
-      unit.off_map = true;
-      unit.hex = null;
-      unit.state = "spent";
-      return { legal: true, reason: "exit west", action, verdict: validation };
+      const result = Rules.applyExitWest(ctx(), action.unit);
+      return { ...result, action: result.action || action, verdict: validation };
+    }
+    if (action.type === "eliminate_temporary_overstack") {
+      const result = Rules.eliminateTemporaryOverstackUnit(ctx(), action.unit);
+      return { ...result, action, verdict: validation };
     }
     if (action.type === "move") {
       const unit = state.units[action.unit];
@@ -950,11 +879,23 @@ function makeReplay(scenarioName, options = {}) {
       unit.state = "spent";
       state.supply_states_dirty = true;
       const mineEntryHex = validation.details?.mine_entry_hex;
+      let mineClearResult = null;
       if (isEngineer({ id: action.unit, ...unit }) && phaseKind() === "initial_movement" && mineEntryHex) {
-        Rules.clearMine(ctx(), action.unit, mineEntryHex, null, { path_entry: true });
+        mineClearResult = Rules.clearMine(ctx(), action.unit, mineEntryHex, null, { path_entry: true });
       }
       updateSupplyStates();
-      return { legal: true, reason: "move applied", action, verdict: validation };
+      return { legal: true, reason: "move applied", action, verdict: validation, mine_clearance: mineClearResult?.details || null };
+    }
+    if (action.type === "clear_mine") {
+      const unit = state.units[action.unit];
+      const dieResult = isEngineer({ id: action.unit, ...unit }) ? null : die();
+      const result = Rules.clearMine(ctx(), action.unit, action.hex || unit.hex, dieResult, { path_entry: false });
+      if (result.legal) {
+        unit.state = "spent";
+        state.supply_states_dirty = true;
+        updateSupplyStates();
+      }
+      return { ...result, action, die: dieResult };
     }
     if (action.type === "combat") {
       // The model submits the attack before the die is known. Complete any
@@ -1178,7 +1119,7 @@ function makeReplay(scenarioName, options = {}) {
         const count = aiPhaseActionCount();
         const limit = aiPhaseActionLimit(side);
         advancePhase();
-        log.push({ step: step + 1, side, action: "budget_then_advance", count, limit, from, to: state.phase, turn: state.turn });
+        log.push({ step: step + 1, side, action: "budget_then_advance", phase_action_policy: "combat_experiment_budget", count, limit, from, to: state.phase, turn: state.turn });
         notifyStateChange({ stage: "phase_advance", step: step + 1 });
         continue;
       }
@@ -1249,7 +1190,18 @@ function makeReplay(scenarioName, options = {}) {
       }
     }
 
+    const settledTurns = new Set();
     for (let step = 0; step < maxSteps && state.ai_autoplay; step += 1) {
+      if (state.phase === "end_game_turn" && !settledTurns.has(state.turn)) {
+        settledTurns.add(state.turn);
+        for (const externalSide of ["axis", "allies"]) {
+          const callbackProvider = externalActions[externalSide] || externalAction;
+          if (controllers[externalSide] !== "external_ai" || typeof callbackProvider?.onTurnSettled !== "function") continue;
+          await callbackProvider.onTurnSettled({ state: clone(state), side: externalSide, turn: state.turn,
+            phase: state.phase, step, settlement: { kind: "turn_end", turn: state.turn,
+              event_id: `turn-settlement:${state.scenario}:${state.turn}:${externalSide}` } });
+        }
+      }
       const victory = finalVictory();
       if (victory) {
         state.ai_autoplay = false;
@@ -1272,7 +1224,7 @@ function makeReplay(scenarioName, options = {}) {
         const count = aiPhaseActionCount();
         const limit = aiPhaseActionLimit(side);
         advancePhase();
-        log.push({ step: step + 1, side, action: "budget_then_advance", count, limit, from, to: state.phase, turn: state.turn });
+        log.push({ step: step + 1, side, action: "budget_then_advance", phase_action_policy: "combat_experiment_budget", count, limit, from, to: state.phase, turn: state.turn });
         notifyStateChange({ stage: "phase_advance", step: step + 1 });
         continue;
       }
@@ -1284,23 +1236,64 @@ function makeReplay(scenarioName, options = {}) {
         return { status: "waiting_for_human", log, steps: log.length, waiting_for_human: side };
       }
       let suggestion;
+      let provider = null;
+      const controllerStarted = Date.now();
+      const providerInput = controller === "external_ai" ? {
+        state: clone(state),
+        side,
+        phase: state.phase,
+        turn: Number(state.turn || 1),
+        step: step + 1
+      } : null;
       try {
-        const input = { state: clone(state), side, phase: state.phase, turn: Number(state.turn || 1), step: step + 1 };
         if (controller === "external_ai") {
-          const provider = externalActions[side] || externalAction;
-          suggestion = await provider(input);
+          provider = externalActions[side] || externalAction;
+          suggestion = await provider(providerInput);
         }
         else if (controller === "heuristic_ai") suggestion = suggestHeuristicAction();
         else suggestion = suggestRulesAction();
       }
       catch (error) {
-        state.ai_autoplay = false;
-        log.push({ step: step + 1, side, phase: state.phase, turn: state.turn, source, error: error.message });
-        return { status: "provider_error", log, steps: step + 1, error: error.message };
+        // Only the method may opt into recovery; never silently replace it
+        // with the opponent's rules controller.
+        if (controller === "external_ai" && typeof provider?.onProviderError === "function") {
+          try {
+            suggestion = await provider.onProviderError({ ...providerInput, error });
+            const recoveredValidation = suggestion?.action && validateAiAction(suggestion.action);
+            if (!recoveredValidation?.legal) throw new Error(`invalid provider fallback: ${recoveredValidation?.reason || "missing action"}`);
+          }
+          catch (recoveryError) {
+            state.ai_autoplay = false;
+            log.push({
+              step: step + 1,
+              side,
+              phase: state.phase,
+              turn: state.turn,
+              source,
+              error: error.message,
+              fallback_error: recoveryError.message,
+              fallback_recovery_failed: true
+            });
+            return { status: "provider_error", log, steps: step + 1, error: error.message };
+          }
+        }
+        else {
+          state.ai_autoplay = false;
+          log.push({ step: step + 1, side, phase: state.phase, turn: state.turn, source, error: error.message });
+          return { status: "provider_error", log, steps: step + 1, error: error.message };
+        }
       }
 
       const validation = validateAiAction(suggestion.action);
-      const action = validation.action || normalizeAiAction(suggestion.action);
+      if (!validation.legal) {
+        state.ai_autoplay = false;
+        log.push({ step: step + 1, side, controller, source, phase: state.phase, turn: state.turn,
+          action: clone(suggestion.action), model: suggestion.model || null,
+          result: { legal: false, reason: validation.reason } });
+        return { status: "illegal_action", log, steps: step + 1, result: validation };
+      }
+      const action = validation.action;
+      const controllerElapsedMs = Date.now() - controllerStarted;
       if (action.type === "pass") {
         const from = state.phase;
         const movement = movementPhaseSummary(side, suggestion.model?.movement_phase || null);
@@ -1315,6 +1308,7 @@ function makeReplay(scenarioName, options = {}) {
           to: state.phase,
           turn: state.turn,
           model: suggestion.model || null,
+          controller_elapsed_ms: controllerElapsedMs,
           movement_phase_policy: ["initial_movement", "mechanized_movement", "supply_movement"].includes(Rules.phaseKind(from)) ? "rule_complete" : null,
           advance_reason: action.reason || "model_pass",
           movement_phase: movement ? { ...movement, advance_reason: action.reason || "model_pass" } : null
@@ -1347,6 +1341,7 @@ function makeReplay(scenarioName, options = {}) {
         turn: state.turn,
         action: compactAction(action),
         candidates: suggestion.candidates,
+        controller_elapsed_ms: controllerElapsedMs,
         model: suggestion.model || null,
         result: {
           legal: result.legal,

@@ -98,6 +98,31 @@ test("Allied goal grounding observes Axis and uses denial semantics", () => {
   assert.equal(plan.primary_goal.expected_vp_delta, 0);
 });
 
+test("local recovery has no fixed July column floor or Allied VP limit", () => {
+  for (const nextColumn of [35, 36, 38]) {
+    const facts = publicContext();
+    facts.victory.current_scoring.july_advance.farthest_scoring_column = nextColumn - 1;
+    facts.victory.current_scoring.july_advance.next_scoring_column = nextColumn;
+    facts.objective_resolution.candidates = [];
+    const plan = localGoalPlan({ publicContext: facts, state, side: "axis" });
+    assert.equal(plan.primary_goal.target_column, nextColumn);
+    assert.equal(plan.primary_goal.target_hex, "");
+    const allies = localGoalPlan({ publicContext: facts, state, side: "allies" });
+    assert.equal(allies.campaign_goal.target_vp, 33);
+  }
+});
+
+test("model-selected locations survive grounding, including the former landmark", () => {
+  for (const targetHex of ["3711", "2424"]) {
+    const plan = groundGoalPlan({
+      primary_goal: { id: "chosen", title: "Model-selected maneuver", goal_type: "maneuver", target_hex: targetHex }
+    }, { publicContext: publicContext(), state, side: "axis", ctx });
+    assert.equal(plan.primary_goal.target_hex, targetHex);
+    assert.equal(goalIntent(plan).intent.target_hex, targetHex);
+    assert.equal(plan.source, "model");
+  }
+});
+
 test("Allied campaign target is normalized from generic target and drives recovery mode", () => {
   const facts = publicContext();
   facts.game.active_side = "allies";

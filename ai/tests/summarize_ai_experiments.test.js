@@ -5,10 +5,30 @@ const test = require("node:test");
 
 const { oddsBelowTwoToOne, summarizeTranscripts } = require("../experiments/summarize_ai_experiments.js");
 const { createArtifactManifest } = require("../core/benchmark_artifacts.js");
+const { COMPARISON_CONTRACT_VERSION, comparisonContractHash } = require("../core/comparison_contract.js");
 
 const TEST_MANIFEST = createArtifactManifest("july", { includeGitMetadata: false });
 
 function transcript(harness, harnessPromptHash) {
+  const comparisonContract = {
+    version: COMPARISON_CONTRACT_VERSION,
+    benchmark_version: TEST_MANIFEST.benchmark_version,
+    scenario: "july",
+    external_side: "axis",
+    controllers: { axis: "external_ai", allies: "rules_ai" },
+    artifact_manifest: TEST_MANIFEST,
+    artifact_manifest_hash: TEST_MANIFEST.artifact_manifest_hash,
+    model_configuration: { identity: { profile_id: "mock_primary" }, defaults: { thinking: "disabled" } },
+    max_steps: 1000,
+    max_calls_per_step: 6,
+    step_timeout_ms: 180000,
+    model_profile: "mock_primary",
+    tool_profile: "map_and_action",
+    tool_config_hash: "tools-v1",
+    context_profile: "compact_current_state_v1",
+    prompt_profile_hash: "prompt-v1",
+    harness_prompt_hash: "prompt-v1"
+  };
   return {
     experiment_id: `${harness}-test`,
     scenario: "july",
@@ -19,30 +39,14 @@ function transcript(harness, harnessPromptHash) {
     harness,
     decision_mode: "direct",
     model_profile: "mock_primary",
-    benchmark_version: "alamein-benchmark-v1",
+    benchmark_version: TEST_MANIFEST.benchmark_version,
     artifact_manifest_hash: TEST_MANIFEST.artifact_manifest_hash,
     artifact_manifest: TEST_MANIFEST,
     tool_profile: "map_and_action",
     tool_config_hash: "tools-v1",
-    comparison_contract_hash: "shared-contract",
+    comparison_contract_hash: comparisonContractHash(comparisonContract),
     prompt_profile_hash: harnessPromptHash,
-    comparison_contract: {
-      version: "single-action-comparison-v14-benchmark-integrity",
-      scenario: "july",
-      external_side: "axis",
-      controllers: { axis: "external_ai", allies: "rules_ai" },
-      artifact_manifest: TEST_MANIFEST,
-      model_configuration: { identity: { profile_id: "mock_primary" }, defaults: { thinking: "disabled" } },
-      max_steps: 1000,
-      max_calls_per_step: 6,
-      step_timeout_ms: 180000,
-      model_profile: "mock_primary",
-      tool_profile: "map_and_action",
-      tool_config_hash: "tools-v1",
-      context_profile: "compact_current_state_v1",
-      prompt_profile_hash: harnessPromptHash,
-      harness_prompt_hash: harnessPromptHash
-    },
+    comparison_contract: comparisonContract,
     harness_prompt_hash: harnessPromptHash,
     context_profile: "compact_current_state_v1",
     status: "final_victory",

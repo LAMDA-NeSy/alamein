@@ -21,6 +21,34 @@ function combatContext() {
   });
 }
 
+test("combat inspection reports actual CRT probabilities and attacker retreat evidence", () => {
+  const built = combatContext();
+  const before = JSON.stringify(built.ctx.state);
+  const result = Transcript.runTool({ ctx: built.ctx, allUnits: built.allUnits }, built.publicContext,
+    "check_combat", { attackers: ["attacker"], defender_hexes: ["2524"] });
+  assert.equal(result.legal, true);
+  const risk = result.details.risk_evidence;
+  assert.equal(Object.keys(risk.crt_by_die).length, 6);
+  assert.ok(Math.abs(Object.values(risk.outcome_distribution).reduce((sum, item) => sum + item.probability, 0) - 1) < 1e-10);
+  assert.equal(risk.attacker_retreat_probability,
+    Object.values(risk.crt_by_die).filter((value) => /^A[123]$/.test(value)).length / 6);
+  assert.equal(risk.attacker_retreat_options[0].unit, "attacker");
+  assert.equal(JSON.stringify(built.ctx.state), before);
+});
+
+test("failed movement carries current-state diagnostic evidence without guaranteeing future reachability", () => {
+  const built = combatContext();
+  built.ctx.state.phase = "axis_initial_movement";
+  const before = JSON.stringify(built.ctx.state);
+  const result = Transcript.evaluateProbeAction({ decision_mode: "hierarchical_sae", candidate_actions: [] },
+    { type: "move_intent", unit: "attacker", destination: "2524" }, built.ctx);
+  assert.equal(result.legal, false);
+  assert.equal(result.route_evidence.status, "no_verified_current_phase_path");
+  assert.ok(result.route_evidence.target_occupants.includes("defender"));
+  assert.equal(result.route_evidence.diagnostics.length, 2);
+  assert.equal(JSON.stringify(built.ctx.state), before);
+});
+
 test("external AI unit intel reports the unit's actual ZOC", () => {
   const built = combatContext();
   const result = Transcript.runTool(
@@ -54,7 +82,8 @@ test("current context includes a dynamic overall game overview", () => {
   assert.equal(overview.initial_map_reference_2d.format, "staggered_hex_coordinate_map");
   assert.ok(overview.initial_map_reference_2d.layout_rows.length > 20);
   assert.deepEqual(overview.initial_map_reference_2d.connection_rule.odd_column_offsets[0], [0, -1]);
-  assert.ok(overview.initial_map_reference_2d.key_connections.some((item) => item.hex === "3208"));
+  assert.ok(overview.initial_map_reference_2d.key_connections.some((item) => item.hex === "2424"));
+  assert.ok(!overview.initial_map_reference_2d.key_connections.some((item) => item.hex === "3208"));
 
   const laterStep = Transcript.buildContext(config, {
     scenario: "scenarios/july.json",
@@ -217,12 +246,13 @@ test("July context exposes exact scoring rules and the next scoring column", () 
   assert.equal(victory.current_scoring.july_advance.vp_gain_for_reaching_next_column, 3);
   assert.equal(built.publicContext.objectives.axis_primary_type, "eastern_scoring_frontier");
   assert.equal(built.publicContext.objectives.axis_next_scoring_column, 35);
-  assert.match(built.publicContext.objectives.alamein_role, /no separate July capture bonus/);
+  assert.equal(built.publicContext.objectives.alamein_role, undefined);
+  assert.equal(built.publicContext.objectives.alamein, undefined);
   assert.match(victory.scoring_rules.scenario_rules.join(" "), /35xx=3, 36xx=6, 37xx=9/);
-  assert.match(victory.scoring_rules.scenario_rules.join(" "), /no separate capture bonus/);
+  assert.doesNotMatch(victory.scoring_rules.scenario_rules.join(" "), /3711/);
 });
 
-test("objective resolution separates scoring frontier from operational landmark", () => {
+test("objective resolution exposes scoring evidence without assigning a landmark", () => {
   const config = Transcript.readConfig();
   const built = Transcript.buildContext(config, {
     scenario: "scenarios/july.json",
@@ -233,8 +263,41 @@ test("objective resolution separates scoring frontier from operational landmark"
   });
   assert.equal(built.publicContext.objective_resolution.frontier.type, "scoring_frontier");
   assert.equal(built.publicContext.objective_resolution.frontier.next_value, 35);
-  assert.equal(built.publicContext.objective_resolution.operational_landmark, "3711");
+  assert.equal(built.publicContext.objective_resolution.operational_landmark, undefined);
   assert.match(built.publicContext.objective_resolution.selection_rule, /projected supply/);
+  assert.match(built.publicContext.objective_resolution.selection_rule, /not assigned objectives/);
+});
+
+test("all scenario-side contexts retain map facts without privileged operational landmarks", () => {
+  const { compactAgentPayload } = require("../core/agent_context.js");
+  for (const scenario of ["july", "september", "october"]) {
+    for (const side of ["axis", "allies"]) {
+      const built = Transcript.buildContext(Transcript.readConfig(), {
+        state: { scenario, turn: 2, phase: `${side}_initial_movement`, active_side: side, units: {
+          a: { side: "axis", kind: "ground", hex: "2424", attack: 2, defense: 2, movement: 4, state: "fresh" },
+          b: { side: "allies", kind: "ground", hex: "3711", attack: 2, defense: 2, movement: 4, state: "fresh" }
+        } }, decisionMode: "hierarchical_sae", privateCandidates: false
+      });
+      const context = built.publicContext;
+      assert.equal(context.game.active_side, side);
+      const summary = context.battlefield_summary;
+      assert.equal(summary.reference_landmark_hex, undefined);
+      assert.equal(summary.closest_active_to_landmark, undefined);
+      assert.ok(summary.regional_balance.length > 0);
+      const mapHexes = context.map_intel.key_hexes;
+      assert.deepEqual(mapHexes.map((item) => item.hex), mapHexes.map((item) => item.hex).sort());
+      assert.equal(mapHexes.find((item) => item.hex === "3711").label, "Allied supply source");
+      assert.ok(context.unit_index[side === "allies" ? "active" : "enemy"].some((unit) => unit.h === "3711"));
+      for (const unit of [...context.forces.active.sample_units, ...context.forces.enemy.sample_units]) {
+        assert.equal(unit.distance_to_operational_landmark, undefined);
+        assert.ok(!unit.map_area.includes("eastern objective area"));
+      }
+      const payload = compactAgentPayload({ context }, { includeInitialMap: false });
+      assert.equal(payload.context.objective_resolution.operational_landmark, undefined);
+      assert.doesNotMatch(JSON.stringify(context.victory), /3711/);
+      assert.doesNotMatch(JSON.stringify(payload), /operational landmark|distance_to_operational_landmark/);
+    }
+  }
 });
 
 test("failed move intent returns legal alternatives instead of only a fixed target error", () => {
@@ -318,7 +381,8 @@ test("Allied eastward movement is not credited without a verified defensive effe
     destination: "4910",
     mode: "normal"
   }, built.allUnits);
-  assert.equal(evaluation.victory_impact.self_vp_delta, 0);
+  assert.equal(evaluation.victory_impact.self_vp_delta, null);
+  assert.equal(evaluation.victory_impact.projected_vp_delta_from_current_state, 0);
   assert.equal(evaluation.victory_impact.opponent_vp_delta, 0);
   assert.equal(evaluation.victory_impact.axis_scoring_threat_delta, 0);
   assert.equal(evaluation.victory_impact.destination_is_primary_objective, false);

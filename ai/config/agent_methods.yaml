@@ -124,13 +124,19 @@ methods:
     max_calls_per_step: 20
     model_profile: mock_primary
     step_timeout_ms: 180000
-    rolling_unit_protocol: v1
+    rolling_unit_protocol: v2
     phase_status_first: true
-    execution_order: model_tool_call_order
+    planning_mode: phase_batch
+    execution_order: phase_plan_priority
+    revalidate_each_action: true
     accepted_actions_per_replay_step: 1
+    max_stagnant_actions: 25
 
   hierarchical_sae:
     category: decision_policy
+    execution_ledger: true
+    repair_policy: phase_batch_once
+    phase_repair_timeout_ms: 30000
     decision_policy: hierarchical_sae
     harness: manual_single_action
     tool_profile: rolling_unit_rules_tactical
@@ -142,10 +148,20 @@ methods:
     goal_management: open_grounded
     goal_protocol: side-aware-goal-v2
     force_allocation_protocol: sae-v1
-    dispatch_protocol: rolling-unit-action-v1
+    dispatch_protocol: rolling-unit-action-v2
+    max_recommendation_expansions: 32
+    max_evaluated_options_per_unit: 12
+    rolling_unit_protocol: v2
+    phase_status_first: true
+    planning_mode: phase_batch
+    execution_order: phase_plan_priority
+    revalidate_each_action: true
+    accepted_actions_per_replay_step: 1
+    max_stagnant_actions: 25
     task_management: multi_task
-    task_protocol: side-aware-task-v2
+    task_protocol: side-aware-task-v4
     task_generation: model_defined
+    scoring_anchor_policy: july_terminal_v1
     task_dependency_policy: hard_soft_conditional_v1
     task_switching: existing_tasks_only
     max_child_tasks: 6
@@ -164,8 +180,21 @@ methods:
     include_action_effect_feedback: true
     allow_next_intent: true
     task_progress_mode: evidence_grounded
+    strategic_review_mode: advisory
+    route_feasibility_budget_ms: 2000
+    route_feasibility_scope: task_units_only
     replan_on_new_tactical_opportunity: true
     task_checker_cooldown_actions: 3
+    reasoning_memory:
+      enabled: true
+      within_step: full
+      cross_step: summary_plus_excerpt
+      max_recent_entries: 4
+      max_excerpt_tokens: 800
+      max_summary_tokens: 1200
+      retain_rejected_options: true
+      reset_on_phase_change: true
+      reset_on_replanning: true
 
   direct:
     category: decision_policy

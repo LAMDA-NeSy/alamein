@@ -8,6 +8,7 @@ const { defaultLogFile, prepareOutputFile } = require("../core/experiment_log.js
 const { readConfigFile } = require("../core/config_file.js");
 const { promptValue, renderSidePrompt, resolveSidePrompt, sideStrategyConfig, strategyConfig } = require("../core/prompt_registry.js");
 const { CONFIG_DIR, PROJECT_ROOT } = require("../core/project_paths.js");
+const { actionGuidance, phaseAllowedActions: scenarioPhaseAllowedActions, scenarioPolicy } = require("../core/scenario_policy.js");
 
 const ROOT = PROJECT_ROOT;
 const OUT = defaultLogFile("last_external_ai_transcript.json");
@@ -42,9 +43,7 @@ function argValue(name, fallback) {
 }
 
 function distance(a, b) {
-  const [ac, ar] = RulesEngine.splitHex(a);
-  const [bc, br] = RulesEngine.splitHex(b);
-  return Math.abs(ac - bc) + Math.abs(ar - br);
+  return RulesEngine.hexDistance(a, b);
 }
 
 function hexColumn(hex) {
@@ -65,8 +64,8 @@ function mapArea(ctx, hex) {
   if (row <= 12) areas.push("northern coastal sector");
   else if (row <= 22) areas.push("central desert sector");
   else areas.push("southern desert sector");
-  if (col <= 20) areas.push("western approach");
-  else if (col >= 36) areas.push("eastern objective area");
+  if (col <= 20) areas.push("western map area");
+  else if (col >= 36) areas.push("eastern map area");
   else areas.push("middle battlefield");
   return [...new Set(areas)];
 }
@@ -102,11 +101,6 @@ function nearestEnemyHexFor(unit, allUnits, maxRange = Infinity) {
 
 function supplyRank(value) {
   return { isolated: 0, unsupplied: 1, partial: 2, partially_supplied: 2, supplied: 3 }[String(value || "").toLowerCase()] ?? -1;
-}
-
-function fixedAiTarget(ctx, side = ctx.state.active_side) {
-  if (side === "axis" && ctx.state.scenario === "october" && Number(ctx.state.turn || 1) > 10) return "0101";
-  return ctx.rules.game?.alamein_hex || "3711";
 }
 
 function scoringFrontier(ctx) {
@@ -150,8 +144,8 @@ function objectiveResolution(ctx, allUnits, candidateActions = []) {
         destination: action.destination || action.path?.at(-1) || "",
         path_exists: true,
         projected_supply: impact.projected_supply_after_move || "",
-        crosses_frontier: Number(impact.estimated_vp_delta || 0) > 0,
-        estimated_vp_delta: Number(impact.estimated_vp_delta || 0),
+        crosses_frontier: Number(impact.projected_vp_delta_from_current_state || impact.estimated_vp_delta || 0) > 0,
+        estimated_vp_delta: Number(impact.projected_vp_delta_from_current_state || impact.estimated_vp_delta || 0),
         risks: item.evaluation?.risks || [],
         score: Number(item.score || 0)
       };
@@ -162,28 +156,34 @@ function objectiveResolution(ctx, allUnits, candidateActions = []) {
     .slice(0, 8);
   return {
     frontier,
-    operational_landmark: ctx.rules.game?.alamein_hex || "3711",
     candidates,
-    selection_rule: "Prefer a legal route that improves the scoring frontier while preserving projected supply; use the operational landmark only when it also supports the active scoring objective."
+    selection_rule: "These are scoring facts and bounded route observations, not assigned objectives. Select your own target, route and risk tradeoff using the current scenario, projected supply and task evidence."
   };
 }
 
 function supplyEscortTarget(ctx, unit, allUnits) {
-  if (unit.side === "axis" && ctx.state.scenario === "october" && Number(ctx.state.turn || 1) > 10) {
-    return fixedAiTarget(ctx, "axis");
-  }
-  const friendlies = allUnits.filter((item) => item.side === unit.side && item.hex && !item.eliminated && RulesEngine.isMapCounter(item));
-  if (!friendlies.length) return fixedAiTarget(ctx, unit.side);
-  if (unit.side === "axis") {
-    return friendlies
-      .sort((a, b) => hexColumn(b.hex) - hexColumn(a.hex) || Number(b.attack || 0) - Number(a.attack || 0))[0].hex;
-  }
-  const anchor = fixedAiTarget(ctx, "allies");
+  const friendlies = allUnits.filter((item) => item.side === unit.side && item.hex && !item.eliminated
+    && RulesEngine.isCombatUnit(item));
   return friendlies
-    .sort((a, b) => distance(a.hex, anchor) - distance(b.hex, anchor) || Number(b.attack || 0) - Number(a.attack || 0))[0].hex;
+    .sort((a, b) => supplyRank(supplyStateForAi(ctx, a.id)) - supplyRank(supplyStateForAi(ctx, b.id))
+      || distance(unit.hex, a.hex) - distance(unit.hex, b.hex) || a.id.localeCompare(b.id))[0]?.hex || unit.hex;
 }
 
 function moveTarget(ctx, unit, allUnits) {
+  if (unit.side === "axis" && ctx.state.scenario === "october" && unit.hex) {
+    // Withdrawal is toward the western edge, not a single July landmark.
+    // Route legality (including the pre-turn-11 line) is still engine-owned.
+    return mapHexTopology().hexes.filter((hex) => hex.startsWith("01"))
+      .sort((a, b) => distance(unit.hex, a) - distance(unit.hex, b) || a.localeCompare(b))[0];
+  }
+  if (unit.side === "allies" && ctx.state.scenario === "october") {
+    const targets = allUnits.filter((other) => other.hex && !other.eliminated
+      && (RulesEngine.isCombatUnit(other) || RulesEngine.isSupplyUnit(other))
+      && other.side === (RulesEngine.isSupplyUnit(unit) ? "allies" : "axis")
+      && other.id !== unit.id);
+    return targets.sort((a, b) => distance(unit.hex, a.hex) - distance(unit.hex, b.hex)
+      || a.id.localeCompare(b.id))[0]?.hex || unit.hex;
+  }
   if (RulesEngine.isSupplyUnit(unit)) return supplyEscortTarget(ctx, unit, allUnits);
   if (unit.side === "axis" && ctx.state.scenario === "july" && unit.hex) {
     const [, row] = RulesEngine.splitHex(unit.hex);
@@ -197,13 +197,15 @@ function moveTarget(ctx, unit, allUnits) {
         catch {}
       }
     }
-    return fixedAiTarget(ctx, "axis");
+    return unit.hex;
   }
-  if (unit.side === "axis") return fixedAiTarget(ctx, "axis");
+  if (unit.side === "axis" && ctx.state.scenario === "september") {
+    return allUnits.filter((item) => item.side === "allies" && item.kind === "mine" && item.hex && !item.eliminated)
+      .sort((a, b) => distance(unit.hex, a.hex) - distance(unit.hex, b.hex) || a.id.localeCompare(b.id))[0]?.hex || unit.hex;
+  }
   const nearbyEnemy = nearestEnemyHexFor(unit, allUnits, 7);
   if (nearbyEnemy) return nearbyEnemy.hex;
-  const alamein = fixedAiTarget(ctx, "allies");
-  return distance(unit.hex, alamein) <= 7 ? alamein : RulesEngine.normalizeHex(unit.hex);
+  return RulesEngine.normalizeHex(unit.hex);
 }
 
 function moveDirectionScore(ctx, unit, start, destination, allUnits) {
@@ -213,24 +215,29 @@ function moveDirectionScore(ctx, unit, start, destination, allUnits) {
   if (unit.side === "axis" && ctx.state.scenario === "october") {
     return delta < 0 ? Math.abs(delta) * 10 : delta === 0 ? 0 : -delta * 14;
   }
-  if (unit.side === "axis") return delta >= 0 ? delta * 4 : delta * 18;
+  if (unit.side === "allies" && ctx.state.scenario === "october") {
+    const target = moveTarget(ctx, unit, allUnits);
+    return (distance(start, target) - distance(destination, target)) * 8;
+  }
+  if (unit.side === "axis" && ctx.state.scenario === "july") return delta >= 0 ? delta * 4 : delta * 18;
+  if (unit.side === "axis") {
+    const target = moveTarget(ctx, unit, allUnits);
+    return (distance(start, target) - distance(destination, target)) * 8;
+  }
   const nearbyEnemy = nearestEnemyHexFor(unit, allUnits, 7);
   if (nearbyEnemy) {
     const before = distance(start, nearbyEnemy.hex);
     const after = distance(destination, nearbyEnemy.hex);
     const awayPenalty = after > before ? (after - before) * 16 : 0;
-    const alamein = fixedAiTarget(ctx, "allies");
-    const abandonsBoxPenalty = distance(start, alamein) <= 4 && distance(destination, alamein) > distance(start, alamein) ? 10 : 0;
-    return (before - after) * 8 - awayPenalty - abandonsBoxPenalty - Math.max(0, hexColumn(destination) - 38) * 2;
+    return (before - after) * 8 - awayPenalty;
   }
-  if (delta < 0) return delta * 14;
-  if (delta > 2) return -delta * 3;
-  return delta;
+  return 0;
 }
 
 function supplyStateForAi(ctx, unitId) {
   const unit = ctx.state.units?.[unitId];
   if (!unit || !RulesEngine.isPlayableSide(unit.side)) return "";
+  if (!RulesEngine.isCombatUnit({ id: unitId, ...unit }) && !RulesEngine.isSupplyUnit(unit)) return "n/a";
   ctx.ai_supply_state_cache ||= {};
   ctx.ai_supply_state_cache[unit.side] ||= RulesEngine.checkSupply(ctx, unit.side);
   return ctx.ai_supply_state_cache[unit.side][unitId] || RulesEngine.supplyState(ctx, unitId);
@@ -413,7 +420,7 @@ function movementActionScore(ctx, action, allUnits) {
   const supplyPenalty = supply === "isolated" ? 20 : supply === "unsupplied" ? 8 : supply === "partially_supplied" ? 3 : 0;
   const roadBonus = action.mode === "road" && !zocSources.size ? (RulesEngine.isSupplyUnit(full) ? 8 : 2) : 0;
   const terrainTags = RulesEngine.hexTags(ctx, destination);
-  const terrainBonus = terrainTags.includes("alamein_box") ? 3 : terrainTags.includes("hill_or_ridge") ? 2 : 0;
+  const terrainBonus = terrainTags.includes("hill_or_ridge") ? 2 : 0;
   const spentPenalty = Number(action.spent || 0) * 0.25;
   const strength = Number(unit.attack || 0) + Number(unit.movement || 0) * 0.2;
   const usefulProgress = Math.max(0, progress);
@@ -448,14 +455,10 @@ function unitContextPriority(id, unit, ctx, allUnits = []) {
   const full = { id, ...unit };
   const nearest = nearestEnemies(full, allUnits, 1)[0];
   const nearEnemyScore = nearest ? Math.max(0, 12 - nearest.distance) * 3 : 0;
-  const objectiveDistance = unit.hex && unit.side === "axis" && ctx.state.scenario === "july"
-    ? Math.abs(hexColumn(unit.hex) - (currentJulyAdvanceColumn(ctx) + 1))
-    : unit.hex ? distance(unit.hex, fixedAiTarget(ctx, unit.side)) : 99;
-  const objectiveScore = unit.hex ? Math.max(0, 18 - objectiveDistance) : 0;
   const actionScore = unit.side === ctx.state.active_side && unit.state === "fresh" ? 18 : 0;
   const contactScore = unit.hex && RulesEngine.enemyZocSources(ctx, unit.side, unit.hex).size ? 20 : 0;
   const combatScore = RulesEngine.isCombatUnit(full) ? Number(unit.attack || 0) + Number(unit.defense ?? unit.attack ?? 0) : 0;
-  return actionScore + contactScore + nearEnemyScore + objectiveScore + combatScore;
+  return actionScore + contactScore + nearEnemyScore + combatScore;
 }
 
 function nearbyDetailUnitIds(entries, side, ctx, allUnits, limit) {
@@ -469,8 +472,6 @@ function nearbyDetailUnitIds(entries, side, ctx, allUnits, limit) {
 
 function compactUnit(id, unit, ctx, allUnits = [], options = {}) {
   const full = { id, ...unit };
-  const julyScoring = ctx.state.scenario === "july";
-  const objective = julyScoring ? null : fixedAiTarget(ctx, unit.side);
   const kind = phaseKind(ctx.state.phase);
   const includeNearby = options.includeNearby !== false;
   const nearbyLimit = Number(options.nearbyLimit || 3);
@@ -494,7 +495,6 @@ function compactUnit(id, unit, ctx, allUnits = [], options = {}) {
     effective_attack: RulesEngine.isCombatUnit(full) ? RulesEngine.effectiveAttack(ctx, suppliedFull) : 0,
     effective_defense: RulesEngine.isCombatUnit(full) ? RulesEngine.effectiveDefense(ctx, suppliedFull) : Number(unit.defense ?? unit.attack ?? 0),
     effective_movement: RulesEngine.isMapCounter(full) ? RulesEngine.effectiveMovement(ctx, suppliedFull) : Number(unit.movement || 0),
-    distance_to_operational_landmark: !julyScoring && unit.hex ? distance(unit.hex, objective) : null,
     distance_to_scoring_frontier: unit.hex && unit.side === "axis" && ctx.state.scenario === "july"
       ? Math.max(0, currentJulyAdvanceColumn(ctx) + 1 - hexColumn(unit.hex))
       : null,
@@ -551,24 +551,8 @@ function unitIndex(entries, side, ctx, limit) {
 function primaryOperationalArea(ctx, hex) {
   const areas = mapArea(ctx, hex);
   const sector = areas.find((item) => /sector$/.test(item)) || "unknown sector";
-  const depth = areas.find((item) => /approach|battlefield|objective area/.test(item)) || "unknown depth";
+  const depth = areas.find((item) => /map area|battlefield/.test(item)) || "unknown depth";
   return `${sector} / ${depth}`;
-}
-
-function compactBattleUnit(id, unit, ctx, objective) {
-  return {
-    id,
-    name: unit.name || id,
-    side: unit.side,
-    hex: unit.hex,
-    kind: unit.kind || "ground",
-    atk: Number(unit.attack || 0),
-    def: Number(unit.defense ?? unit.attack ?? 0),
-    mp: Number(unit.movement || 0),
-    supply: RulesEngine.isPlayableSide(unit.side) ? supplyStateForAi(ctx, id) : "",
-    map_area: unit.hex ? mapArea(ctx, unit.hex) : [],
-    distance_to_objective: unit.hex ? distance(unit.hex, objective) : null
-  };
 }
 
 function emptyAreaSide() {
@@ -589,7 +573,6 @@ function addAreaSideStats(stats, id, unit, ctx) {
 
 function battlefieldSummary(ctx, allUnits, activeSide) {
   const enemySide = activeSide === "axis" ? "allies" : "axis";
-  const objective = ctx.rules.game?.alamein_hex || "3711";
   const victory = victoryBrief(ctx);
   const julyAdvance = victory.current_scoring?.july_advance;
   const areaMap = new Map();
@@ -600,8 +583,6 @@ function battlefieldSummary(ctx, allUnits, activeSide) {
         area: label,
         active: emptyAreaSide(),
         enemy: emptyAreaSide(),
-        active_nearest_objective_unit: null,
-        enemy_nearest_objective_unit: null,
         contact_hexes: []
       });
     }
@@ -614,59 +595,44 @@ function battlefieldSummary(ctx, allUnits, activeSide) {
     const sideKey = unit.side === activeSide ? "active" : unit.side === enemySide ? "enemy" : "";
     if (!sideKey) continue;
     addAreaSideStats(area[sideKey], unit.id, unit, ctx);
-    const compact = compactBattleUnit(unit.id, unit, ctx, objective);
-    const nearestKey = `${sideKey}_nearest_objective_unit`;
-    if (!area[nearestKey] || Number(compact.distance_to_objective ?? 99) < Number(area[nearestKey].distance_to_objective ?? 99)) {
-      area[nearestKey] = compact;
-    }
     if (RulesEngine.enemyZocSources(ctx, unit.side, unit.hex).size || RulesEngine.enemyMinesAt(ctx, unit.side, unit.hex).length) {
       area.contact_hexes.push(unit.hex);
     }
   }
-  const unitsNearObjective = mapUnits
-    .filter((unit) => distance(unit.hex, objective) <= 4)
-    .sort((a, b) => distance(a.hex, objective) - distance(b.hex, objective) || a.id.localeCompare(b.id))
-    .slice(0, 12)
-    .map((unit) => compactBattleUnit(unit.id, unit, ctx, objective));
-  const closestActive = mapUnits
-    .filter((unit) => unit.side === activeSide)
-    .sort((a, b) => distance(a.hex, objective) - distance(b.hex, objective) || a.id.localeCompare(b.id))
-    .slice(0, 5)
-    .map((unit) => compactBattleUnit(unit.id, unit, ctx, objective));
-  const closestEnemy = mapUnits
-    .filter((unit) => unit.side === enemySide)
-    .sort((a, b) => distance(a.hex, objective) - distance(b.hex, objective) || a.id.localeCompare(b.id))
-    .slice(0, 5)
-    .map((unit) => compactBattleUnit(unit.id, unit, ctx, objective));
+  const policy = scenarioPolicy(ctx.state);
+  const scenarioObjective = ctx.state.scenario === "july"
+    ? {
+        type: "eastern_scoring_frontier",
+        next_scoring_column: Number(julyAdvance?.next_scoring_column || 35),
+        scoring_requirement: julyAdvance?.scoring_requirement || "supplied or partially supplied Axis ground combat unit",
+        vp_gain: Number(julyAdvance?.vp_gain_for_reaching_next_column || 3)
+      }
+    : ctx.state.scenario === "september"
+      ? {
+          type: "mine_clearance",
+          minefield_hexes: mapUnits.filter((unit) => unit.kind === "mine" && unit.side !== activeSide).map((unit) => unit.hex).filter(Boolean).slice(0, 24),
+          vp_per_cleared_mine: 3,
+          clearance_action: "engineer_entry_or_combat_clearance"
+        }
+      : ctx.state.scenario === "october"
+        ? {
+            type: "west_edge_withdrawal",
+            withdrawal_opens_after_turn: 10,
+            west_edge_column: 1,
+            legal_action: "exit_west",
+            on_edge_units: mapUnits.filter((unit) => unit.side === "axis" && Number(String(unit.hex).slice(0, 2)) === 1).map((unit) => unit.id).slice(0, 16)
+          }
+        : { type: "scenario_scoring" };
   const areas = [...areaMap.values()]
     .map((area) => ({ ...area, contact_hexes: [...new Set(area.contact_hexes)].slice(0, 8) }))
     .sort((a, b) => (b.active.attack + b.enemy.attack + b.active.units + b.enemy.units) - (a.active.attack + a.enemy.attack + a.active.units + a.enemy.units))
     .slice(0, 8);
   return {
-    description: "Operational board summary by region: force density, supply health, contact, scoring-frontier pressure, and landmark pressure.",
+    description: "Board observations by region: force density, supply health and contact. Scenario scoring conditions are facts, not assigned operational targets.",
     active_side: activeSide,
     enemy_side: enemySide,
-    strategic_objective: ctx.state.scenario === "july"
-      ? {
-          type: "eastern_scoring_frontier",
-          next_scoring_column: Number(julyAdvance?.next_scoring_column || 35),
-          scoring_requirement: julyAdvance?.scoring_requirement || "supplied or partially supplied Axis ground combat unit",
-          vp_gain: Number(julyAdvance?.vp_gain_for_reaching_next_column || 3)
-        }
-      : { type: "landmark", hex: objective },
-    reference_landmark_hex: objective,
-    reference_landmark_role: ctx.state.scenario === "july"
-      ? "Operational reference area; scoring is determined by current_scoring and the eastern frontier."
-      : "Scenario operational objective.",
-    reference_landmark_zone: {
-      radius_hexes: 4,
-      control: ctx.state.control?.[objective] || "",
-      zoc_by_axis: RulesEngine.enemyZocSources(ctx, "allies", objective).size > 0,
-      zoc_by_allies: RulesEngine.enemyZocSources(ctx, "axis", objective).size > 0,
-      units: unitsNearObjective
-    },
-    closest_active_to_landmark: closestActive,
-    closest_enemy_to_landmark: closestEnemy,
+    scenario_policy: policy,
+    strategic_objective: scenarioObjective,
     regional_balance: areas
   };
 }
@@ -676,12 +642,7 @@ function phaseKind(phase) {
 }
 
 function phaseAllowedActions(state) {
-  const kind = phaseKind(state.phase);
-  if (kind === "combat") return ["combat", "pass"];
-  if (!["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)) return ["pass"];
-  const actions = ["move_intent", "move", "pass"];
-  if (state.scenario === "october" && state.active_side === "axis" && Number(state.turn || 1) > 10) actions.splice(1, 0, "exit_west");
-  return actions;
+  return scenarioPhaseAllowedActions(state);
 }
 
 function decisionBrief(ctx, candidates, activeSide) {
@@ -690,16 +651,14 @@ function decisionBrief(ctx, candidates, activeSide) {
   const bestNonPass = nonPass[0] || null;
   const allowed = phaseAllowedActions(ctx.state);
   const kind = phaseKind(ctx.state.phase);
+  const policy = scenarioPolicy(ctx.state);
   return {
     read_first: true,
     side: activeSide,
     phase: ctx.state.phase,
     allowed: allowed,
-    phase_goal: kind === "combat"
-      ? "Attack only if worthwhile and legal; otherwise pass."
-      : ["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)
-        ? "Choose the strongest legal move/exit that improves victory position without reckless exposure."
-        : "Pass unless a legal action is explicitly available.",
+    phase_goal: policy.phase_objectives?.[kind] || policy.phase_focus,
+    scenario_policy: policy,
     top: top ? {
       score: top.score,
       type: top.action?.type || "",
@@ -729,12 +688,15 @@ function compactVerifiedAction(item) {
     summary: evaluation.summary || "",
     projected_supply: evaluation.victory_impact?.projected_supply_after_move || "",
     estimated_vp_delta: Number(evaluation.victory_impact?.estimated_vp_delta || 0),
+    projected_vp_delta_from_current_state: evaluation.victory_impact?.projected_vp_delta_from_current_state ?? null,
+    projected_frontier_column: evaluation.victory_impact?.projected_frontier_column ?? null,
     risks: (evaluation.risks || []).slice(0, 4)
   };
 }
 
 function intentBrief(ctx, activeUnits, activeSide, verifiedCandidates = []) {
   const kind = phaseKind(ctx.state.phase);
+  const policy = scenarioPolicy(ctx.state);
   const movers = activeUnits
     .filter((unit) => unit.can_move_now && unit.mp > 0)
     .map((unit) => ({
@@ -758,11 +720,8 @@ function intentBrief(ctx, activeUnits, activeSide, verifiedCandidates = []) {
     side: activeSide,
     phase: ctx.state.phase,
     allowed: phaseAllowedActions(ctx.state),
-    phase_goal: kind === "combat"
-      ? "Choose a worthwhile attack only after checking combat odds; otherwise pass."
-      : ["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)
-        ? "Choose a unit and destination that improves victory position, then verify the route."
-        : "Pass unless a legal action is explicitly available.",
+    phase_goal: policy.phase_objectives?.[kind] || policy.phase_focus,
+    scenario_policy: policy,
     available_movers: movers,
     available_attackers: attackers,
     verified_action_options: verifiedActionOptions,
@@ -778,16 +737,40 @@ function intentBrief(ctx, activeUnits, activeSide, verifiedCandidates = []) {
 
 function phaseIntentCatalog(state) {
   const kind = phaseKind(state.phase);
-  if (kind === "combat") return ["attack_pressure", "protect_supply", "pass"];
-  if (kind === "supply_movement") return ["extend_supply", "protect_supply", "pass"];
-  if (["initial_movement", "mechanized_movement"].includes(kind)) return ["advance", "pressure", "consolidate", "supply"];
+  const policy = scenarioPolicy(state);
+  const scenario = String(state.scenario || "july");
+  const side = String(state.active_side || "axis");
+  if (kind === "combat") {
+    if (scenario === "september") return side === "axis" ? ["clear_mines", "protect_engineers", "attack_pressure", "pass"] : ["protect_mines", "block_engineers", "attack_pressure", "pass"];
+    if (scenario === "october") return side === "axis" ? ["protect_withdrawal", "withdraw", "attack_pressure", "pass"] : ["block_withdrawal", "disrupt_supply", "attack_pressure", "pass"];
+    return side === "axis" ? ["attack_pressure", "protect_supply", "pass"] : ["deny_frontier", "protect_supply", "attack_pressure", "pass"];
+  }
+  if (kind === "supply_movement") return scenario === "september"
+    ? ["protect_clearance_supply", "block_engineers", "pass"]
+    : scenario === "october"
+      ? ["prepare_withdrawal", "block_withdrawal", "protect_supply", "pass"]
+      : side === "axis" ? ["extend_supply", "protect_supply", "pass"] : ["protect_supply", "deny_frontier", "pass"];
+  if (["initial_movement", "mechanized_movement"].includes(kind)) {
+    if (scenario === "september") return side === "axis" ? ["clear_mines", "engineer_route", "protect_engineers", "supply"] : ["protect_mines", "block_engineers", "consolidate", "supply"];
+    if (scenario === "october") return side === "axis" ? ["prepare_withdrawal", "withdraw", "consolidate", "supply"] : ["block_withdrawal", "disrupt_supply", "consolidate", "supply"];
+    return side === "axis" ? ["advance", "pressure", "consolidate", "supply"] : ["deny_frontier", "pressure", "consolidate", "supply"];
+  }
+  if (policy) return ["consolidate", "pass"];
   return ["pass"];
 }
 
 function defaultPhaseIntent(state) {
   const kind = phaseKind(state.phase);
+  const scenario = String(state.scenario || "july");
+  const side = String(state.active_side || "axis");
+  const scenarioDefault = scenario === "september"
+    ? (side === "axis" ? "clear_mines" : "protect_mines")
+    : scenario === "october"
+      ? (side === "axis" ? "prepare_withdrawal" : "block_withdrawal")
+      : side === "axis" ? "advance" : "deny_frontier";
+  const supplyIntent = scenario === "july" && side === "axis" ? "extend_supply" : "protect_supply";
   return {
-    type: kind === "combat" ? "attack_pressure" : kind === "supply_movement" ? "extend_supply" : "advance",
+    type: kind === "combat" ? "attack_pressure" : kind === "supply_movement" ? supplyIntent : scenarioDefault,
     sector: "",
     target_hex: "",
     priority_units: [],
@@ -799,7 +782,8 @@ function normalizePhaseIntent(raw, state) {
   const fallback = defaultPhaseIntent(state);
   const allowed = new Set(phaseIntentCatalog(state));
   const value = raw?.intent || raw || {};
-  const type = allowed.has(value.type) ? value.type : fallback.type;
+  const fallbackType = allowed.has(fallback.type) ? fallback.type : [...allowed][0] || "pass";
+  const type = allowed.has(value.type) ? value.type : fallbackType;
   const sector = ["north", "central", "south"].includes(value.sector) ? value.sector : "";
   let targetHex = "";
   if (value.target_hex || value.targetHex) {
@@ -819,11 +803,18 @@ function normalizePhaseIntent(raw, state) {
   };
 }
 
-function rulesBrief(rules) {
+function rulesBrief(rules, scenario = "july") {
+  const scenarioRules = scenario === "july"
+    ? "July: only the easternmost supplied or partially supplied Axis ground combat frontier scores advance VP."
+    : scenario === "september"
+      ? "September: successful Axis clearance of an Allied minefield scores 3 VP per cleared mine; movement toward a minefield alone does not score."
+      : scenario === "october"
+        ? "October: after Turn 10, a legal west-edge Axis exit scores by unit type; moving west before then does not score and may be illegal."
+        : "Use current_scoring from the authoritative rule engine for this scenario.";
   return {
     game: rules.game?.title || "El Alamein",
     role: promptValue("context.rules_role"),
-    turn_sequence: rules.turn_sequence,
+    turn_sequence: RulesEngine.turnSequence({ state: { scenario }, rules }),
     phases: [
       "Initial movement: move currently eligible friendly units; each unit may successfully act at most once in the phase.",
       "Combat: fresh adjacent attackers may attack, combine in joint attacks, or pass.",
@@ -850,7 +841,8 @@ function rulesBrief(rules) {
       `Minimum odds ${rules.combat?.minimum_odds || "1-4"}, maximum odds ${rules.combat?.maximum_odds || "7-1"}.`,
       "Supply, terrain, friendly minefields, engineer assistance, and retreat availability affect combat resolution.",
       "Do not include die in combat actions; the front-end judge rolls or uses the selected die.",
-      "Eliminations caused by combat or blocked retreat can add Axis VP when Allied ground combat units are lost."
+      "Eliminations caused by combat or blocked retreat can add Axis VP when Allied ground combat units are lost.",
+      scenarioRules
     ].filter(Boolean),
     mines: [
       "Enemy minefields increase movement cost, can block supply, and may strengthen defenders.",
@@ -863,7 +855,7 @@ function rulesBrief(rules) {
       rules: [
         "Supply paths cannot trace through enemy-occupied hexes, effective enemy ZOC, or uncleared enemy minefields unless an explicit rule exception applies.",
         "Supply state changes movement, combat strength, road use, survival, and scenario scoring eligibility.",
-        "July eastern advance VP counts only supplied or partially supplied Axis ground combat units."
+        scenarioRules
       ]
     },
     isolation: [
@@ -879,7 +871,7 @@ function gameOverview(ctx, options = {}) {
   const scenario = state.scenario || "july";
   const activeSide = state.active_side || "axis";
   const finalTurn = RulesEngine.scenarioFinalTurn(scenario);
-  const scoring = scenarioScoringRules(scenario, ctx.rules?.game?.alamein_hex || "3711");
+  const scoring = scenarioScoringRules(scenario);
   const victory = victoryBrief(ctx);
   const objective = scenarioObjectives(ctx, victory);
   const playerGoal = activeSide === "axis"
@@ -941,12 +933,12 @@ function gameOverview(ctx, options = {}) {
     victory_decision: "胜负由场景最终 VP 和规则引擎的终局判定决定，不由模型自行判断。",
     turn_structure: {
       final_turn: finalTurn,
-      sequence: ctx.rules?.turn_sequence || [],
+      sequence: RulesEngine.turnSequence(ctx),
       phase_roles: {
-        initial_movement: "移动当前阶段允许行动的己方单位，改善计分位置、补给或战术态势。",
-        combat: "使用相邻且符合资格的单位攻击，可以选择部分单位组成联合攻击，也可以 pass。",
-        mechanized_movement: "让符合机械化移动条件的单位机动，扩大威胁或利用突破。",
-        supply_movement: "移动补给单位，维持前线补给并支持下一阶段行动。",
+        initial_movement: scenarioPolicy(state).phase_objectives?.initial_movement || "移动当前阶段允许行动的己方单位，改善计分位置、补给或战术态势。",
+        combat: scenarioPolicy(state).phase_objectives?.combat || "使用相邻且符合资格的单位攻击，可以选择部分单位组成联合攻击，也可以 pass。",
+        mechanized_movement: scenarioPolicy(state).phase_objectives?.mechanized_movement || "让符合机械化移动条件的单位机动，扩大威胁或利用突破。",
+        supply_movement: scenarioPolicy(state).phase_objectives?.supply_movement || "移动补给单位，维持前线补给并支持下一阶段行动。",
         end_game_turn: "完成回合结算、补给和终局检查。"
       }
     },
@@ -974,7 +966,7 @@ function gameOverview(ctx, options = {}) {
 
 function inspectRulesTool(ctx, topic = "overview") {
   const rules = ctx?.rules || {};
-  const brief = rulesBrief(rules);
+  const brief = rulesBrief(rules, ctx?.state?.scenario || "july");
   const selected = String(topic || "overview");
   const sections = {
     overview: {
@@ -987,7 +979,7 @@ function inspectRulesTool(ctx, topic = "overview") {
     scoring: {
       scenario: ctx?.state?.scenario || "july",
       current: victoryBrief(ctx),
-      scoring_rules: scenarioScoringRules(ctx?.state?.scenario || "july", rules.game?.alamein_hex || "3711")
+      scoring_rules: scenarioScoringRules(ctx?.state?.scenario || "july")
     },
     movement: { movement: brief.movement },
     combat: { combat: brief.combat, mines: brief.mines },
@@ -1007,7 +999,7 @@ function inspectRulesTool(ctx, topic = "overview") {
   };
 }
 
-function scenarioScoringRules(scenario, alamein) {
+function scenarioScoringRules(scenario) {
   const common = [
     "Each Allied ground combat unit eliminated by combat, blocked retreat, or isolation adds 1 Axis VP.",
     "VP is evaluated at End of Game-Turn on the scenario final turn."
@@ -1020,7 +1012,6 @@ function scenarioScoringRules(scenario, alamein) {
         "Find the easternmost surviving Axis ground combat unit that is supplied or partially supplied.",
         "Its column scores 3 VP for every column east of column 34: 35xx=3, 36xx=6, 37xx=9, 38xx=12, and so on.",
         "Only the single easternmost eligible column scores; extra units in the same column do not add VP.",
-        `Hex ${alamein} has no separate capture bonus in July. Its column 37 matters only through the easternmost-column rule.`,
         "An unsupplied unit does not count for July eastern advance VP."
       ]
     };
@@ -1097,6 +1088,36 @@ function currentScenarioScoring(ctx, victory) {
       warning: `Moving within column ${farthestColumn} or west of it adds 0 immediate advance VP. Multiple units in the same column do not stack VP.`
     };
   }
+  if (scenario === "september") {
+    const cleared = breakdown.find((item) => item.id === "september_axis_cleared_mines");
+    current.september_mine_clearance = {
+      mines_cleared: Array.isArray(cleared?.mines) ? cleared.mines.length : 0,
+      mines: cleared?.mines || [],
+      vp_per_mine: 3,
+      vp_from_mines: Number(cleared?.points || 0),
+      next_scoring_change: "clear one Allied minefield hex for 3 VP"
+    };
+  }
+  if (scenario === "october") {
+    const exited = ["october_supply_exited_west", "october_combat_exited_west"]
+      .map((id) => breakdown.find((item) => item.id === id))
+      .filter(Boolean);
+    const exitedUnits = exited.flatMap((item) => item.units || []);
+    const onMapAxis = Object.entries(ctx.state.units || {})
+      .filter(([, unit]) => unit.side === "axis" && !unit.eliminated && unit.hex
+        && (RulesEngine.isCombatUnit(unit) || RulesEngine.isSupplyUnit(unit)))
+      .map(([id, unit]) => ({ id, kind: unit.kind || "ground", hex: RulesEngine.normalizeHex(unit.hex), value: unit.kind === "supply" ? 10 : Number(unit.attack || unit.defense || 0) }))
+      .filter((unit) => Number(unit.hex.slice(0, 2)) === 1);
+    current.october_withdrawal = {
+      withdrawal_open_after_turn: 10,
+      supply_units_exited: (exited.find((item) => item.id === "october_supply_exited_west")?.units || []).length,
+      combat_units_exited: (exited.find((item) => item.id === "october_combat_exited_west")?.units || []).length,
+      exited_units: exitedUnits,
+      vp_from_withdrawal: exited.reduce((sum, item) => sum + Number(item.points || 0), 0),
+      west_edge_candidates: onMapAxis,
+      next_scoring_change: "legally exit an Axis supply unit for 10 VP or a combat unit for its attack value"
+    };
+  }
   return current;
 }
 
@@ -1105,7 +1126,6 @@ function victoryBrief(ctx) {
   const rules = ctx.rules;
   const scenario = state.scenario || "july";
   const finalTurn = RulesEngine.scenarioFinalTurn(scenario);
-  const alamein = rules.game?.alamein_hex || "3711";
   const victory = cachedVictory(ctx);
   return {
     current_vp: Number(victory.victory_points || 0),
@@ -1113,16 +1133,16 @@ function victoryBrief(ctx) {
     final_turn: finalTurn,
     final_check: "Winner is decided at End of Game-Turn on the scenario final turn.",
     vp_scale: ["60+ Axis Decisive", "50-59 Axis Substantive", "40-49 Axis Marginal", "30-39 Draw", "20-29 Allied Marginal", "10-19 Allied Substantive", "0-9 Allied Decisive"],
-    scoring_rules: scenarioScoringRules(scenario, alamein),
+    scoring_rules: scenarioScoringRules(scenario),
     current_scoring: currentScenarioScoring(ctx, victory),
-    side_goals: scenarioSideGoals(scenario, Number(state.turn || 1), alamein)
+    side_goals: scenarioSideGoals(scenario, Number(state.turn || 1))
   };
 }
 
-function scenarioSideGoals(scenario, turn, alamein) {
+function scenarioSideGoals(scenario, turn) {
   if (scenario === "july") {
     return {
-      axis: [`Cross the next eastern scoring column with a supplied or partially supplied Axis ground combat unit; merely moving closer to ${alamein} does not score.`, "Destroy or isolate Allied ground combat units while preserving Axis supply."],
+      axis: ["Increase the easternmost scoring column with a supplied or partially supplied Axis ground combat unit; select the route and operational target from current evidence.", "Destroy or isolate Allied ground combat units while preserving Axis supply."],
       allies: [`Deny the next Axis scoring column, preserve Allied ground combat units, and keep supply open.`, "Use terrain, mines, ZOC, and counterattacks to slow Axis tempo."]
     };
   }
@@ -1147,7 +1167,6 @@ function scenarioSideGoals(scenario, turn, alamein) {
 }
 
 function scenarioObjectives(ctx, victory) {
-  const alamein = ctx.rules.game?.alamein_hex || "3711";
   if (ctx.state.scenario === "july") {
     const advance = victory.current_scoring?.july_advance || {};
     return {
@@ -1155,9 +1174,7 @@ function scenarioObjectives(ctx, victory) {
       axis_primary_type: "eastern_scoring_frontier",
       axis_next_scoring_column: Number(advance.next_scoring_column || 35),
       axis_vp_gain_at_next_column: Number(advance.vp_gain_for_reaching_next_column || 3),
-      allies_primary: `Prevent a supplied Axis ground combat unit from crossing column ${advance.next_scoring_column || 35}xx`,
-      alamein,
-      alamein_role: "Important terrain landmark, but it has no separate July capture bonus."
+      allies_primary: `Prevent a supplied Axis ground combat unit from crossing column ${advance.next_scoring_column || 35}xx`
     };
   }
   if (ctx.state.scenario === "september") {
@@ -1216,8 +1233,6 @@ function initialMapReference2d(ctx) {
     hexes: [...values].sort((a, b) => Number(a.slice(0, 2)) - Number(b.slice(0, 2)))
   }));
   const keyHexes = new Set([
-    "3208",
-    ctx.rules.game?.alamein_hex,
     ...(ctx.rules.game?.axis_supply_sources || []),
     ...(ctx.rules.game?.allies_supply_sources || []),
     ...Object.values(ctx.state.units || {})
@@ -1238,7 +1253,7 @@ function initialMapReference2d(ctx) {
       note: "A connection exists only when the resulting coordinate is on the playable map. The rule engine is authoritative."
     },
     layout_rows: layoutRows,
-    key_connections: [...keyHexes].slice(0, 40).map((hex) => ({
+    key_connections: [...keyHexes].sort().slice(0, 40).map((hex) => ({
       hex,
       neighbors: RulesEngine.neighbors(hex),
       road_neighbors: RulesEngine.neighbors(hex).filter((neighbor) => RulesEngine.edgeTags(ctx, RulesEngine.normalizeEdge(hex, neighbor)).includes("road"))
@@ -1603,11 +1618,21 @@ function resolveMoveIntent(ctx, rawAction = {}) {
   const best = plans[0];
   if (!best) {
     const alternatives = legalMoveAlternatives(ctx, unitId, target);
+    const diagnostics = modes.map((mode) => ({ mode,
+      ...RulesEngine.diagnoseUnreachableMove(ctx, unitId, target, { mode, maxHexes: 240 }) }));
     return {
       legal: false,
       reason: `no legal path found for ${unitId} to ${target}`,
       action: intent,
       alternatives,
+      route_evidence: {
+        status: "no_verified_current_phase_path", turn: ctx.state.turn, phase: ctx.state.phase,
+        unit: unitId, start: ctx.state.units?.[unitId]?.hex || null, target, searched_modes: modes,
+        method: "rules_findLegalPath", diagnostics, diagnostic_max_reachable_hexes: 240,
+        target_occupants: Object.entries(ctx.state.units || {}).filter(([, unit]) => !unit.eliminated && unit.hex === target).map(([id]) => id),
+        unknown: ["future phases", "changes after preceding orders", "paths outside the search algorithm"],
+        conclusion: "No verified path in this state; this is not proof of permanent unreachability."
+      },
       recommended_recovery: alternatives.length ? "choose_one_of_the_legal_alternatives" : "replan_operation"
     };
   }
@@ -1617,6 +1642,10 @@ function resolveMoveIntent(ctx, rawAction = {}) {
     action: best.action,
     planned_from_intent: { unit: unitId, destination: target, requested_mode: intent.mode || "auto" },
     verdict: best.verdict,
+    route_evidence: { status: "verified_current_state", turn: ctx.state.turn, phase: ctx.state.phase,
+      unit: unitId, start: ctx.state.units[unitId].hex, target, path: best.action.path,
+      movement_cost: best.verdict.details?.spent ?? null, mode: best.action.mode,
+      validity: "Revalidate after every preceding action; not a future route guarantee." },
     plan_score: best.score
   };
 }
@@ -1655,12 +1684,12 @@ function mapIntel(ctx, candidateActions, allUnits, activeSide) {
   const add = (hex, label) => {
     try {
       const normalized = RulesEngine.normalizeHex(hex);
-      if (!labeled.has(normalized)) labeled.set(normalized, label);
+      const labels = labeled.get(normalized) || [];
+      if (!labels.includes(label)) labels.push(label);
+      labeled.set(normalized, labels);
     }
     catch {}
   };
-  const alamein = ctx.rules.game?.alamein_hex || "3711";
-  add(alamein, "operational landmark");
   for (const hex of ctx.rules.game?.axis_supply_sources || []) add(hex, "Axis supply source");
   for (const hex of ctx.rules.game?.allies_supply_sources || []) add(hex, "Allied supply source");
   for (const item of candidateActions) {
@@ -1683,7 +1712,8 @@ function mapIntel(ctx, candidateActions, allUnits, activeSide) {
     .slice(0, 10);
   return {
     description: "Compressed board intel: key geography, front-line units, ZOC, mines, roads, and distances.",
-    key_hexes: [...labeled.entries()].slice(0, 16).map(([hex, label]) => hexIntel(ctx, hex, label)),
+    key_hexes: [...labeled.entries()].sort(([a], [b]) => a.localeCompare(b)).slice(0, 16)
+      .map(([hex, labels]) => hexIntel(ctx, hex, labels.join("; "))),
     frontline
   };
 }
@@ -1710,6 +1740,22 @@ function combatOutcomeStats(crtColumnMap = {}) {
   };
 }
 
+function combatRiskEvidence(ctx, action, crt) {
+  const outcomes = Object.values(crt || {}).filter(Boolean);
+  const distribution = Object.fromEntries([...new Set(outcomes)].map((outcome) => [outcome, {
+    faces: outcomes.filter((value) => value === outcome).length,
+    probability: outcomes.filter((value) => value === outcome).length / outcomes.length
+  }]));
+  return {
+    crt_by_die: crt, outcome_distribution: distribution,
+    attacker_retreat_probability: outcomes.length ? outcomes.filter((value) => /^A[123]$/.test(value)).length / outcomes.length : null,
+    attacker_retreat_options: (action.attackers || []).map((id) => ({ unit: id,
+      current_supply: supplyStateForAi(ctx, id), options: RulesEngine.retreatOptions(ctx, id),
+      evidence_scope: "current-state first retreat hex only; simultaneous and multi-hex retreat remain uncertain" })),
+    warning: "Odds are a CRT column, not a success probability. Repeated attacks resample the same risks unless state changes."
+  };
+}
+
 function crtColumn(ctx, column, defenderHexes = []) {
   const columns = ctx.rules.combat?.odds_columns || [];
   const index = columns.indexOf(column);
@@ -1730,11 +1776,13 @@ function combatVerdictTool(ctx, args = {}) {
     };
     const verdict = RulesEngine.checkCombat(ctx, action);
     if (!verdict.legal) return verdict;
+    const crt = crtColumn(ctx, verdict.details?.odds_column, verdict.details?.defender_hexes || []);
     return {
       ...verdict,
       details: {
         ...(verdict.details || {}),
-        crt_column: crtColumn(ctx, verdict.details?.odds_column, verdict.details?.defender_hexes || [])
+        crt_column: crt,
+        risk_evidence: combatRiskEvidence(ctx, action, crt)
       }
     };
   }
@@ -1744,7 +1792,6 @@ function combatVerdictTool(ctx, args = {}) {
 }
 
 function terrainDefenseBonusFromTags(tags = []) {
-  if (tags.includes("alamein_box")) return 3;
   return 0;
 }
 
@@ -1755,7 +1802,6 @@ function terrainDefenseMultiplierFromTags(tags = []) {
 function combatTargetIntel(ctx, action) {
   const attackerSide = ctx.state.active_side;
   const defenderSide = attackerSide === "axis" ? "allies" : "axis";
-  const alamein = ctx.rules.game?.alamein_hex || "3711";
   return (action.defender_hexes || []).map((rawHex) => {
     const hex = RulesEngine.normalizeHex(rawHex);
     const terrainTags = RulesEngine.hexTags(ctx, hex);
@@ -1784,7 +1830,7 @@ function combatTargetIntel(ctx, action) {
       terrain_defense_bonus: terrainDefenseBonusFromTags(terrainTags),
       terrain_defense_multiplier: terrainDefenseMultiplierFromTags(terrainTags),
       rugged_defense_cancels_retreat: terrainTags.includes("hill_or_ridge"),
-      is_primary_objective: hex === alamein,
+      is_primary_objective: false,
       retreat_options_estimate: defenders.reduce((sum, defender) => {
         const unit = ctx.state.units[defender.id];
         if (!unit) return sum;
@@ -1795,7 +1841,7 @@ function combatTargetIntel(ctx, action) {
 }
 
 function alliedCombatDefensiveEffect(ctx, action, currentFarthestColumn) {
-  if (ctx?.state?.active_side !== "allies" || action?.type !== "combat") return null;
+  if (ctx?.state?.scenario !== "july" || ctx?.state?.active_side !== "allies" || action?.type !== "combat") return null;
   const targets = (action.defender_hexes || []).map((rawHex) => RulesEngine.normalizeHex(rawHex));
   const byHex = RulesEngine.unitsByHex(ctx);
   const defenders = targets.flatMap((hex) => (byHex[hex] || [])
@@ -1817,9 +1863,9 @@ function alliedCombatDefensiveEffect(ctx, action, currentFarthestColumn) {
 }
 
 function victoryImpact(ctx, action = {}) {
+  const scenario = ctx.state.scenario || "july";
   const finalTurn = RulesEngine.scenarioFinalTurn(ctx.state.scenario || "july");
   const turnsRemaining = Math.max(0, finalTurn - Number(ctx.state.turn || 1) + 1);
-  const alamein = ctx.rules.game?.alamein_hex || "3711";
   const victory = cachedVictory(ctx);
   const base = {
     turns_remaining: turnsRemaining,
@@ -1827,32 +1873,49 @@ function victoryImpact(ctx, action = {}) {
     urgency: turnsRemaining <= 1 ? "final turn or final check imminent" : turnsRemaining <= 2 ? "late scenario" : "developing scenario",
     current_vp: Number(victory.victory_points || 0),
     current_level: victory.level || "",
-    self_vp_delta: 0,
+    // Proposal-time impact is not an achieved VP change. Actual VP is written
+    // after the rule engine applies the action and is measured from state.
+    self_vp_delta: null,
     opponent_vp_delta: 0,
     axis_scoring_threat_delta: 0,
     supply_risk_delta: 0,
     force_preservation_risk: "none"
   };
+  base.scenario_guidance = actionGuidance(ctx.state, action);
   if (action.type === "pass") return { ...base, summary: "Pass has no direct VP effect and may waste tempo if useful candidates exist." };
   if (action.type === "exit_west") {
     const unit = ctx.state.units[action.unit];
+    const value = unit?.kind === "supply"
+      ? 10
+      : Number(unit?.attack || unit?.defense || 0);
+    const exitEligible = scenario === "october" && ctx.state.active_side === "axis" && unit?.side === "axis"
+      && !unit.eliminated && unit.hex && Number(unit.hex.slice(0, 2)) === 1
+      && Number(ctx.state.turn || 1) > 10
+      && ["initial_movement", "mechanized_movement", "supply_movement"].includes(phaseKind(ctx.state.phase))
+      && (RulesEngine.isCombatUnit(unit) || RulesEngine.isSupplyUnit(unit));
+    const estimatedVpDelta = exitEligible ? value : 0;
     return {
       ...base,
-      summary: "October Axis west exit can directly affect withdrawal VP when legal.",
-      vp_relevance: "direct",
+      summary: estimatedVpDelta > 0
+        ? `Legal October west exit adds ${estimatedVpDelta} withdrawal VP; final execution must pass the rule bridge.`
+        : "West exit has no immediate VP under the current scenario state.",
+      vp_relevance: estimatedVpDelta > 0 ? "direct" : "scenario_specific",
       unit: action.unit,
-      unit_value_hint: unit?.kind === "supply" ? "supply unit" : Number(unit?.attack || unit?.defense || 0)
+      estimated_vp_delta: estimatedVpDelta,
+      self_vp_delta: null,
+      projected_vp_delta_from_current_state: estimatedVpDelta,
+      projected_scoring_vp: Number(victory.victory_points || 0) + estimatedVpDelta,
+      actual_final_vp_delta: null,
+      unit_value_hint: value
     };
   }
   if (action.type === "combat") {
     const targets = (action.defender_hexes || []).map((hex) => RulesEngine.normalizeHex(hex));
     return {
       ...base,
-      summary: targets.includes(alamein)
-        ? "Combat targets Alamein, the primary victory hex."
-        : "Combat may affect VP indirectly through losses, retreats, supply, or access routes.",
-      vp_relevance: targets.includes(alamein) ? "primary_objective" : "indirect",
-      targets_primary_objective: targets.includes(alamein),
+      summary: "Combat may affect VP through scored losses, supply, or access routes; attacking a map landmark does not itself award VP.",
+      vp_relevance: "indirect",
+      targets_primary_objective: false,
       defender_hexes: targets
     };
   }
@@ -1860,11 +1923,8 @@ function victoryImpact(ctx, action = {}) {
     const unit = ctx.state.units[action.unit];
     const start = unit?.hex ? RulesEngine.normalizeHex(unit.hex) : "";
     const destination = RulesEngine.normalizeHex(action.destination || action.path?.at(-1) || start);
-    const before = start ? distance(start, alamein) : null;
-    const after = destination ? distance(destination, alamein) : null;
     const supplied = unit && RulesEngine.isPlayableSide(unit.side) ? supplyStateForAi(ctx, action.unit) : "";
     const postMoveSupply = unit && RulesEngine.isPlayableSide(unit.side) ? projectedSupplyAfterMove(ctx, action) : "";
-    const scenario = ctx.state.scenario || "july";
     const currentAdvance = victory.breakdown?.find((item) => item.id === "july_east_of_3400");
     const currentFarthestColumn = Number(currentAdvance?.farthest_column || 34);
     const destinationColumn = Number(destination.slice(0, 2) || 0);
@@ -1872,42 +1932,73 @@ function victoryImpact(ctx, action = {}) {
     const estimatedJulyVpDelta = scenario === "july" && unit?.side === "axis" && (unit?.kind || "ground") === "ground" && scoringSupply && destinationColumn > currentFarthestColumn
       ? (destinationColumn - currentFarthestColumn) * 3
       : 0;
-    const selfVpDelta = unit?.side === "axis" ? estimatedJulyVpDelta : 0;
+    let projectedScoringVp = null;
+    let projectedFrontierColumn = scenario === "july" ? currentFarthestColumn : null;
+    if (scenario === "july" && unit?.side === "axis" && ctx.rules && ctx.terrain) {
+      const projectedState = cloneJson(ctx.state);
+      if (projectedState.units?.[action.unit]) projectedState.units[action.unit].hex = destination;
+      try {
+        const projectedCtx = RulesEngine.createContext({ state: projectedState, rules: ctx.rules, terrain: ctx.terrain, roadPath: ctx.roadPath });
+        const projectedVictory = RulesEngine.calculateVictoryPoints(projectedCtx);
+        projectedScoringVp = Number(projectedVictory.victory_points || 0);
+        projectedFrontierColumn = Number(projectedVictory.breakdown?.find((item) => item.id === "july_east_of_3400")?.farthest_column || 34);
+      } catch {
+        projectedScoringVp = null;
+      }
+    }
+    const projectedVpDelta = projectedScoringVp == null
+      ? (unit?.side === "axis" ? estimatedJulyVpDelta : 0)
+      : projectedScoringVp - Number(victory.victory_points || 0);
     const opponentVpDelta = 0;
     const defensiveImpact = scenario === "july"
       ? alliedDefensiveImpactAfterMove(ctx, action, currentFarthestColumn)
       : { axis_scoring_threat_delta: 0, evidence: [] };
     const alliedDenialMove = unit?.side === "allies" && defensiveImpact.axis_scoring_threat_delta < 0;
+    const scenarioFeedback = scenario === "october"
+      ? {
+          summary: unit?.side === "axis"
+            ? destinationColumn < Number(start.slice(0, 2) || 0)
+              ? "Move reduces the column distance to the west edge. A connected legal withdrawal route is not implied; withdrawal VP requires a legal exit after Turn 10."
+              : "Movement alone gives no withdrawal VP; assess supply, force preservation, and access to the west edge."
+            : "Allied movement gives no withdrawal VP. Assess whether it blocks Axis exits or preserves Allied forces and supply.",
+          vp_relevance: unit?.side === "axis" ? "withdrawal_setup" : "withdrawal_denial_setup"
+        }
+      : scenario === "september"
+        ? {
+            summary: "Movement alone does not score September VP. Assess access to or protection of Allied minefields; an engineer's successful mine clearance is scored from the actual result.",
+            vp_relevance: unit?.side === "axis" ? "mine_clearance_setup" : "minefield_defense_setup"
+          }
+        : null;
+    const defaultSummary = estimatedJulyVpDelta > 0
+      ? `Move projects a ${projectedVpDelta} VP July scoring change if this state remains scoring-eligible; final VP is only awarded from the authoritative end-state.`
+      : alliedDenialMove
+        ? `Move does not directly change VP; verified defensive effect: ${defensiveImpact.evidence.join("; ")}.`
+      : scenario === "july" && destinationColumn > currentFarthestColumn
+        ? unit?.side === "axis"
+          ? "Move improves the Axis scoring frontier position but does not add immediate VP under the current supply projection."
+          : "Allied eastward movement does not earn July advance VP; assess only blocking, supply, survival, or threat reduction."
+      : scenario === "july"
+        ? "Move stays at or west of the current scoring frontier; it needs a supply, ZOC, stacking, or tactical benefit to justify the tempo."
+      : "Move has no immediate primary-objective gain.";
+    const defaultRelevance = estimatedJulyVpDelta > 0
+      ? "direct"
+      : alliedDenialMove
+        ? "scoring_denial_setup"
+      : scenario === "july" && destinationColumn > currentFarthestColumn
+        ? unit?.side === "axis" ? "frontier_setup" : "low_direct"
+        : "low_direct";
     return {
       ...base,
-      summary: estimatedJulyVpDelta > 0
-        ? `Move could increase July eastern advance score by ${estimatedJulyVpDelta} VP if the unit remains supplied or partially supplied after moving.`
-        : alliedDenialMove
-          ? `Move does not directly change VP; verified defensive effect: ${defensiveImpact.evidence.join("; ")}.`
-        : scenario === "july" && destinationColumn > currentFarthestColumn
-          ? unit?.side === "axis"
-            ? "Move improves the Axis scoring frontier position but does not add immediate VP under the current supply projection."
-            : "Allied eastward movement does not earn July advance VP; assess only blocking, supply, survival, or threat reduction."
-        : scenario === "july"
-          ? "Move stays at or west of the current scoring frontier; it needs a supply, ZOC, stacking, or tactical benefit to justify the tempo."
-        : destination === alamein
-          ? "Move reaches the scenario operational landmark. Apply the authoritative scenario scoring rules before treating it as a primary objective."
-        : before != null && after != null && after < before
-          ? "Move improves position toward the scenario operational landmark but does not create immediate VP."
-          : "Move has no immediate primary-objective gain.",
-      vp_relevance: estimatedJulyVpDelta > 0
-        ? "direct"
-        : alliedDenialMove
-          ? "scoring_denial_setup"
-        : scenario === "july" && destinationColumn > currentFarthestColumn
-          ? unit?.side === "axis" ? "frontier_setup" : "low_direct"
-          : scenario === "july"
-            ? "low_direct"
-            : destination === alamein
-              ? "primary_objective"
-              : before != null && after != null && after < before ? "positional_progress" : "low_direct",
+      summary: scenarioFeedback?.summary || defaultSummary,
+      vp_relevance: scenarioFeedback?.vp_relevance || defaultRelevance,
+      // Keep the old name as a compatibility estimate, but make the semantic
+      // distinction explicit for new consumers and reports.
       estimated_vp_delta: estimatedJulyVpDelta,
-      self_vp_delta: selfVpDelta,
+      projected_frontier_column: projectedFrontierColumn,
+      projected_scoring_vp: projectedScoringVp,
+      projected_vp_delta_from_current_state: projectedVpDelta,
+      actual_final_vp_delta: null,
+      self_vp_delta: null,
       opponent_vp_delta: opponentVpDelta,
       axis_scoring_threat_delta: unit?.side === "allies" ? defensiveImpact.axis_scoring_threat_delta : estimatedJulyVpDelta,
       axis_scoring_threat_evidence: unit?.side === "allies" ? defensiveImpact.evidence : [],
@@ -1921,19 +2012,28 @@ function victoryImpact(ctx, action = {}) {
       scoring_condition: scenario === "july" ? "only an Axis ground combat unit with supplied or partially_supplied status earns July eastern advance VP" : "scenario-specific",
       current_farthest_scoring_column: scenario === "july" ? currentFarthestColumn : null,
       destination_column: destinationColumn,
-      crosses_new_scoring_column: estimatedJulyVpDelta > 0,
-      objective_hex: scenario === "july" ? null : alamein,
-      distance_to_objective_before: scenario === "july" ? null : before,
-      distance_to_objective_after: scenario === "july" ? null : after,
+      crosses_new_scoring_column: projectedFrontierColumn > currentFarthestColumn,
+      objective_hex: null,
+      distance_to_objective_before: null,
+      distance_to_objective_after: null,
       distance_to_scoring_frontier_before: scenario === "july" && unit?.side === "axis" ? Math.max(0, currentFarthestColumn + 1 - Number(start.slice(0, 2) || 0)) : null,
       distance_to_scoring_frontier_after: scenario === "july" && unit?.side === "axis" ? Math.max(0, currentFarthestColumn + 1 - destinationColumn) : null,
       destination_is_primary_objective: scenario === "july"
         ? unit?.side === "axis" ? destinationColumn > currentFarthestColumn : alliedDenialMove
-        : destination === alamein,
+        : false,
       unit_supply_before_move: supplied,
       projected_supply_after_move: postMoveSupply,
       supply_coverage: projectedSupplyCoverageAfterMove(ctx, action),
-      maintains_july_scoring_supply: scenario === "july" ? scoringSupply : null
+      maintains_july_scoring_supply: scenario === "july" ? scoringSupply : null,
+      july_scoring_maintenance: scenario === "july" && unit?.side === "axis"
+        ? {
+            immediate_supply_eligible: scoringSupply,
+            turn_end_maintenance: scoringSupply ? "conditional" : "not_eligible",
+            evidence: scoringSupply
+              ? "unit is scoring-eligible in the projected current state; future turn-end supply is not guaranteed by this single move"
+              : "projected post-move state is not scoring-eligible"
+          }
+        : null
     };
   }
   return base;
@@ -1941,8 +2041,27 @@ function victoryImpact(ctx, action = {}) {
 
 function actionEvaluation(ctx, action, allUnits) {
   if (!action) return { summary: "missing action" };
+  const scenario_guidance = actionGuidance(ctx.state, action);
   if (action.type === "pass") return { summary: "Pass ends the current phase. Use only when no useful legal action remains.", victory_impact: victoryImpact(ctx, action), risks: ["cedes tempo"] };
-  if (action.type === "exit_west") return { summary: "Withdraws a unit west for October scenario VP when legal.", unit: action.unit, victory_impact: victoryImpact(ctx, action), risks: [] };
+  if (action.type === "exit_west") return { summary: "Withdraws a unit west for October scenario VP when legal.", scenario_guidance, unit: action.unit, victory_impact: victoryImpact(ctx, action), risks: [] };
+  if (action.type === "clear_mine") {
+    const unit = ctx.state.units?.[action.unit];
+    const hex = RulesEngine.normalizeHex(action.hex || unit?.hex || "");
+    const mines = RulesEngine.enemyMinesAt(ctx, unit?.side, hex);
+    return {
+      summary: `Attempts to clear ${hex}. Engineers clear on entry; combat units use the scenario clearing roll.`,
+      scenario_guidance,
+      unit: action.unit,
+      hex,
+      mines: mines.map((mine) => mine.id),
+      victory_impact: {
+        ...victoryImpact(ctx, { type: "move", unit: action.unit, destination: hex }),
+        summary: "A successful September mine clearance is scored from the authoritative post-action result.",
+        vp_relevance: ctx.state.scenario === "september" ? "mine_clearance" : "scenario_specific"
+      },
+      risks: []
+    };
+  }
   if (action.type === "combat") {
     const details = action.verdict?.details || {};
     const crt = details.crt_column || {};
@@ -1954,12 +2073,14 @@ function actionEvaluation(ctx, action, allUnits) {
     });
     return {
       summary: `Combat at ${details.odds_column || "unknown odds"} against ${(action.defender_hexes || []).join(", ") || "unknown target"}.`,
+      scenario_guidance,
       odds_column: details.odds_column,
       attack: details.attack,
       defense: details.defense,
       expected_crt_score: Number(combatRiskScore(crt).toFixed(2)),
       victory_impact: victoryImpact(ctx, action),
       outcome_faces: stats,
+      combat_risk_evidence: combatRiskEvidence(ctx, action, crt),
       defensive_effect: alliedCombatDefensiveEffect(
         ctx,
         action,
@@ -2084,6 +2205,24 @@ function combatCandidates(ctx, allUnits) {
     .filter((item, index, list) => index === list.findIndex((other) => sameProbeAction(item.action, other.action)));
 }
 
+function clearMineCandidates(ctx, allUnits) {
+  if (phaseKind(ctx.state.phase) !== "combat") return [];
+  return allUnits
+    .filter((unit) => unit.side === ctx.state.active_side && !unit.eliminated && unit.hex
+      && RulesEngine.isCombatUnit(unit)
+      && RulesEngine.enemyMinesAt(ctx, unit.side, unit.hex).length
+      && unit.state === "fresh" && !unit.attacked_this_turn
+      && !unit.mine_cleared_this_turn && !unit.cleared_mine_this_turn && !unit.just_cleared_mine_hex)
+    .flatMap((unit) => {
+      const action = { type: "clear_mine", unit: unit.id, hex: unit.hex };
+      const probeState = cloneJson(ctx.state);
+      const probeCtx = RulesEngine.createContext({ state: probeState, rules: ctx.rules, terrain: ctx.terrain });
+      const verdict = RulesEngine.clearMine(probeCtx, unit.id, unit.hex, 4);
+      if (!verdict.legal) return [];
+      return [{ score: 145, action, evaluation: actionEvaluation(ctx, action, allUnits) }];
+    });
+}
+
 function exitWestCandidates(ctx, allUnits) {
   const state = ctx.state;
   if (state.scenario !== "october" || state.active_side !== "axis" || Number(state.turn || 1) <= 10) return [];
@@ -2138,7 +2277,7 @@ function candidateMatchesIntent(ctx, item, intent) {
   if (intent.type === "consolidate" || intent.type === "protect_supply") {
     return action.type === "move" && (item.evaluation?.risks || []).length === 0;
   }
-  return action.type === "move" || action.type === "combat" || action.type === "exit_west";
+  return action.type === "move" || action.type === "combat" || action.type === "clear_mine" || action.type === "exit_west";
 }
 
 function isConservativeCandidate(item) {
@@ -2385,7 +2524,7 @@ function buildContext(config, options = {}) {
   const terrain = baseBuilt?.ctx?.terrain || readJson("terrain.json");
   RulesEngine.applyStateDefaults(state, { terrain });
   const ctx = baseBuilt?.ctx || RulesEngine.createContext({ state, rules, terrain });
-  const firstPhase = rules.turn_sequence?.[0] || "axis_initial_movement";
+  const firstPhase = RulesEngine.turnSequence(ctx)[0] || "axis_initial_movement";
   const includeInitialMap = options.includeInitialMap === true
     || (options.includeInitialMap == null && options.state && !options.phase)
     || (options.includeInitialMap !== false && Number(state.turn || 1) === 1 && state.phase === firstPhase);
@@ -2395,8 +2534,8 @@ function buildContext(config, options = {}) {
   const enemySide = activeSide === "axis" ? "allies" : "axis";
   const decisionMode = ["direct", "candidates", "intent", "hybrid", "opportunity_aware_hybrid", "unit_plan_hybrid", "hierarchical_sae", "strategy_execute"].includes(options.decisionMode) ? options.decisionMode : "candidates";
   const limit = Number(config.context.maxUnitsPerSide || 28);
-  const activeForce = forceDigest(entries, activeSide, ctx, allUnits, limit, config);
-  const enemyForce = forceDigest(entries, enemySide, ctx, allUnits, limit, config);
+  const activeForce = baseBuilt?.publicContext?.forces?.active || forceDigest(entries, activeSide, ctx, allUnits, limit, config);
+  const enemyForce = baseBuilt?.publicContext?.forces?.enemy || forceDigest(entries, enemySide, ctx, allUnits, limit, config);
   const activeUnits = allUnits
     .filter((unit) => unit.side === activeSide && RulesEngine.isMapCounter(unit) && !unit.eliminated && unit.hex)
     .map((unit) => compactUnit(unit.id, ctx.state.units[unit.id], ctx, allUnits, { includeNearby: false }));
@@ -2405,7 +2544,7 @@ function buildContext(config, options = {}) {
   const buildPrivateCandidates = candidateMode || options.privateCandidates === true || options.exposeVerifiedActions === true;
   let candidateActions = buildPrivateCandidates
     ? kind === "combat"
-      ? combatCandidates(ctx, allUnits)
+      ? [...combatCandidates(ctx, allUnits), ...clearMineCandidates(ctx, allUnits)]
       : ["initial_movement", "mechanized_movement", "supply_movement"].includes(kind)
         ? movementCandidates(ctx, allUnits, activeUnits, config)
         : []
@@ -2428,11 +2567,12 @@ function buildContext(config, options = {}) {
   ];
 
   const victory = victoryBrief(ctx);
-  const publicContext = {
+  const publicContext = baseBuilt?.publicContext ? cloneJson(baseBuilt.publicContext) : {
     protocol: {
       response_json_only: true,
-      allowed_final_actions: ["move_intent", "move", "combat", "exit_west", "pass"],
+      allowed_final_actions: ["move_intent", "move", "combat", "clear_mine", "exit_west", "pass"],
       current_phase_allowed_actions: phaseAllowedActions(state),
+      scenario_policy: scenarioPolicy(state),
       compressed_fields: {
         unit_index: {
           h: "hex",
@@ -2474,7 +2614,7 @@ function buildContext(config, options = {}) {
       current_phase_allowed_actions: phaseAllowedActions(state),
       decision_rule: "Read victory.scoring_rules and victory.current_scoring first. Prefer legal actions with immediate VP gain or a concrete path to the next scoring threshold. Use tools when legality, supply, pathing, or combat odds are uncertain."
     },
-    rules_brief: rulesBrief(rules),
+    rules_brief: rulesBrief(rules, state.scenario || "july"),
     victory,
     strategy: {
       doctrine: config.strategy.doctrine,
@@ -2499,6 +2639,16 @@ function buildContext(config, options = {}) {
     tools: [],
     tool_results: []
   };
+  if (baseBuilt?.publicContext) {
+    // Only reuse an explicitly supplied same-state snapshot. Policy fields
+    // are rebuilt below; static and board observations need not be recomputed.
+    publicContext.decision_mode = decisionMode;
+    delete publicContext.candidate_actions;
+    delete publicContext.verified_action_options;
+    publicContext.decision_brief = ["direct", "intent", "strategy_execute"].includes(decisionMode) || !options.phaseIntent
+      ? intentBrief(ctx, activeUnits, activeSide, options.exposeVerifiedActions ? selectedCandidates : [])
+      : decisionBrief(ctx, selectedCandidates, activeSide);
+  }
   if (options.exposeVerifiedActions) {
     publicContext.verified_action_options = selectedCandidates
       .filter((item) => item.action?.type !== "pass")
@@ -2538,10 +2688,10 @@ function buildContext(config, options = {}) {
       publicContext.phase_intent = normalizePhaseIntent(options.phaseIntent, state);
       publicContext.rolling_unit_execution = {
         movement_phase_policy: "rule_complete",
-        phase_unit_plan_protocol: null,
-        rolling_unit_action_protocol: "v1",
-        execution_order: "model_tool_call_order",
-        unit_resolution: "one accepted move per replay step; hold_unit continues within the step",
+        phase_unit_plan_protocol: "phase-unit-plan-v2",
+        rolling_unit_action_protocol: "v2",
+        execution_order: "phase_plan_priority",
+        unit_resolution: "one planned unit order per replay step; each eligible unit moves or holds once",
         fixed_movement_action_limits: false
       };
     }
@@ -2698,6 +2848,20 @@ function evaluateProbeAction(context, action = {}, ctx = null) {
       genericVerdict = { legal: false, reason: error.message };
     }
   }
+  if (freeActionModes.includes(context.decision_mode) && ctx && resolvedAction?.type === "clear_mine") {
+    try {
+      const unit = ctx.state.units?.[resolvedAction.unit];
+      const hex = RulesEngine.normalizeHex(resolvedAction.hex || unit?.hex || "");
+      const probeState = cloneJson(ctx.state);
+      const probeCtx = RulesEngine.createContext({ state: probeState, rules: ctx.rules, terrain: ctx.terrain });
+      const die = RulesEngine.isEngineer({ id: resolvedAction.unit, ...(unit || {}) }) ? null : 4;
+      genericVerdict = RulesEngine.clearMine(probeCtx, resolvedAction.unit, hex, die, { path_entry: false });
+      if (genericVerdict.legal) resolvedAction = { ...resolvedAction, hex };
+    }
+    catch (error) {
+      genericVerdict = { legal: false, reason: error.message };
+    }
+  }
   const legal = resolvedAction.type === "pass" || index >= 0 || !!planning?.legal || !!genericVerdict?.legal;
   const fallback = resolvedAction.type === "pass"
     ? { summary: "Pass ends the current phase. Use only when no useful legal action remains.", risks: ["cedes tempo"] }
@@ -2721,6 +2885,7 @@ function evaluateProbeAction(context, action = {}, ctx = null) {
     evaluation: matched?.evaluation || fallback,
     action: resolvedAction,
     planned_from_intent: planning?.planned_from_intent || null,
+    route_evidence: planning?.route_evidence || null,
     alternatives: planning?.alternatives?.length ? planning.alternatives : alternatives,
     recommended_recovery: planning?.recommended_recovery || "",
     candidate_match: {
@@ -2737,7 +2902,7 @@ function evaluateProbeAction(context, action = {}, ctx = null) {
         ? genericVerdict.reason
         : !legal
           ? freeActionModes.includes(context.decision_mode)
-            ? "intent mode requires a legal move_intent, move, combat, exit_west, or pass"
+            ? "intent mode requires a legal move_intent, move, combat, clear_mine, exit_west, or pass"
             : "transcript probe validates exact candidate actions, move_intent with legal planned route, or pass only"
           : "action is legal, but may be rejected by the strategy review"
   };
@@ -2988,6 +3153,7 @@ module.exports = {
   gameOverview,
   finalActionReview,
   movementActionScore,
+  moveTarget,
   normalizePhaseIntent,
   opportunityAssessment,
   objectiveResolution,

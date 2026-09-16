@@ -1,6 +1,6 @@
 "use strict";
 
-const CONTEXT_PROFILE_ID = "compact_current_state_v3";
+const CONTEXT_PROFILE_ID = "compact_current_state_v4_reasoning_memory";
 
 function boundedList(value, limit) {
   return Array.isArray(value) ? value.slice(0, limit) : [];
@@ -29,12 +29,16 @@ function pickDefined(value, keys) {
 
 function compactGameOverview(overview, includeInitialMap) {
   if (!overview || typeof overview !== "object") return overview;
+  const goalSummary = typeof overview.player_goal_summary === "string"
+    ? overview.player_goal_summary.replace(/开局地图是[\s\S]*?。你的任务/, "开局二维地图见 initial_map_reference_2d。你的任务")
+    : overview.player_goal_summary;
   return {
     ...pickDefined(overview, [
       "title", "game_type", "current_scenario", "current_side", "objective",
       "turn_goal_update", "player_goal_summary", "player_goal", "victory_decision", "scoring_rules",
       "decision_order", "information_boundaries"
     ]),
+    ...(goalSummary !== undefined ? { player_goal_summary: goalSummary } : {}),
     ...(includeInitialMap && overview.initial_map_reference_2d
       ? { initial_map_reference_2d: compactMapReference(overview.initial_map_reference_2d) }
       : {})
@@ -87,7 +91,9 @@ function compactTask(task) {
     "assigned_units", "compatible_units", "completion_condition", "failure_condition", "phase_scope",
     "progress", "status", "next_action", "last_blocked_reason", "source",
     "activation_reason", "tactical_opportunities", "combat_preparation", "preparation_actions",
-    "current_metrics", "progress_evidence", "normalization_corrections"
+    "current_metrics", "progress_evidence", "normalization_corrections",
+    "observation_only", "scoring_anchor_state", "scoring_anchor_loss_count", "scoring_anchor_history",
+    "completion_criteria", "failure_criteria", "acceptance_contract", "completion_evidence", "checker_assessment", "checker_suggested_switch"
   ]);
 }
 
@@ -147,6 +153,8 @@ function compactTacticalSummary(summary) {
       "replanning_trigger", "allocation_corrections"
     ]),
     active_tasks: boundedList(summary.active_tasks, 4).map(compactTask),
+    scoring_anchor: summary.scoring_anchor ? compactTask(summary.scoring_anchor) : null,
+    route_feasibility: boundedList(summary.route_feasibility, 12),
     task_units: boundedList(summary.task_units, 12),
     key_units: boundedList(summary.key_units, 8).map((unit) => ({
       ...pickDefined(unit, ["unit", "position", "attack", "defense", "movement", "supply"]),
@@ -213,19 +221,48 @@ function compactTools(tools) {
   return boundedList(tools, 32).map((tool) => ({ name: tool?.name })).filter((tool) => tool.name);
 }
 
+function compactReasoningMemory(memory) {
+  if (!memory || typeof memory !== "object") return memory;
+  const compactEntry = (entry) => pickDefined(entry, [
+    "step", "turn", "phase", "status", "action", "purpose", "summary",
+    "reasoning_excerpt", "tool_feedback", "rejected_options", "action_effect",
+    "task_progress_delta", "next_intent"
+  ]);
+  return {
+    protocol: memory.protocol || "reasoning-memory-v1",
+    policy: memory.policy,
+    current: memory.current,
+    recent_decisions: boundedList(memory.recent_decisions, 4).map(compactEntry),
+    previous_phase_decision: memory.previous_phase_decision
+      ? compactEntry(memory.previous_phase_decision) : null,
+    last_replan: memory.last_replan || null,
+    instructions: boundedList(memory.instructions, 4)
+  };
+}
+
 function compactAgentPayload(payload, options = {}) {
   const context = payload?.context || {};
   const mapIntel = context.map_intel || {};
   const includeInitialMap = options.includeInitialMap !== false;
   const includeStableContext = options.includeStableContext !== false;
   const compactContext = {
-    ...(includeStableContext ? { protocol: context.protocol } : {}),
+    ...(includeStableContext ? {
+      // Tool schemas are already supplied to the harness; this illustrative
+      // wrapper only duplicates those schemas in the projected payload.
+      protocol: context.protocol && typeof context.protocol === "object"
+        ? Object.fromEntries(Object.entries(context.protocol).filter(([key]) => key !== "tool_call_shape"))
+        : context.protocol
+    } : {}),
     game: context.game,
     game_overview: includeStableContext
       ? compactGameOverview(context.game_overview, includeInitialMap)
       : compactDynamicGameOverview(context.game_overview),
     decision_mode: context.decision_mode,
-    decision_brief: context.decision_brief,
+    // The protocol is the canonical home for scenario policy. Avoid copying
+    // the same phase policy into the decision brief for every OpenCode turn.
+    decision_brief: context.decision_brief && typeof context.decision_brief === "object"
+      ? Object.fromEntries(Object.entries(context.decision_brief).filter(([key]) => key !== "scenario_policy"))
+      : context.decision_brief,
     ...(includeStableContext ? { mission: context.mission } : {}),
     // Keep the prompt lean; authoritative rule lookup remains available through
     // the configured read-only tools, while scoring is retained in victory.
@@ -263,6 +300,7 @@ function compactAgentPayload(payload, options = {}) {
   if (context.action_effect) compactContext.action_effect = context.action_effect;
   if (context.task_progress_delta) compactContext.task_progress_delta = context.task_progress_delta;
   if (context.next_intent) compactContext.next_intent = context.next_intent;
+  if (context.reasoning_memory) compactContext.reasoning_memory = compactReasoningMemory(context.reasoning_memory);
   if (Array.isArray(context.candidate_actions)) compactContext.candidate_actions = boundedList(context.candidate_actions, 6);
   if (Array.isArray(context.verified_action_options)) {
     compactContext.verified_action_options = boundedList(context.verified_action_options, 8).map(compactAlternative);
@@ -306,12 +344,12 @@ function compactAssessment(assessment) {
   if (!assessment || typeof assessment !== "object") return assessment;
   const evaluation = assessment.evaluation || {};
   return {
-    ...pickDefined(assessment, ["legal", "score", "reason", "recommended_recovery", "candidate_match"]),
+    ...pickDefined(assessment, ["legal", "score", "reason", "recommended_recovery", "candidate_match", "route_evidence"]),
     action: assessment.action,
     evaluation: pickDefined(evaluation, [
       "summary", "start", "destination", "objective", "distance_before", "distance_after",
       "progress", "odds_column", "attack", "defense", "expected_crt_score",
-      "enemy_zoc_sources", "enemy_mines", "tactical_tags"
+      "enemy_zoc_sources", "enemy_mines", "tactical_tags", "combat_risk_evidence"
     ]),
     victory_impact: compactVictoryImpact(evaluation.victory_impact),
     risks: boundedList(evaluation.risks, 4)

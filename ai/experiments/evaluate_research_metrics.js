@@ -17,6 +17,7 @@ const {
 } = require("../core/model_runtime.js");
 const { CONFIG_DIR } = require("../core/project_paths.js");
 const { promptValue } = require("../core/prompt_registry.js");
+const { readJsonFile, writeJsonAtomic } = require("../core/json_file.js");
 const {
   attachJudgeResults,
   buildActionWindows,
@@ -28,7 +29,7 @@ const {
 const CONFIG_FILE = path.join(CONFIG_DIR, "research_metrics.yaml");
 
 function parseArgs(argv = process.argv.slice(2)) {
-  const options = { files: [], judge: false, out: defaultLogFile("research_metrics_report.json") };
+  const options = { files: [], baselines: [], judge: false, out: defaultLogFile("research_metrics_report.json") };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") continue;
@@ -38,6 +39,8 @@ function parseArgs(argv = process.argv.slice(2)) {
       options.judgeModelProfile = argv[++index];
       options.judge = true;
     }
+    else if (arg === "--baseline") options.baselines.push(argv[++index]);
+    else if (arg === "--recalculate") options.recalculate = true;
     else if (arg === "--config") options.configFile = argv[++index];
     else if (arg.startsWith("--")) throw new Error(`unknown option ${arg}`);
     else options.files.push(arg);
@@ -138,10 +141,12 @@ async function judgeWindow(client, runtime, config, systemPrompt, window) {
 
 async function evaluateTranscripts(transcripts, config, options = {}) {
   const runs = transcripts.map((transcript) => deterministicRunMetrics(transcript, config));
+  const baselineRuns = options.baselineTranscripts || [];
   if (!options.judge) {
     return buildResearchReport(runs, {
       judge_enabled: false,
-      judge_note: "Run with --judge or --judge-model-profile to calculate Judge metrics."
+      judge_note: "Run with --judge or --judge-model-profile to calculate Judge metrics.",
+      baseline_runs: baselineRuns
     });
   }
 
@@ -168,7 +173,8 @@ async function evaluateTranscripts(transcripts, config, options = {}) {
       judge_model_runtime: publicRuntimeMetadata(runtime),
       judge_prompt_hash: crypto.createHash("sha256").update(systemPrompt).digest("hex"),
       judge_usage: runtime.usage,
-      judge_transport: runtime.transport
+      judge_transport: runtime.transport,
+      baseline_runs: baselineRuns
     });
   }
   finally {
@@ -178,12 +184,25 @@ async function evaluateTranscripts(transcripts, config, options = {}) {
 
 async function main() {
   const options = parseArgs();
+  if ([...options.files, ...options.baselines].some((file) => path.resolve(file) === path.resolve(options.out))) {
+    throw new Error("report output must not overwrite a source transcript");
+  }
   const config = readConfigFile(path.resolve(options.configFile || CONFIG_FILE));
   if (Number(config.version || 0) !== 1) throw new Error("research metrics config version must be 1");
-  const transcripts = options.files.map((file) => JSON.parse(fs.readFileSync(path.resolve(file), "utf8")));
+  const transcripts = [];
+  for (const file of options.files) transcripts.push(await readJsonFile(path.resolve(file)));
+  const baselineTranscripts = [];
+  for (const file of options.baselines) baselineTranscripts.push(await readJsonFile(path.resolve(file)));
+  options.baselineTranscripts = baselineTranscripts;
   const report = await evaluateTranscripts(transcripts, config, options);
+  report.source_provenance = options.files.map((file, index) => ({ file: path.resolve(file),
+    experiment_id: transcripts[index].experiment_id || null,
+    comparison_contract_hash: transcripts[index].comparison_contract_hash || null,
+    source_artifact_hash: transcripts[index].artifact_manifest_hash || null }));
+  report.recalculated_from_historical_logs = options.recalculate === true;
+  report.recalculation_note = "Source transcripts and contracts are unchanged. Missing evidence remains unknown; recomputation does not upgrade the source experiment contract.";
   const output = prepareOutputFile(options.out);
-  fs.writeFileSync(output, JSON.stringify(report, null, 2));
+  writeJsonAtomic(output, report);
   process.stdout.write(`${JSON.stringify({ output, runs: report.runs.length, judge_enabled: report.judge_enabled }, null, 2)}\n`);
 }
 

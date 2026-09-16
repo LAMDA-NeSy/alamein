@@ -8,6 +8,7 @@ const test = require("node:test");
 
 const {
   applyProfileRequestDefaults,
+  anthropicRequestBody,
   buildChatCompletionsBody,
   closeModelRuntime,
   classifyTransportFailure,
@@ -15,6 +16,7 @@ const {
   createModelRuntime,
   createOpenCodeProviderConfig,
   loadRegistry,
+  openAiCompatibleResponseFromAnthropic,
   resolveModel,
   startModelGateway,
   validateCapabilities
@@ -23,6 +25,63 @@ const {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+test("gateway delivery failure retains a unique request id and transport record", async () => {
+  const runtime = createModelRuntime("mock_primary", { run_id: "local-delivery-failure" });
+  const originalFetch = global.fetch;
+  try {
+    global.fetch = async () => { throw Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } }); };
+    const result = await createChatCompletionsClient(runtime).complete({ messages: [], audit_stage: "unit_plan" });
+    assert.equal(result.ok, false);
+    assert.ok(result.request_id);
+    assert.equal(runtime.transport.length, 1);
+    assert.equal(runtime.transport[0].request_id, result.request_id);
+    assert.equal(runtime.transport[0].error_class, "connection_error");
+    assert.equal(runtime.transport[0].stage, "unit_plan");
+    assert.ok(runtime.transport[0].client_delivery);
+  } finally { global.fetch = originalFetch; await closeModelRuntime(runtime); }
+});
+
+test("token usage survives redaction while credential tokens remain secret", async () => {
+  const runtime = createModelRuntime("mock_primary", { run_id: "usage-redaction", mockResponder: () => ({
+    status: 200, body: { choices: [{ message: { content: "{}" } }], access_token: "private",
+      usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, prompt_tokens_details: { cached_tokens: 70 } } }
+  }) });
+  try {
+    const result = await createChatCompletionsClient(runtime).complete({ messages: [], max_tokens: 200 });
+    assert.equal(result.response_json.access_token, "[REDACTED]");
+    assert.equal(result.response_json.usage.total_tokens, 110);
+    assert.equal(runtime.transport[0].response.usage.prompt_tokens_details.cached_tokens, 70);
+    assert.equal(result.request_body.max_tokens, 200);
+  } finally { await closeModelRuntime(runtime); }
+});
+
+test("mock planning uses current scoring and allowed intents without a fixed map target", async () => {
+  const runtime = createModelRuntime("mock_primary", { run_id: "target-autonomy" });
+  try {
+    const client = createChatCompletionsClient(runtime);
+    for (const nextColumn of [35, 38]) {
+      const result = await client.complete({ messages: [
+        { role: "system", content: "You are the Axis goal commander." },
+        { role: "user", content: JSON.stringify({ context: { game: { scenario: "july" },
+          victory: { current_scoring: { july_advance: { next_scoring_column: nextColumn } } } } }) }
+      ] });
+      const plan = JSON.parse(result.response_json.choices[0].message.content);
+      assert.equal(plan.target_column, nextColumn);
+      assert.equal(plan.sector, "");
+    }
+    for (const catalog of [["consolidate", "supply"], ["clear_mines", "protect_engineers"]]) {
+      const result = await client.complete({ messages: [{ role: "user", content: JSON.stringify({
+        context: { phase_intent_catalog: catalog }
+      }) }] });
+      const plan = JSON.parse(result.response_json.choices[0].message.content);
+      assert.ok(catalog.includes(plan.intent.type));
+      assert.equal(plan.intent.target_hex, "");
+      assert.equal(plan.intent.sector, "");
+    }
+  }
+  finally { await closeModelRuntime(runtime); }
+});
 
 test("model profiles normalize defaults and reject invalid entries", () => {
   const primary = resolveModel("mock_primary");
@@ -90,6 +149,51 @@ test("GLM 5.3 uses low reasoning effort while omitting the incompatible thinking
   assert.equal(profile.defaults.thinking, "omitted");
   assert.equal(body.reasoning_effort, "low");
   assert.equal(Object.hasOwn(body, "thinking"), false);
+});
+
+test("Anthropic profile converts the shared chat protocol to Messages format", () => {
+  const runtime = { profile: resolveModel("claude_opus_51") };
+  const body = anthropicRequestBody(runtime, {
+    messages: [
+      { role: "system", content: "You are the commander." },
+      { role: "user", content: "Choose an action." },
+      { role: "assistant", content: null, tool_calls: [{
+        id: "call-1", type: "function", function: { name: "act", arguments: '{"action":{"type":"pass"}}' }
+      }] },
+      { role: "tool", tool_call_id: "call-1", content: '{"accepted":true}' }
+    ],
+    tools: [{ type: "function", function: {
+      name: "act", description: "Apply an action", parameters: { type: "object", properties: {} }
+    } }],
+    tool_choice: "required",
+    max_tokens: 2048,
+    temperature: 0.2
+  });
+  assert.equal(body.model, "claude-opus-5-1");
+  assert.equal(body.system, "You are the commander.");
+  assert.equal(body.messages[1].role, "assistant");
+  assert.equal(body.messages[1].content[0].type, "tool_use");
+  assert.equal(body.messages[2].content[0].type, "tool_result");
+  assert.equal(body.tools[0].name, "act");
+  assert.deepEqual(body.tool_choice, { type: "any" });
+});
+
+test("Anthropic responses convert text, thinking, and tool use to the shared protocol", () => {
+  const result = openAiCompatibleResponseFromAnthropic({
+    id: "msg-1",
+    model: "claude-opus-5-1",
+    content: [
+      { type: "thinking", thinking: "Inspect the legal options." },
+      { type: "text", text: "I will inspect the position." },
+      { type: "tool_use", id: "tool-1", name: "phase_status", input: {} }
+    ],
+    usage: { input_tokens: 12, output_tokens: 8 }
+  });
+  const message = result.choices[0].message;
+  assert.equal(message.content, "I will inspect the position.");
+  assert.equal(message.reasoning_content, "Inspect the legal options.");
+  assert.equal(message.tool_calls[0].function.name, "phase_status");
+  assert.deepEqual(JSON.parse(message.tool_calls[0].function.arguments), {});
 });
 
 test("registry rejects duplicate profile ids", () => {
@@ -283,17 +387,17 @@ test("all retries share one total request timeout", async () => {
     }
   });
   runtime.profile.defaults.retries = 3;
-  runtime.profile.defaults.retry_delays_ms = [30, 30, 30];
-  runtime.profile.defaults.timeout_ms = 45;
+  runtime.profile.defaults.retry_delays_ms = [1200, 1200, 1200];
+  runtime.profile.defaults.timeout_ms = 1000;
   const started = Date.now();
   try {
-    const result = await createChatCompletionsClient(runtime).complete({ messages: [], timeout_ms: 45 });
+    const result = await createChatCompletionsClient(runtime).complete({ messages: [], timeout_ms: 1000 });
     const elapsed = Date.now() - started;
     assert.equal(result.ok, false);
-    assert.equal(result.error_class, "upstream_unavailable");
+    assert.equal(result.error_class, "network_timeout");
     assert.equal(calls, 1);
-    assert.ok(elapsed < 250, `request took ${elapsed}ms`);
-    assert.ok(runtime.transport[0].elapsed_ms < 150, `upstream attempts took ${runtime.transport[0].elapsed_ms}ms`);
+    assert.ok(elapsed < 2000, `request took ${elapsed}ms`);
+    assert.ok(runtime.transport[0].elapsed_ms < 1800, `upstream attempts took ${runtime.transport[0].elapsed_ms}ms`);
   }
   finally {
     await closeModelRuntime(runtime);

@@ -67,8 +67,8 @@
     "special_de_to_r2_units": ["RCCEGPPE", "7th Armoured Desert Rats"]
   },
   "terrain": {
-    "allied_box_defense_bonus": 2,
-    "alamein_box_defense_bonus": 3,
+    "allied_box_defense_bonus": 0,
+    "alamein_box_defense_bonus": 0,
     "depression_defense_bonus": 1,
     "hill_or_ridge_defense_bonus": 1,
     "ridge_bonus_exceptions": [["0606", "0607"], ["0709", "0610"], ["0405", "0505"], ["0506", "0505"]]

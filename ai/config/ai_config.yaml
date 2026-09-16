@@ -26,6 +26,17 @@ performance:
   fallback_reserve_ms: 0
 
 context:
+  reasoning_memory:
+    enabled: true
+    within_step: full
+    cross_step: summary_plus_excerpt
+    max_recent_entries: 4
+    max_excerpt_tokens: 800
+    max_summary_tokens: 1200
+    max_stored_entries: 24
+    retain_rejected_options: true
+    reset_on_phase_change: true
+    reset_on_replanning: true
   phaseStrategyMaxTokens: 3000
   maxLegalActions: 180
   maxCandidateActions: 48

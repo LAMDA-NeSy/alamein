@@ -7,6 +7,7 @@ const test = require("node:test");
 
 const { createActionRuleBridge, reviewStrategicCombat, reviewStrategicMovement, reviewTaskDispatch } = require("../core/action_rule_bridge.js");
 const { readConfig } = require("../experiments/external_ai_transcript.js");
+const RulesEngine = require("../../rule_engine.js");
 
 const ROOT = path.resolve(__dirname, "../..");
 
@@ -321,15 +322,15 @@ test("map and action bridge returns a current read-only map without exposing can
   assert.ok(map.minefields.some((mine) => mine.hex && mine.side));
   assert.equal(map.battlefield_summary.strategic_objective.type, "eastern_scoring_frontier");
   assert.equal(map.battlefield_summary.strategic_objective.next_scoring_column, 35);
-  assert.equal(map.battlefield_summary.reference_landmark_hex, "3711");
-  assert.match(map.battlefield_summary.reference_landmark_role, /current_scoring.*eastern frontier/);
+  assert.equal(map.battlefield_summary.reference_landmark_hex, undefined);
+  assert.equal(map.battlefield_summary.reference_landmark_role, undefined);
   assert.equal(map.candidate_actions, undefined);
   assert.equal(bridge.submittedAction(), null);
   assert.deepEqual(state, original);
 
-  const focused = bridge.executeTool("view_map", { focus: "hex", target: map.objectives.alamein }, "map-session");
+  const focused = bridge.executeTool("view_map", { focus: "hex", target: "3711" }, "map-session");
   assert.equal(focused.ok, true);
-  assert.equal(focused.hex.hex, map.objectives.alamein);
+  assert.equal(focused.hex.hex, "3711");
 
   const accepted = bridge.executeTool("act", { action: { type: "pass", reason: "map test" } }, "map-session");
   assert.equal(accepted.accepted, true);
@@ -412,6 +413,27 @@ test("combat phase_status groups attackable units by target without enumerating 
   const complete = bridge.executeTool("check_combat", { attackers: ["attacker_a", "attacker_b"], defender_hexes: ["2524"] }, "combat-status");
   assert.equal(complete.legal, true, complete.reason);
   assert.ok(complete.details.odds_column);
+});
+
+test("combat phase exposes and accepts rule-authorized combat-unit mine clearance", () => {
+  const bridge = createActionRuleBridge(readConfig(), { toolProfile: "map_tactical_action", token: "mine-clear-token" });
+  const state = {
+    scenario: "september",
+    turn: 5,
+    phase: "axis_combat",
+    active_side: "axis",
+    units: {
+      engineer: { side: "axis", hex: "3319", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      mine: { side: "allies", hex: "3319", state: "fresh", attack: 0, defense: 0, movement: 0, kind: "mine" }
+    }
+  };
+  bridge.prepareStep({ state, step: 1, turn: 5, phase: state.phase, side: "axis", session_id: "mine-clear", decisionMode: "direct" });
+  const status = bridge.executeTool("phase_status", {}, "mine-clear");
+  assert.deepEqual(status.clear_mine_options.map((item) => item.unit), ["engineer"]);
+  const accepted = bridge.executeTool("act", { action: { type: "clear_mine", unit: "engineer", hex: "3319" } }, "mine-clear");
+  assert.equal(accepted.accepted, true, accepted.reason);
+  assert.deepEqual(accepted.canonical_action, { type: "clear_mine", unit: "engineer", hex: "3319" });
+  assert.equal(Object.hasOwn(accepted.canonical_action, "die"), false);
 });
 
 test("hierarchical combat may pass without holding every attack-capable unit", () => {
@@ -721,4 +743,50 @@ test("rolling fallback moves a remaining legal unit instead of ending the phase"
   assert.equal(fallback.unit, "mover");
   assert.ok(Array.isArray(fallback.path) && fallback.path.length > 1);
   assert.notEqual(fallback.destination, "2424");
+});
+
+test("ledger fallback exposes a validated repair move in mechanized movement", () => {
+  const bridge = createActionRuleBridge(readConfig(), {
+    toolProfile: "rolling_unit_rules_tactical",
+    token: "mechanized-stack-token",
+    executionLedger: true
+  });
+  const units = Object.fromEntries(Array.from({ length: 5 }, (_, index) => [
+    `mechanized-stack-${index + 1}`,
+    {
+      side: "axis",
+      hex: "3410",
+      state: "fresh",
+      attack: 2,
+      defense: 2,
+      movement: 4,
+      kind: "ground",
+      piece_type: "Mech",
+      temporary_overstack: true
+    }
+  ]));
+  const state = {
+    scenario: "july",
+    turn: 6,
+    phase: "axis_mechanized_movement",
+    active_side: "axis",
+    units
+  };
+  bridge.prepareStep({
+    state,
+    step: 1,
+    turn: 6,
+    phase: state.phase,
+    side: "axis",
+    session_id: "mechanized-stack",
+    decisionMode: "hierarchical_sae"
+  });
+  const status = bridge.phaseStatus();
+  assert.equal(status.mandatory_actions.length, 1);
+  assert.ok(status.mandatory_actions[0].repair_options.length > 0);
+  const fallback = bridge.fallbackAction();
+  assert.equal(fallback.type, "move");
+  assert.equal(fallback.unit, "mechanized-stack-1");
+  assert.ok(Array.isArray(fallback.path) && fallback.path.length === 2);
+  assert.equal(RulesEngine.checkMove(bridge.current().built.ctx, fallback.unit, fallback.path, { mode: "normal" }).legal, true);
 });

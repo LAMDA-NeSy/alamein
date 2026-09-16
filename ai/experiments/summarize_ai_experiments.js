@@ -85,7 +85,10 @@ function metrics(transcript) {
     tool_config_hash: transcript.tool_config_hash || "",
     scenario: transcript.scenario || transcript.comparison_contract?.scenario || "",
     external_side: transcript.external_side || transcript.comparison_contract?.external_side || "",
-    prompt_profile_hash: transcript.prompt_profile_hash || transcript.comparison_contract?.prompt_profile_hash || "",
+    // Keep duplicated transcript metadata missing when it is missing. The
+    // ranking gate must be able to detect incomplete recordings instead of
+    // silently reconstructing required fields from the contract.
+    prompt_profile_hash: transcript.prompt_profile_hash || "",
     prompt_profiles: transcript.prompt_profiles || transcript.comparison_contract?.prompt_profiles || {},
     benchmark_version: transcript.benchmark_version || transcript.comparison_contract?.benchmark_version || "",
     artifact_manifest_hash: transcript.artifact_manifest_hash || transcript.comparison_contract?.artifact_manifest_hash || "",
@@ -105,7 +108,7 @@ function metrics(transcript) {
     comparison_contract: transcript.comparison_contract || null,
     comparison_contract_version: transcript.comparison_contract?.version || "",
     model_configuration: transcript.comparison_contract?.model_configuration || null,
-    harness_prompt_hash: transcript.harness_prompt_hash || transcript.comparison_contract?.harness_prompt_hash || "",
+    harness_prompt_hash: transcript.harness_prompt_hash || "",
     context_profile: transcript.context_profile || (usesHarnessProjection ? "harness_projection" : "full_public_payload"),
     sample_status: sampleStatus,
     complete_game: completeGame,
@@ -165,6 +168,9 @@ function metrics(transcript) {
           / Number(transcript.counts.eligible_units_at_phase_start)
         : 0)
       : average(steps.filter((step) => step.phase_unit_plan).map((step) => Number(step.phase_unit_plan.unit_plan_coverage || 0))),
+    model_unit_plan_coverage: transcript.counts?.average_model_unit_plan_coverage
+      ?? average(steps.filter((step) => step.phase_unit_plan && Number.isFinite(Number(step.phase_unit_plan.model_unit_plan_coverage)))
+        .map((step) => Number(step.phase_unit_plan.model_unit_plan_coverage))),
     movement_phase_completion_rate: transcript.counts?.movement_phase_completion_rate
       ?? average(steps.filter((step) => step.movement_phase?.advance_reason === "unit_plan_complete")
         .map((step) => Number(step.movement_phase.movement_phase_completion_rate || 0))),
@@ -179,12 +185,8 @@ function metrics(transcript) {
     repeated_destination_actions: transcript.counts?.repeated_destination_actions || 0,
     compactions: transcript.compaction?.count || 0,
     infrastructure_affected: infrastructureAffected,
-    ranking_eligible: transcript.comparison_contract
-      ? rankingEligible(transcript)
-      : completeGame && Boolean(transcript.artifact_manifest_hash || transcript.comparison_contract?.artifact_manifest_hash),
-    eligible_for_tactical_comparison: transcript.comparison_contract
-      ? rankingEligible(transcript)
-      : completeGame && Boolean(transcript.artifact_manifest_hash || transcript.comparison_contract?.artifact_manifest_hash),
+    ranking_eligible: rankingEligible(transcript),
+    eligible_for_tactical_comparison: rankingEligible(transcript),
     comparison_cell_ids: {
       method: comparisonCellId({
         ...transcript,

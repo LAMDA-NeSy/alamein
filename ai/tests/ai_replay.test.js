@@ -5,6 +5,22 @@ const test = require("node:test");
 
 const { makeReplay } = require("../experiments/ai_replay.js");
 
+test("both external sides receive exactly one authoritative turn settlement", async () => {
+  const replay = makeReplay("october", { seed: 1942 });
+  const settlements = [];
+  const providers = {};
+  for (const side of ["axis", "allies"]) {
+    const provider = async () => ({ action: { type: "pass", reason: "boundary regression" } });
+    provider.onTurnSettled = async (event) => { settlements.push(event); event.state.turn = 999; };
+    providers[side] = provider;
+  }
+  await replay.playWithProvider({ maxSteps: 10, controllers: { axis: "external_ai", allies: "external_ai" }, externalActions: providers });
+  assert.equal(settlements.length, 2);
+  assert.deepEqual(settlements.map((event) => event.side), ["axis", "allies"]);
+  assert.ok(settlements.every((event) => event.turn === 1 && event.phase === "end_game_turn"));
+  assert.notEqual(settlements[0].settlement.event_id, settlements[1].settlement.event_id);
+});
+
 test("replay reports a provider action only after the phase state is applied", async () => {
   const replay = makeReplay("july", { seed: 1942 });
   const applied = [];
@@ -29,6 +45,34 @@ test("replay reports a provider action only after the phase state is applied", a
   assert.notEqual(applied[0].to_phase, applied[0].from_phase);
   assert.equal(applied[0].state.phase, applied[0].to_phase);
   assert.equal(applied[0].action.type, "pass");
+});
+
+test("replay lets an external method recover provider exceptions through its own fallback", async () => {
+  const replay = makeReplay("july", { seed: 1942 });
+  let calls = 0;
+  const provider = async () => {
+    calls += 1;
+    throw new Error("invalid hex: 28xx");
+  };
+  provider.onProviderError = async ({ error }) => ({
+    action: { type: "pass", reason: `method fallback: ${error.message}` },
+    model: {
+      fallback_used: true,
+      fallback_reason_class: "protocol_error",
+      provider_exception: true
+    }
+  });
+
+  const result = await replay.playWithProvider({
+    maxSteps: 1,
+    externalSide: "axis",
+    externalAction: provider
+  });
+
+  assert.equal(calls, 1);
+  assert.notEqual(result.status, "provider_error");
+  assert.equal(result.log[0].action, "pass_then_advance");
+  assert.equal(result.log[0].model.fallback_reason_class, "protocol_error");
 });
 
 test("replay can run a local heuristic controller against the rules controller", async () => {

@@ -643,6 +643,7 @@
   }
 
   function effectiveAttack(ctx, unit) {
+    if (!canAttackUnit(unit)) return 0;
     let value = Number(unit.attack || 0);
     const supply = unit.supply_state || (unit.id ? supplyState(ctx, unit.id) : "supplied");
     if (ctx.state.scenario === "september" && Number(ctx.state.turn || 1) === 1 && unit.side === "axis") value *= 2;
@@ -779,6 +780,42 @@
     }
     if (kind === "supply_movement") return isSupplyUnit(unit) && unit.side === ctx.state.active_side;
     return false;
+  }
+
+  function checkExitWest(ctx, action = {}) {
+    const state = ctx.state;
+    const unit = state.units?.[action.unit];
+    if (!unit) return { legal: false, reason: "未知单位", action };
+    if (state.scenario !== "october") return { legal: false, reason: "只有 October 场景允许西边撤出", action };
+    if (state.active_side !== "axis" || unit.side !== "axis") return { legal: false, reason: "只有 Axis 当前方单位可从西边撤出", action };
+    if (!["initial_movement", "mechanized_movement", "supply_movement"].includes(phaseKind(state.phase))) {
+      return { legal: false, reason: "只能在移动阶段撤出", action };
+    }
+    if (Number(state.turn || 1) <= 10) return { legal: false, reason: "October 第 10 回合后才可撤出", action };
+    if (!unit.hex) return { legal: false, reason: "单位不在地图上", action };
+    if (splitHex(unit.hex)[0] !== 1) return { legal: false, reason: "单位必须位于西边缘", action };
+    if (!(isCombatUnit({ id: action.unit, ...unit }) || isSupplyUnit({ id: action.unit, ...unit }))) {
+      return { legal: false, reason: "只有作战或补给单位可以撤出", action };
+    }
+    return { legal: true, reason: "可从西边撤出", action: { type: "exit_west", unit: action.unit } };
+  }
+
+  function applyExitWest(ctx, unitId) {
+    const validation = checkExitWest(ctx, { type: "exit_west", unit: unitId });
+    if (!validation.legal) return validation;
+    const unit = ctx.state.units[unitId];
+    const turn = Number(ctx.state.turn || 1);
+    unit.exit_hex = normalizeHex(unit.hex);
+    unit.exited_edge = "west";
+    unit.exit_edge = "west";
+    unit.exited = "west";
+    unit.exited_turn = turn;
+    unit.exit_turn = turn;
+    unit.off_map = true;
+    unit.hex = null;
+    unit.state = "spent";
+    ctx.state.supply_states_dirty = true;
+    return { legal: true, reason: "exit west", action: validation.action, details: { unit: unitId, turn } };
   }
 
   function roadIndex(ctx, hex) {
@@ -1389,8 +1426,7 @@
   }
 
   function terrainDefenseBonus(ctx, hex) {
-    const tags = hexTags(ctx, hex);
-    if (tags.includes("alamein_box")) return 3;
+    // July's boxed area is a movement restriction only (18.12-18.14).
     return 0;
   }
 
@@ -1573,7 +1609,15 @@
   function hexDistance(a, b) {
     const [ac, ar] = splitHex(a);
     const [bc, br] = splitHex(b);
-    return Math.abs(ac - bc) + Math.abs(ar - br);
+    // The map uses vertically offset columns. Convert the offset coordinate
+    // to axial coordinates before measuring distance; Manhattan distance in
+    // column/row space incorrectly reports diagonal neighbours as two steps.
+    const axial = (col, row) => [col, row - Math.floor((col + 1) / 2)];
+    const [aq, arial] = axial(ac, ar);
+    const [bq, brial] = axial(bc, br);
+    const dq = aq - bq;
+    const dr = arial - brial;
+    return Math.max(Math.abs(dq), Math.abs(dr), Math.abs(dq + dr));
   }
 
   function planRetreats(ctx, unitIds, count, retreatPaths = {}) {
@@ -1945,6 +1989,9 @@
         };
       }
     }
+    // Rule 12.21 permits combat-unit mine clearance only at the beginning of
+    // the combat phase, before the first combat is actually resolved.
+    ctx.state.last_combat_phase = `${Number(ctx.state.turn || 1)}:${ctx.state.phase}`;
     const attackerStartHexes = [...new Set(attackerIds.map((id) => ctx.state.units[id]?.hex).filter(Boolean).map(normalizeHex))];
     for (const id of attackerIds) {
       ctx.state.units[id].attacked_this_turn = true;
@@ -2010,6 +2057,8 @@
     else {
       if (!isCombatUnit(full)) return { legal: false, reason: "只有工兵或战斗单位可以清雷" };
       if (phaseKind(ctx.state.phase) !== "combat") return { legal: false, reason: "战斗单位只能在战斗阶段开始尝试清雷" };
+      const combatPhaseKey = `${Number(ctx.state.turn || 1)}:${ctx.state.phase}`;
+      if (ctx.state.last_combat_phase === combatPhaseKey) return { legal: false, reason: "战斗阶段已经发生战斗，不能再清雷" };
       if (normalizeHex(full.hex) !== hex) return { legal: false, reason: "战斗单位必须位于敌方雷区内才能尝试清雷" };
       if (die == null) return { legal: false, reason: "战斗单位清雷需要骰子" };
       if (!Number.isInteger(die) || die < 1 || die > 6) return { legal: false, reason: "清雷骰子必须是 1 到 6" };
@@ -2123,8 +2172,20 @@
     };
   }
 
+  function turnSequence(ctx) {
+    const base = ctx.rules.turn_sequence || DEFAULT_RULES.turn_sequence;
+    const firstPlayer = SCENARIO_META[ctx.state.scenario]?.first_player;
+    if (!firstPlayer) return [...base];
+    const secondPlayer = firstPlayer === "axis" ? "allies" : "axis";
+    return [
+      ...base.filter((phase) => phaseSide(phase) === firstPlayer),
+      ...base.filter((phase) => phaseSide(phase) === secondPlayer),
+      ...base.filter((phase) => !phaseSide(phase))
+    ];
+  }
+
   function nextPhase(ctx) {
-    const sequence = ctx.rules.turn_sequence || DEFAULT_RULES.turn_sequence;
+    const sequence = turnSequence(ctx);
     const current = sequence.indexOf(ctx.state.phase);
     let next = sequence[(current + 1) % sequence.length] || sequence[0];
     const skip = SCENARIO_META[ctx.state.scenario]?.skip_phases?.find((item) => item.turn === Number(ctx.state.turn || 1) && item.phase === next);
@@ -2286,6 +2347,9 @@
     victoryLevel,
     checkVictory,
     nextPhase,
+    turnSequence,
+    checkExitWest,
+    applyExitWest,
     applyStateDefaults,
     hexDistance,
     activeRoadSegment

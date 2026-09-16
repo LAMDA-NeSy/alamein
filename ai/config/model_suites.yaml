@@ -1,0 +1,8 @@
+version: 1
+
+# Public/offline default. Replace or extend this list with explicitly selected
+# model profiles; credentials are read from .env and are never stored here.
+models:
+  - id: mock
+    model_profile: mock_primary
+    checker_model_profile: mock_secondary
