@@ -71,6 +71,33 @@ test("maintenance cannot hide an observed loss followed by recovery", () => {
   assert.ok(result.maintenance_breach);
 });
 
+test("at-settlement conditions can recover before their final boundary", () => {
+  const task = { id: "hold", acceptance_contract: { mode: "at_settlement" }, completion_criteria: { all: [{
+    metric: "position", target: 1, relation: "at_least", unit_ids: ["u0"], target_hex: "3510", evaluation_scope: "game_end"
+  }] } };
+  evaluateObservableCriteria(task.completion_criteria, task, {}, { state, side: "allies", turn: 3 });
+  const final = structuredClone(state);
+  final.units.u0.hex = "3510";
+  final.turn = 15;
+  final.phase = "end_game_turn";
+  const result = evaluateObservableCriteria(task.completion_criteria, task, {}, { state: final, side: "allies", turn: 15 });
+  assert.equal(result.status, "met");
+  assert.equal(result.scope_ready, true);
+  assert.equal(result.maintenance_breach, null);
+});
+
+test("game-end maintenance records an unmet final settlement", () => {
+  const task = { id: "hold", acceptance_contract: { mode: "maintain" }, completion_criteria: { all: [{
+    metric: "position", target: 1, relation: "at_least", unit_ids: ["u0"], target_hex: "3510", evaluation_scope: "game_end"
+  }] } };
+  const final = structuredClone(state);
+  final.turn = 15;
+  final.phase = "end_game_turn";
+  const result = evaluateObservableCriteria(task.completion_criteria, task, {}, { state: final, side: "allies", turn: 15 });
+  assert.equal(result.status, "not_met");
+  assert.ok(result.maintenance_breach);
+});
+
 test("ledger manager requests a single evidenced strategic update when October window opens", () => {
   const manager = createTaskManager({ executionLedger: true, taskGeneration: "model_defined" });
   const input = { state: structuredClone(state), side: "allies", turn: 3, phase: state.phase };

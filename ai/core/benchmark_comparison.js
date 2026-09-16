@@ -45,7 +45,7 @@ function comparisonCondition(row, dimension) {
       "decision_policy", "objective_resolution_version", "adaptive_replanning_version",
       "hierarchical_strategy_protocol", "strategic_planner_protocol", "force_allocator_protocol",
       "dispatch_protocol", "operation_state_version", "goal_management", "goal_protocol",
-      "task_management", "task_protocol", "task_generation", "task_dependency_policy",
+      "task_management", "task_protocol", "task_generation", "task_dependency_policy", "scoring_anchor_policy",
       "task_switching", "task_progress_version", "task_action_feedback_version", "task_checker_timing",
       "task_replan_policy", "task_checker_model_profile", "task_configuration", "task_checker_configuration",
       "strategic_movement_guard_version", "strategic_combat_guard_version", "voluntary_combat_pass_policy",

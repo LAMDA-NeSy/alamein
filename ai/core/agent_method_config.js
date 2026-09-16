@@ -69,6 +69,7 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
       route_feasibility_budget_ms: Math.max(1, Number(raw.route_feasibility_budget_ms || 2000)),
       route_feasibility_scope: String(raw.route_feasibility_scope || "task_units_only"),
       task_generation: String(raw.task_generation || "fixed_skeleton"),
+      scoring_anchor_policy: String(raw.scoring_anchor_policy || "none"),
       dependency_policy: String(raw.task_dependency_policy || "hard_soft_conditional_v1"),
       task_switching: String(raw.task_switching || "existing_tasks_only"),
       goal_management: String(raw.goal_management || "disabled"),
@@ -99,6 +100,9 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
   }
   if (taskManagement && !["fixed_skeleton", "model_defined"].includes(taskManagement.task_generation)) {
     throw new Error(`agent method ${methodId} task_generation must be fixed_skeleton or model_defined`);
+  }
+  if (taskManagement && !["none", "july_terminal_v1"].includes(taskManagement.scoring_anchor_policy)) {
+    throw new Error(`agent method ${methodId} has unknown scoring_anchor_policy`);
   }
   if (taskManagement && taskManagement.dependency_policy !== "hard_soft_conditional_v1") {
     throw new Error(`agent method ${methodId} task_dependency_policy must be hard_soft_conditional_v1`);

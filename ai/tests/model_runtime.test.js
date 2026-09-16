@@ -8,6 +8,7 @@ const test = require("node:test");
 
 const {
   applyProfileRequestDefaults,
+  anthropicRequestBody,
   buildChatCompletionsBody,
   closeModelRuntime,
   classifyTransportFailure,
@@ -15,6 +16,7 @@ const {
   createModelRuntime,
   createOpenCodeProviderConfig,
   loadRegistry,
+  openAiCompatibleResponseFromAnthropic,
   resolveModel,
   startModelGateway,
   validateCapabilities
@@ -147,6 +149,51 @@ test("GLM 5.3 uses low reasoning effort while omitting the incompatible thinking
   assert.equal(profile.defaults.thinking, "omitted");
   assert.equal(body.reasoning_effort, "low");
   assert.equal(Object.hasOwn(body, "thinking"), false);
+});
+
+test("Anthropic profile converts the shared chat protocol to Messages format", () => {
+  const runtime = { profile: resolveModel("claude_opus_51") };
+  const body = anthropicRequestBody(runtime, {
+    messages: [
+      { role: "system", content: "You are the commander." },
+      { role: "user", content: "Choose an action." },
+      { role: "assistant", content: null, tool_calls: [{
+        id: "call-1", type: "function", function: { name: "act", arguments: '{"action":{"type":"pass"}}' }
+      }] },
+      { role: "tool", tool_call_id: "call-1", content: '{"accepted":true}' }
+    ],
+    tools: [{ type: "function", function: {
+      name: "act", description: "Apply an action", parameters: { type: "object", properties: {} }
+    } }],
+    tool_choice: "required",
+    max_tokens: 2048,
+    temperature: 0.2
+  });
+  assert.equal(body.model, "claude-opus-5-1");
+  assert.equal(body.system, "You are the commander.");
+  assert.equal(body.messages[1].role, "assistant");
+  assert.equal(body.messages[1].content[0].type, "tool_use");
+  assert.equal(body.messages[2].content[0].type, "tool_result");
+  assert.equal(body.tools[0].name, "act");
+  assert.deepEqual(body.tool_choice, { type: "any" });
+});
+
+test("Anthropic responses convert text, thinking, and tool use to the shared protocol", () => {
+  const result = openAiCompatibleResponseFromAnthropic({
+    id: "msg-1",
+    model: "claude-opus-5-1",
+    content: [
+      { type: "thinking", thinking: "Inspect the legal options." },
+      { type: "text", text: "I will inspect the position." },
+      { type: "tool_use", id: "tool-1", name: "phase_status", input: {} }
+    ],
+    usage: { input_tokens: 12, output_tokens: 8 }
+  });
+  const message = result.choices[0].message;
+  assert.equal(message.content, "I will inspect the position.");
+  assert.equal(message.reasoning_content, "Inspect the legal options.");
+  assert.equal(message.tool_calls[0].function.name, "phase_status");
+  assert.deepEqual(JSON.parse(message.tool_calls[0].function.arguments), {});
 });
 
 test("registry rejects duplicate profile ids", () => {

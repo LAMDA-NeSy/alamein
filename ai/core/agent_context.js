@@ -91,8 +91,9 @@ function compactTask(task) {
     "assigned_units", "compatible_units", "completion_condition", "failure_condition", "phase_scope",
     "progress", "status", "next_action", "last_blocked_reason", "source",
     "activation_reason", "tactical_opportunities", "combat_preparation", "preparation_actions",
-    "current_metrics", "progress_evidence", "normalization_corrections"
-    ,"completion_criteria", "failure_criteria", "acceptance_contract", "completion_evidence", "checker_assessment", "checker_suggested_switch"
+    "current_metrics", "progress_evidence", "normalization_corrections",
+    "observation_only", "scoring_anchor_state", "scoring_anchor_loss_count", "scoring_anchor_history",
+    "completion_criteria", "failure_criteria", "acceptance_contract", "completion_evidence", "checker_assessment", "checker_suggested_switch"
   ]);
 }
 
@@ -152,6 +153,7 @@ function compactTacticalSummary(summary) {
       "replanning_trigger", "allocation_corrections"
     ]),
     active_tasks: boundedList(summary.active_tasks, 4).map(compactTask),
+    scoring_anchor: summary.scoring_anchor ? compactTask(summary.scoring_anchor) : null,
     route_feasibility: boundedList(summary.route_feasibility, 12),
     task_units: boundedList(summary.task_units, 12),
     key_units: boundedList(summary.key_units, 8).map((unit) => ({

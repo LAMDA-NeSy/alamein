@@ -99,7 +99,7 @@ function taskEvidenceMetrics(transcript) {
     .filter(Boolean);
   const tasks = new Map();
   const remember = (task, overwrite = true) => {
-    if (!task?.id) return;
+    if (!task?.id || task.observation_only) return;
     // A task ID is stable across replans. Criteria changes are task history,
     // not new tasks for completion-rate purposes.
     if (overwrite || !tasks.has(task.id)) tasks.set(task.id, task);

@@ -51,6 +51,8 @@ python3 -m http.server 8000 --bind 127.0.0.1
 | `glm_53_flash_api` | 普通计费 API | `ZHIPU_API_KEY` |
 | `glm_53_flash_api_checker` | 普通计费 API 的独立任务检查模型 | `ZHIPU_API_KEY` |
 | `deepseek_flash` | DeepSeek Flash | `DEEPSEEK_API_KEY` |
+| `claude_opus_51` | Claude Opus 5.1 | `ANTHROPIC_API_KEY` |
+| `gpt_6` | GPT 6 | `OPENAI_API_KEY` |
 
 真实模型只在命令行显式指定。配置密钥：
 
@@ -277,6 +279,16 @@ pnpm run ai:metrics -- \
 - **只想验证系统链路**：使用 Mock；Mock 不用于声明战术能力。
 
 ## 规则版本
+
+### SAE 场景任务
+
+三个场景共享任务状态、依赖、分配、执行反馈和验收框架，但不共享计分目标：July 观察有效补给下的最东 Axis 计分列，September 观察实际清雷，October 观察合法西撤。
+
+SAE 默认启用 `scoring_anchor_policy: july_terminal_v1`，仅用于 July Axis。它在六个任务槽位中保留一个本地只读监测项，模型可提出五个执行任务。监测项不分配单位、不占用三个执行任务名额，也不禁止任何规则合法动作。配置为 `none` 可关闭它。
+
+监测记录“接近、已到达但补给不足、当前有效计分、已丢失”，并保留实际达到的最高有效计分列。失守产生一次 `scoring_anchor_lost` 重规划事件；恢复后再次失守是新事件。历史跨重规划保留，只有终局才结算，不将暂时到达当作已经锁定的 VP。模型仍自主权衡补给、支援、进一步推进或其他 VP 收益，没有固定单位、目标格、路线或攻击组合。
+
+模型任务完成率不统计此监测项；完整证据保留在任务日志和最终结算中。新策略写入比较合同，不能将关闭监测的旧运行当作相同配置直接合并。
 
 每局 artifact manifest 会记录规则、地图、场景、复杂规则 AI、方法运行时、Prompt 和依赖锁文件的 SHA-256。规则修改必须发布新的 benchmark 版本，旧日志不能与新版本直接排名。
 

@@ -18,3 +18,9 @@ models:
   - id: glm47
     model_profile: glm_47_flash
     checker_model_profile: glm_47_flash_checker
+  - id: claude-opus-51
+    model_profile: claude_opus_51
+    checker_model_profile: claude_opus_51_checker
+  - id: gpt6
+    model_profile: gpt_6
+    checker_model_profile: gpt_6_checker

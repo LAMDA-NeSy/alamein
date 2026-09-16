@@ -388,6 +388,9 @@ function buildPlanningSnapshot(config, input, phaseIntent, history, settings) {
       tasks: tasks.map((task) => ({
         id: task.id, status: task.status, type: task.model_task_type || task.type,
         title: task.title, target_hex: task.target_hex, target: task.target,
+        target_column: task.target_column, observation_only: task.observation_only,
+        scoring_anchor_state: task.scoring_anchor_state, scoring_anchor_loss_count: task.scoring_anchor_loss_count,
+        progress_evidence: task.progress_evidence,
         completion_condition: task.completion_condition, next_action: task.next_action,
         phase_scope: task.phase_scope, progress: task.progress, assigned_units: task.assigned_units
       })),

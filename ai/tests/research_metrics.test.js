@@ -259,6 +259,17 @@ test("task completion counts one stable task across replanned criteria", () => {
   assert.equal(metrics.task_completion_rate, 1);
 });
 
+test("local observation monitors do not inflate model task completion rates", () => {
+  const transcript = completeTranscript("scoring-anchor-monitor");
+  transcript.final_task_settlement = { child_statuses: { execution: "failed", anchor: "completed" }, children: [
+    { id: "execution", status: "failed", completion_criteria: { metric: "position" } },
+    { id: "anchor", status: "completed", observation_only: true, completion_criteria: { metric: "scoring_frontier" } }
+  ] };
+  const metrics = deterministicRunMetrics(transcript).scenario_metrics;
+  assert.equal(metrics.task_count, 1);
+  assert.equal(metrics.task_completion_rate, 0);
+});
+
 test("request totals include the independently configured checker without double counting", () => {
   const transcript = completeTranscript("requests");
   transcript.model_transport = [{}, {}];

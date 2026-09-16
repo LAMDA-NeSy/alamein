@@ -79,6 +79,7 @@ test("YAML config resolves every decision method and harness", () => {
     route_feasibility_budget_ms: 2000,
     route_feasibility_scope: "task_units_only",
       task_generation: "model_defined",
+      scoring_anchor_policy: "july_terminal_v1",
       dependency_policy: "hard_soft_conditional_v1",
       task_switching: "existing_tasks_only",
       checker_timeout_ms: 60000,

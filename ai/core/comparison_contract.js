@@ -173,6 +173,7 @@ function createComparisonContract({
     task_management: taskManagement ? "multi_task" : "disabled",
     task_protocol: taskManagement ? config.task_management_options?.protocol || config.task_management_options?.task_protocol || "side-aware-task-v4" : null,
     task_generation: taskManagement ? String(config.task_management_options?.task_generation || "fixed_skeleton") : null,
+    scoring_anchor_policy: taskManagement ? String(config.task_management_options?.scoring_anchor_policy || "none") : null,
     task_dependency_policy: taskManagement ? String(config.task_management_options?.dependency_policy || "hard_soft_conditional_v1") : null,
     task_switching: taskManagement ? String(config.task_management_options?.task_switching || "existing_tasks_only") : null,
     task_progress_version: taskManagement ? "evidence-grounded-model-task-progress-v8-observable-criteria" : null,

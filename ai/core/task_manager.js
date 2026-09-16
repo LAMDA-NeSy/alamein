@@ -18,17 +18,36 @@ const TASK_TYPES = new Set([
   "preserve_force",
   "disrupt_axis_supply",
   "counterattack",
-  "breakthrough_step"
+  "breakthrough_step",
+  "preserve_scoring_anchor"
 ]);
 const MODEL_TASK_TYPES = new Set([
   "advance", "attack", "defend", "screen", "supply", "recon", "maneuver",
   "isolate", "clear_route", "disrupt", "exploit", "feint", "consolidate",
   "protect", "reserve", "hold_position", "withdraw", "withdrawal", "exit_west",
-  "clear_mine", "mine_clearance"
+  "clear_mine", "mine_clearance", "concentrate", "breach", "blocker_reduction", "flank"
 ]);
 const TASK_CLASSES = new Set(["hard", "soft", "conditional"]);
+const OPERATION_STAGES = new Set([
+  "compress_defense",
+  "breach_window",
+  "exploit_frontier",
+  "consolidate_frontier"
+]);
+const TASK_ROLES = new Set([
+  "recon",
+  "concentrate",
+  "screen",
+  "breach",
+  "blocker_reduction",
+  "supply",
+  "flank",
+  "exploit",
+  "consolidate",
+  "reserve"
+]);
 const HARD_TASK_TYPES = new Set([
-  "preserve_supply", "deny_scoring_frontier", "hold_blocking_line", "preserve_force"
+  "preserve_supply", "deny_scoring_frontier", "hold_blocking_line", "preserve_force", "preserve_scoring_anchor"
 ]);
 const CONDITIONAL_TASK_TYPES = new Set([
   "joint_attack", "counterattack", "clear_blocker", "disrupt_axis_supply"
@@ -57,6 +76,7 @@ function normalizeTaskClass(value, type, options = {}) {
 
 function defaultProgressMetric(type, modelTaskType = "") {
   const kind = modelTaskType || type;
+  if (kind === "preserve_scoring_anchor") return "scoring_frontier_maintenance";
   if (["advance", "breakthrough_step", "exploit", "maneuver"].includes(kind)) return "frontier_or_target_distance";
   if (["preserve_supply", "supply"].includes(kind)) return "supply_coverage";
   if (["withdraw", "withdrawal", "exit_west"].includes(kind)) return "west_exit_progress";
@@ -91,11 +111,67 @@ function modelTaskTitle(type, index) {
     exploit: "利用突破窗口",
     feint: "实施牵制机动",
     consolidate: "集结并稳固战果",
+    concentrate: "集中突破兵力",
+    breach: "形成局部突破",
+    blocker_reduction: "降低路线阻挡",
+    flank: "保护突破侧翼",
     protect: "保护关键单位",
     reserve: "保留机动预备队",
     hold_position: "保持当前阵地"
   };
   return titles[type] || `模型任务 ${index}`;
+}
+
+function normalizeTaskRole(value, modelTaskType) {
+  const role = String(value || "").trim().toLowerCase().replace(/[- ]+/g, "_");
+  if (role) return safeText(role, "", 64);
+  if (TASK_ROLES.has(modelTaskType)) return modelTaskType;
+  const inferred = {
+    reconnaissance: "recon",
+    concentration: "concentrate",
+    attack: "breach",
+    clear_route: "blocker_reduction",
+    clear_blocker: "blocker_reduction",
+    protect: "flank",
+    advance: "exploit",
+    maneuver: "exploit",
+    hold_position: "consolidate"
+  }[String(modelTaskType || "").toLowerCase()];
+  return inferred || "";
+}
+
+function normalizeOperationStage(value, role, modelTaskType) {
+  const stage = String(value || "").trim().toLowerCase().replace(/[- ]+/g, "_");
+  if (OPERATION_STAGES.has(stage)) return stage;
+  const inferred = {
+    recon: "compress_defense",
+    concentrate: "compress_defense",
+    screen: "compress_defense",
+    supply: "compress_defense",
+    flank: "compress_defense",
+    reserve: "compress_defense",
+    breach: "breach_window",
+    blocker_reduction: "breach_window",
+    exploit: "exploit_frontier",
+    consolidate: "consolidate_frontier",
+    attack: "breach_window",
+    clear_route: "breach_window",
+    advance: "exploit_frontier",
+    maneuver: "exploit_frontier"
+  }[String(role || modelTaskType || "").toLowerCase()];
+  return inferred || "";
+}
+
+function julyAxisOperationMetadata() {
+  return {
+    operation_family: "breakthrough_and_exploit",
+    operation_stage: "compress_defense",
+    operation_stages: ["compress_defense", "breach_window", "exploit_frontier", "consolidate_frontier"],
+    canonical_title: "压缩 Allied 防线并形成可持续突破",
+    canonical_objective: "形成可验证的局部突破，并在保持补给、侧翼安全和战斗力的情况下扩大或巩固计分成果",
+    canonical_completion_condition: "形成规则可验证的突破，并在保持补给、侧翼安全和战斗力的情况下扩大或巩固计分成果",
+    canonical_failure_condition: "无法在可接受的补给、战斗力和路线风险下继续形成或利用突破"
+  };
 }
 
 function eligibleUnitIds(state, side) {
@@ -119,6 +195,39 @@ function stateScoringFrontier(state, side = "axis") {
     .map((unit) => Number(String(unit.hex).slice(0, 2)))
     .filter(Number.isFinite);
   return columns.length ? Math.max(34, ...columns) : 34;
+}
+
+function julyScoringAnchorTask() {
+  const targetColumn = 35;
+  return {
+    id: "july_scoring_anchor",
+    type: "preserve_scoring_anchor",
+    model_task_type: "preserve_scoring_anchor",
+    title: "保持 July 有效计分锚点",
+    objective: "保持至少一个 Axis 地面作战单位在终局时以有效补给状态位于目标计分列或更东",
+    priority: 1,
+    observation_only: true,
+    depends_on: [],
+    soft_depends_on: [],
+    conditional_dependencies: [],
+    assigned_units: [],
+    compatible_units: [],
+    task_class: "hard",
+    subject_side: "axis",
+    metric: "scoring_frontier",
+    relation: "at_least",
+    target_column: targetColumn,
+    evaluation_scope: "game_end",
+    completion_condition: `终局时至少一个 Axis 地面作战单位以有效补给状态位于或越过第 ${targetColumn} 列`,
+    failure_condition: `终局时 Axis 没有以有效补给状态保持第 ${targetColumn} 列或更东的地面作战单位`,
+    acceptance_contract: { mode: "at_settlement", evaluation_scope: "game_end" },
+    completion_criteria: { all: [{ id: "scoring_anchor", metric: "scoring_frontier", relation: "at_least",
+      subject_side: "axis", target: targetColumn, evaluation_scope: "game_end" }], any: [] },
+    required_for_parent: false,
+    source: "local_safety_invariant",
+    scoring_anchor_state: "approaching",
+    scoring_anchor_history: []
+  };
 }
 
 function axisBreakthroughChildren({ targetColumn, state } = {}) {
@@ -262,28 +371,40 @@ function skeletonChildren(intent = {}) {
   });
 }
 
-function buildTaskSkeleton({ intent = {}, operation = "operation", state, side, maxChildTasks = 6, taskGeneration = "fixed_skeleton" } = {}) {
+function buildTaskSkeleton({ intent = {}, operation = "operation", state, side, maxChildTasks = 6, taskGeneration = "fixed_skeleton", scoringAnchorPolicy = "none" } = {}) {
   const goalPlan = intent.goal_plan || null;
   const primaryGoal = goalPlan?.primary_goal || {};
-  const requestedTargetColumn = Number(primaryGoal.target_column || intent.target_column || 0);
+  const requestedTargetColumn = Number(primaryGoal.target_column
+    || (primaryGoal.metric === "scoring_frontier" ? primaryGoal.target : 0)
+    || intent.target_column || 0);
   const modelDefined = taskGeneration === "model_defined";
+  const julyAxisModelOperation = modelDefined && side === "axis" && state?.scenario === "july";
+  const operationMetadata = julyAxisModelOperation ? julyAxisOperationMetadata() : null;
   const targetColumn = requestedTargetColumn || (!modelDefined && side === "axis" && state?.scenario === "july"
     ? stateScoringFrontier(state, "axis") + 1 : 0);
-  const children = modelDefined ? [] : skeletonChildren({ ...intent, side, state, target_column: targetColumn || null })
-    .slice(0, Math.max(3, Math.min(6, Number(maxChildTasks) || 6)));
+  const taskLimit = Math.max(3, Math.min(6, Number(maxChildTasks) || 6));
+  const children = modelDefined ? (scoringAnchorPolicy === "july_terminal_v1" && side === "axis" && state?.scenario === "july"
+    ? [julyScoringAnchorTask()] : []) : skeletonChildren({ ...intent, side, state, target_column: targetColumn || null })
+    .slice(0, taskLimit);
   const axisBreakthrough = !modelDefined && side === "axis" && children.some((child) => child.type === "breakthrough_step");
   return {
     type: "task_plan",
     protocol: modelDefined ? "model-defined-task-v1" : goalPlan ? "side-aware-task-v3" : "hierarchical-task-v1",
     parent: {
       id: taskId(operation, "operation"),
-      title: axisBreakthrough ? "完成突破" : safeText(primaryGoal.title || intent.success_condition, "完成当前战略目标", 140),
-      objective: safeText(primaryGoal.goal_type || intent.objective_type, "improve the active scoring objective", 120),
-      completion_condition: axisBreakthrough
+      title: operationMetadata?.canonical_title || (axisBreakthrough ? "完成突破" : safeText(primaryGoal.title || intent.success_condition, "完成当前战略目标", 140)),
+      objective: operationMetadata?.canonical_objective || safeText(primaryGoal.goal_type || intent.objective_type, "improve the active scoring objective", 120),
+      completion_condition: operationMetadata?.canonical_completion_condition || (axisBreakthrough
         ? `以可计分补给状态到达或越过第 ${targetColumn || children.filter((child) => child.type === "breakthrough_step").at(-1)?.target_column} 列；中间列仅是进度检查点，不要求逐列停留`
-        : safeText(primaryGoal.observable_conditions?.map((item) => item.description).join("; ") || intent.success_condition, "improve the active scoring objective while preserving supply"),
-      failure_condition: safeText(intent.abort_condition, "the operation cannot preserve supply"),
+        : safeText(primaryGoal.observable_conditions?.map((item) => item.description).join("; ") || intent.success_condition, "improve the active scoring objective while preserving supply")),
+      failure_condition: operationMetadata?.canonical_failure_condition || safeText(intent.abort_condition, "the operation cannot preserve supply"),
       target_column: Number.isFinite(targetColumn) && targetColumn > 0 ? targetColumn : null,
+      target_selection_policy: julyAxisModelOperation ? "model_selected_after_breakthrough" : "scenario_specific",
+      ...(operationMetadata ? operationMetadata : {}),
+      ...(julyAxisModelOperation && rawModelTargetColumn(primaryGoal, intent) ? {
+        operational_target_column: rawModelTargetColumn(primaryGoal, intent),
+        operational_target_source: "model_selected"
+      } : {}),
       target_vp: Number.isFinite(Number(primaryGoal.target_vp ?? goalPlan?.campaign_goal?.target_vp))
         ? Number(primaryGoal.target_vp ?? goalPlan?.campaign_goal?.target_vp)
         : null,
@@ -317,14 +438,22 @@ function buildTaskSkeleton({ intent = {}, operation = "operation", state, side, 
       assigned_units: [],
       progress: 0,
       status: "pending",
-      next_action: "等待兵力分配",
+      next_action: child.observation_only ? "Use current scoring evidence to choose which units, supply routes and tasks to preserve or restore." : "等待兵力分配",
       last_blocked_reason: "",
-      source: "local_skeleton"
+      source: child.source || "local_skeleton"
     })),
     side,
     goal_plan: goalPlan,
     state_phase: state?.phase || ""
   };
+}
+
+function rawModelTargetColumn(primaryGoal = {}, intent = {}) {
+  const candidate = primaryGoal.target_column
+    ?? (primaryGoal.metric === "scoring_frontier" ? primaryGoal.target : null)
+    ?? intent.target_column;
+  return candidate != null && candidate !== "" && Number.isFinite(Number(candidate)) && Number(candidate) > 0
+    ? Number(candidate) : null;
 }
 
 function hasCycle(tasks) {
@@ -389,11 +518,19 @@ function normalizeTaskPlan(raw, skeleton, { state, side, allocation, maxChildTas
       : [];
     const normalizedAssignedIds = [...new Set(rawAssignedIds.filter((id) => validUnits.has(id)
       && (modelDefined || allocationUnits.has(id))))];
+    const taskRole = modelDefined
+      ? normalizeTaskRole(item.task_role || item.role, modelTaskType)
+      : "";
+    const operationStage = modelDefined && skeleton.parent.operation_family === "breakthrough_and_exploit"
+      ? normalizeOperationStage(item.operation_stage || item.operation_phase, taskRole, modelTaskType)
+      : safeText(item.operation_stage || item.operation_phase, "", 64);
     const base = modelDefined
       ? {
         id: requestedId || `model_task_${selected.size + 1}`,
         type: "model_task",
         model_task_type: MODEL_TASK_TYPES.has(modelTaskType) ? modelTaskType : "custom",
+        task_role: taskRole,
+        operation_stage: operationStage,
         title: safeText(item.title || item.goal || item.purpose, modelTaskTitle(MODEL_TASK_TYPES.has(modelTaskType) ? modelTaskType : "custom", selected.size + 1), 140),
         priority: Math.max(1, Number(item.priority) || selected.size + 1),
         depends_on: hardDependencies.map((dependency) => dependency.id),
@@ -449,10 +586,16 @@ function normalizeTaskPlan(raw, skeleton, { state, side, allocation, maxChildTas
         || item.failure_predicate),
       next_action: safeText(item.next_action, "按当前任务选择下一项合法行动"),
       model_task_type: modelDefined ? base.model_task_type : undefined,
+      task_role: modelDefined ? base.task_role : undefined,
+      operation_stage: modelDefined ? base.operation_stage : undefined,
       phase_scope: Array.isArray(item.applicable_phases || item.phases || item.phase_scope)
         ? (item.applicable_phases || item.phases || item.phase_scope).map(String).slice(0, 8)
         : [],
       target_column: item.target_column != null && item.target_column !== "" && Number.isFinite(Number(item.target_column)) ? Number(item.target_column) : base?.target_column,
+      target_column_source: item.target_column != null && item.target_column !== ""
+        ? "model_selected" : base?.target_column != null ? "inherited_goal" : "none",
+      target_selection_policy: modelDefined && state?.scenario === "july" && side === "axis"
+        ? "model_selected_after_breakthrough" : "scenario_specific",
       target_vp: item.target_vp != null && item.target_vp !== "" && Number.isFinite(Number(item.target_vp)) ? Number(item.target_vp) : base?.target_vp,
       target: item.target ?? base?.target,
       target_hex: targetHex,
@@ -465,6 +608,8 @@ function normalizeTaskPlan(raw, skeleton, { state, side, allocation, maxChildTas
         ...(modelDefined ? [
         ...(!item.title && !item.goal && !item.purpose ? [{ field: "title", correction: "generated_from_task_type" }] : []),
         ...(MODEL_TASK_TYPES.has(modelTaskType) ? [] : [{ field: "task_type", correction: "mapped_to_custom" }]),
+        ...(taskRole ? [] : [{ field: "task_role", correction: "role_not_declared_or_inferred" }]),
+        ...(operationStage ? [] : [{ field: "operation_stage", correction: "stage_not_declared_or_inferred" }]),
         ...(rawAssignedIds.length !== normalizedAssignedIds.length ? [{
           field: "assigned_units",
           correction: "removed_unknown_duplicate_or_unavailable_units",
@@ -489,6 +634,8 @@ function normalizeTaskPlan(raw, skeleton, { state, side, allocation, maxChildTas
       id: fallbackId,
       type: "model_task",
       model_task_type: fallbackType,
+      task_role: side === "axis" && state?.scenario === "july" ? "exploit" : normalizeTaskRole("", fallbackType),
+      operation_stage: side === "axis" && state?.scenario === "july" ? "exploit_frontier" : normalizeOperationStage("", "", fallbackType),
       title: "执行当前战略目标",
       priority: 1,
       depends_on: [],
@@ -503,16 +650,48 @@ function normalizeTaskPlan(raw, skeleton, { state, side, allocation, maxChildTas
     });
   }
   for (const base of skeleton.children) {
-    const selectionKey = base.type === "breakthrough_step" ? base.id : base.type;
+    let selectionKey = base.type === "breakthrough_step" ? base.id : base.type;
+    if (base.observation_only) {
+      while (selected.has(selectionKey)) selectionKey += "_local";
+    }
     if (selected.has(selectionKey)) continue;
-    selected.set(selectionKey, clone(base));
+    const local = clone(base);
+    if (local.observation_only) {
+      const ids = new Set([...selected.values()].map((task) => task.id));
+      while (ids.has(local.id)) local.id += "_local";
+    }
+    selected.set(selectionKey, local);
   }
-  const children = (modelDefined
+  const normalizationCorrections = [];
+  let normalizedChildren = modelDefined
     ? [...selected.values()]
     : skeleton.children
       .map((base) => selected.get(base.type === "breakthrough_step" ? base.id : base.type))
-      .filter(Boolean))
-    .slice(0, Math.max(1, Math.min(6, Number(maxChildTasks) || 6)));
+      .filter(Boolean);
+  const childLimit = Math.max(1, Math.min(6, Number(maxChildTasks) || 6));
+  const anchor = normalizedChildren.find((task) => task.type === "preserve_scoring_anchor");
+  if (anchor && normalizedChildren.length > childLimit) {
+    // Keep the local July invariant even when the model fills every task slot.
+    while (normalizedChildren.length > childLimit) {
+      const primaryPriority = Math.min(...normalizedChildren.filter((task) => task !== anchor).map((task) => task.priority));
+      const removable = normalizedChildren.filter((task) => task !== anchor)
+        .sort((left, right) => {
+          const protectedRank = (task) => Number(task.task_class === "hard" || task.required_for_parent === true
+            || task.priority === primaryPriority) * 2
+            + Number(normalizedChildren.some((other) => other.depends_on?.includes(task.id)));
+          return protectedRank(left) - protectedRank(right) || right.priority - left.priority;
+        })[0];
+      if (!removable) break;
+      normalizedChildren = normalizedChildren.filter((task) => task !== removable);
+      normalizationCorrections.push({
+        correction: "preserved_local_scoring_anchor",
+        removed_task_id: removable.id,
+        removed_task: clone(removable),
+        reason: "July Axis requires a terminal scoring-anchor invariant"
+      });
+    }
+  }
+  const children = normalizedChildren.slice(0, childLimit);
   for (const task of children) {
     task.task_class ||= normalizeTaskClass(task.task_class, task.type, { modelDefined });
     task.block_conditions = Array.isArray(task.block_conditions) && task.block_conditions.length
@@ -644,6 +823,7 @@ function normalizeTaskPlan(raw, skeleton, { state, side, allocation, maxChildTas
     child.last_blocked_reason = "";
     if (!child.assigned_units.length
       && !(["joint_attack", "clear_blocker"].includes(child.type) && child.compatible_units.length)
+      && child.type !== "preserve_scoring_anchor"
       && (modelDefined || ["preserve_supply", "advance", "breakthrough_step", "support", "protect_flank", "joint_attack", "clear_blocker", "deny_scoring_frontier", "hold_blocking_line", "preserve_force", "disrupt_axis_supply", "counterattack"].includes(child.type))) {
       child.status = "blocked";
       child.last_blocked_reason = "no_units_assigned_after_normalization";
@@ -685,10 +865,24 @@ function normalizeTaskPlan(raw, skeleton, { state, side, allocation, maxChildTas
   const parent = {
     ...skeleton.parent,
     id: taskId(rawParent.id, skeleton.parent.id),
-    title: safeText(rawParent.title, skeleton.parent.title, 140),
-    objective: safeText(rawParent.objective, skeleton.parent.objective, 140),
-    completion_condition: safeText(rawParent.completion_condition, skeleton.parent.completion_condition),
-    failure_condition: safeText(rawParent.failure_condition, skeleton.parent.failure_condition),
+    ...(skeleton.parent.operation_family === "breakthrough_and_exploit" ? {
+      // The local parent names the operation; the model still controls the
+      // child tasks and may record a more specific operation title separately.
+      title: skeleton.parent.title,
+      model_title: safeText(rawParent.title, "", 140) || null,
+      objective: skeleton.parent.objective,
+      completion_condition: skeleton.parent.completion_condition,
+      failure_condition: skeleton.parent.failure_condition,
+      operation_family: "breakthrough_and_exploit",
+      operation_stage: rawParent.operation_stage && OPERATION_STAGES.has(String(rawParent.operation_stage))
+        ? String(rawParent.operation_stage) : "compress_defense",
+      operation_stages: [...(skeleton.parent.operation_stages || [])]
+    } : {
+      title: safeText(rawParent.title, skeleton.parent.title, 140),
+      objective: safeText(rawParent.objective, skeleton.parent.objective, 140),
+      completion_condition: safeText(rawParent.completion_condition, skeleton.parent.completion_condition),
+      failure_condition: safeText(rawParent.failure_condition, skeleton.parent.failure_condition)
+    }),
     state: "active",
     started_turn: null,
     started_vp: null,
@@ -713,7 +907,8 @@ function normalizeTaskPlan(raw, skeleton, { state, side, allocation, maxChildTas
     scenario: state?.scenario,
     goal_plan: skeleton.goal_plan || null,
     task_generation: modelDefined ? "model_defined" : "fixed_skeleton",
-    normalized: true
+    normalized: true,
+    normalization_corrections: normalizationCorrections
   };
 }
 
@@ -1428,6 +1623,47 @@ function evaluateObservableCriteria(criteria, task, current, input) {
   };
 }
 
+function reconcileJulyScoringAnchor(task, current, input) {
+  const state = input?.state || input?.ctx?.state || {};
+  const frontier = scoringFrontierForSide(input, "axis");
+  const previousTarget = task.target_column;
+  const target = Math.max(35, Number(task.target_column || 35), frontier);
+  task.target_column = target;
+  task.completion_criteria.all[0].target = target;
+  task.completion_condition = `终局时 Axis 有效计分前沿至少保持第 ${target} 列；单位和路线由模型选择`;
+  task.failure_condition = `终局时 Axis 有效计分前沿低于第 ${target} 列`;
+  const previous = task.scoring_anchor_state || "approaching";
+  const final = isFinalEvaluation(input);
+  const reached = Object.values(state.units || {}).some((unit) => unit.side === "axis" && !unit.eliminated
+    && unit.hex && RulesEngine.isCombatUnit(unit) && Number(unit.hex.slice(0, 2)) >= target);
+  const next = frontier >= target ? "secured" : task.scoring_anchor_ever_secured ? "lost" : reached ? "reached" : "approaching";
+  if (next === "secured") task.scoring_anchor_ever_secured = true;
+  task.scoring_anchor_state = next;
+  task.scoring_anchor_history ||= [];
+  if (next !== previous || target !== previousTarget) {
+    if (next === "lost") task.scoring_anchor_loss_count = Number(task.scoring_anchor_loss_count || 0) + 1;
+    task.scoring_anchor_history.push({ from: previous, to: next, frontier, previous_target: previousTarget, target,
+      turn: input?.turn ?? state.turn ?? null, step: input?.step ?? null });
+    task.scoring_anchor_history = task.scoring_anchor_history.slice(-32);
+    task.scoring_anchor_transition = { from: previous, to: next, loss_count: task.scoring_anchor_loss_count || 0 };
+  } else task.scoring_anchor_transition = null;
+  task.progress = next === "secured" ? 1 : 0;
+  task.progress_value = task.progress;
+  task.progress_evidence = `Axis 有效计分前沿 ${frontier}；保持目标第 ${target} 列或更东；锚点状态 ${next}`;
+  task.current_metrics = { ...current, global_farthest_scoring_column: frontier };
+  task.completion_evidence = evaluateObservableCriteria(task.completion_criteria, task, task.current_metrics, input);
+  task.next_action = next === "secured"
+    ? "Compare preserving this supplied frontier, supporting it and further advance; choose the best final-VP tradeoff."
+    : "Compare restoring scoring supply or frontier access with alternative VP gains; choose units and routes from current evidence.";
+  if (final) {
+    task.status = next === "secured" ? "completed" : "failed";
+    task.terminal_reason = next === "secured" ? "scoring_anchor_held_at_final_evaluation" : "scoring_anchor_not_held_at_final_evaluation";
+    if (task.status === "failed") task.failure_evidence = clone(task.completion_evidence);
+  } else task.status = "active";
+  return { progress: task.progress, completed: final && next === "secured", evidence: task.progress_evidence,
+    anchor_state: next, frontier, target, transition: task.scoring_anchor_transition };
+}
+
 function modelTaskEvidence(task, current, baseline, input = {}, action = null, combatOutcome = null, impact = {}) {
   const kind = String(task.model_task_type || "custom").toLowerCase();
   const state = input?.state || input?.ctx?.state || {};
@@ -1554,6 +1790,13 @@ function reconcileTaskState(plan, input) {
   const state = input?.state || input?.ctx?.state || {};
   const changes = [];
   for (const task of plan.children || []) {
+    if (task.type === "preserve_scoring_anchor" && plan.side === "axis" && state.scenario === "july") {
+      const current = taskMetrics(task, plan, input);
+      const result = reconcileJulyScoringAnchor(task, current, input);
+      changes.push({ task_id: task.id, status: task.status, progress: task.progress,
+        evidence: result.evidence, anchor_state: result.anchor_state, transition: result.transition });
+      continue;
+    }
     if (isTerminalTask(task)) continue;
     if (task.type === "breakthrough_step" && task.status !== "active" && plan.side !== "axis") continue;
     const current = taskMetrics(task, plan, input);
@@ -2176,7 +2419,7 @@ function activateTasks(plan, maxActive = 3, input = null) {
       recommended_preparation_unit_ids: preparation.recommended_unit_ids
     };
   }
-  const active = children.filter((task) => task.status === "active")
+  const active = children.filter((task) => task.status === "active" && !task.observation_only)
     .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
   for (const task of active.slice(maxActive)) task.status = "pending";
   return children;
@@ -2240,6 +2483,8 @@ function phaseDispatchTasks(plan, input = {}) {
     id: task.id,
     type: task.type,
     model_task_type: task.model_task_type,
+    task_role: task.task_role || "",
+    operation_stage: task.operation_stage || "",
     title: task.title,
     status: task.status,
     priority: task.priority,
@@ -2252,10 +2497,13 @@ function phaseDispatchTasks(plan, input = {}) {
     tactical_opportunities: task.tactical_opportunities || [],
     activation_reason: task.activation_reason || "",
     next_action: task.next_action,
-    completion_condition: task.completion_condition
+    completion_condition: task.completion_condition,
+    target_column: task.target_column ?? null,
+    target_column_source: task.target_column_source || "none",
+    target_selection_policy: task.target_selection_policy || "scenario_specific"
   });
   const blockedTasks = (plan?.children || [])
-    .filter((task) => !isTerminalTask(task) && !candidates.some((candidate) => candidate.task.id === task.id))
+    .filter((task) => !isTerminalTask(task) && !task.observation_only && !candidates.some((candidate) => candidate.task.id === task.id))
     .map((task) => dispatchTask({ task, eligible_units: [] }));
   return {
     phase_kind: phaseKind,
@@ -2263,6 +2511,14 @@ function phaseDispatchTasks(plan, input = {}) {
     tasks: candidates.map(dispatchTask),
     blocked_tasks: blockedTasks,
     primary_task_id: primary?.task.id || "",
+    operation: plan?.parent?.operation_family ? {
+      family: plan.parent.operation_family,
+      stage: plan.parent.operation_stage || "",
+      stages: plan.parent.operation_stages || [],
+      operational_target_column: plan.parent.operational_target_column ?? null,
+      target_selection: plan.parent.operation_family === "breakthrough_and_exploit"
+        ? "model_selected_after_breakthrough" : "scenario_specific"
+    } : null,
     preferred_units: [...new Set([...dynamicRouteUnits, ...primaryUnits])],
     allowed_unit_ids: [...new Set([...candidates.flatMap((item) => item.eligible_units), ...dynamicRouteUnits])],
     eligible_units_at_phase_start: [...eligible],
@@ -2332,7 +2588,7 @@ function localTaskProgress(plan, input, stepRecord) {
   const action = stepRecord?.final_action || stepRecord?.action || {};
   const acceptedRecord = acceptedAttempt(stepRecord);
   const accepted = !!acceptedRecord || stepRecord?.final_action_source === "local_fallback";
-  const explicitTasks = (plan.children || []).filter((task) => !isTerminalTask(task) && task.completion_criteria);
+  const explicitTasks = (plan.children || []).filter((task) => !isTerminalTask(task) && !task.observation_only && task.completion_criteria);
   if (explicitTasks.length && (accepted || stepRecord?.action_applied?.applied)) {
     const changes = [];
     for (const task of explicitTasks) {
@@ -2701,6 +2957,7 @@ function createTaskManager({
   maxActiveChildTasks = 3,
   maxChildTasks = 6,
   taskGeneration: managerTaskGeneration = "fixed_skeleton",
+  scoringAnchorPolicy = "none",
   noProgressThreshold = 3,
   blockedThreshold = 2,
   supplyWorsenedThreshold = 2,
@@ -2737,6 +2994,21 @@ function createTaskManager({
     if (plan.observed_regime && plan.observed_regime !== regime) recordStrategicEvent("scenario_action_window_changed",
       { before: plan.observed_regime, after: regime }, input, regime);
     plan.observed_regime = regime;
+    const scoringAnchor = plan.children?.find((task) => task.type === "preserve_scoring_anchor");
+    if (scoringAnchor?.scoring_anchor_state === "lost" && !isFinalEvaluation(input)) {
+      recordStrategicEvent("scoring_anchor_lost", {
+        task_id: scoringAnchor.id,
+        from: "secured",
+        to: "lost",
+        loss_count: scoringAnchor.scoring_anchor_loss_count,
+        frontier: scoringAnchor.current_metrics?.global_farthest_scoring_column ?? null,
+        target_column: scoringAnchor.target_column,
+        evidence: scoringAnchor.progress_evidence
+      }, input, {
+        task_id: scoringAnchor.id,
+        loss_count: scoringAnchor.scoring_anchor_loss_count
+      });
+    }
     for (const goal of [plan.goal_plan?.primary_goal, plan.goal_plan?.campaign_goal].filter(Boolean)) {
       const result = groundedGoalCompleted(plan, input, goal);
       const breaches = result.evidence.filter((item) => item.actual != null && item.target != null
@@ -2745,8 +3017,8 @@ function createTaskManager({
       if (breaches.length) recordStrategicEvent("goal_constraint_breached", breaches, input,
         { metric: goal.metric, target: goal.target, target_vp: goal.target_vp, target_column: goal.target_column, relation: goal.relation });
     }
-    const primaryPriority = Math.min(...plan.children.map((task) => Number(task.priority || 99)));
-    const failed = plan.children.filter((task) => task.status === "failed"
+    const primaryPriority = Math.min(...plan.children.filter((task) => !task.observation_only).map((task) => Number(task.priority || 99)));
+    const failed = plan.children.filter((task) => !task.observation_only && task.status === "failed"
       && (task.required_for_parent || Number(task.priority || 99) === primaryPriority));
     if (failed.length) recordStrategicEvent("task_acceptance_failed", failed.map((task) => ({ id: task.id, evidence: task.failure_evidence })),
       input, failed.map((task) => ({ id: task.id, conditions: task.failure_criteria })));
@@ -2771,13 +3043,14 @@ function createTaskManager({
     get executionHistory() {
       return clone(Object.fromEntries((plan?.children || []).map((task) => [task.id, task.execution_history || []])));
     },
-    initialize({ intent, operation, input, allocation, rawPlan, preserveParent = false, taskGeneration = "fixed_skeleton" } = {}) {
+    initialize({ intent, operation, input, allocation, rawPlan, preserveParent = false, taskGeneration = managerTaskGeneration } = {}) {
       const skeleton = buildTaskSkeleton({
         intent,
         operation,
         state: input?.state,
         side: input?.side,
         maxChildTasks,
+        scoringAnchorPolicy,
         taskGeneration: taskGeneration || managerTaskGeneration
       });
       const nextPlan = normalizeTaskPlan(rawPlan, skeleton, {
@@ -2811,11 +3084,16 @@ function createTaskManager({
         const semanticKey = (task) => JSON.stringify([task.type, task.model_task_type, task.metric,
           task.subject_side, task.relation, task.target, task.target_hex, task.target_column, task.evaluation_scope,
           task.completion_criteria, task.failure_criteria, task.acceptance_contract]);
-        const previousByMeaning = new Map((plan.children || []).map((task) => [semanticKey(task), task]));
+        const reusedTasks = new Set();
         const remappedIds = new Map();
         for (const task of nextPlan.children) {
-          const previous = executionLedger ? previousByMeaning.get(semanticKey(task)) : previousByKey.get(taskIdentity(task));
+          const exact = previousByKey.get(taskIdentity(task));
+          const previous = executionLedger
+            ? exact && !reusedTasks.has(exact) && semanticKey(exact) === semanticKey(task) ? exact
+              : plan.children.find((candidate) => !reusedTasks.has(candidate) && semanticKey(candidate) === semanticKey(task))
+            : exact;
           if (!previous) continue;
+          reusedTasks.add(previous);
           if (executionLedger) {
             remappedIds.set(task.id, previous.id);
             task.id = previous.id;
@@ -2848,7 +3126,26 @@ function createTaskManager({
               progress: task.progress, failure_count: task.consecutive_execution_failures || 0 })) }];
         }
       }
+      const previousAnchor = plan?.children.find((task) => task.type === "preserve_scoring_anchor");
+      const nextAnchor = nextPlan.children.find((task) => task.type === "preserve_scoring_anchor");
+      if (previousAnchor && nextAnchor) {
+        const conflicting = nextPlan.children.find((task) => task !== nextAnchor && task.id === previousAnchor.id);
+        if (conflicting) {
+          const oldId = conflicting.id;
+          do {
+            conflicting.id += "_model";
+          } while (nextPlan.children.some((task) => task !== conflicting && task.id === conflicting.id));
+          for (const task of nextPlan.children) {
+            for (const field of ["depends_on", "soft_depends_on"]) task[field] = (task[field] || []).map((id) => id === oldId ? conflicting.id : id);
+            for (const dependency of task.conditional_dependencies || []) if (dependency.id === oldId) dependency.id = conflicting.id;
+          }
+          conflicting.normalization_corrections ||= [];
+          conflicting.normalization_corrections.push({ correction: "reserved_monitor_id_renamed", requested: oldId, grounded: conflicting.id });
+        }
+        Object.assign(nextAnchor, clone(previousAnchor));
+      }
       plan = nextPlan;
+      if (nextAnchor) reconcileJulyScoringAnchor(nextAnchor, taskMetrics(nextAnchor, plan, input), input);
       plan.parent.started_turn = plan.parent.started_turn ?? Number(input?.turn || 0);
       plan.parent.started_vp = plan.parent.started_vp ?? (input?.state?.vp ?? input?.state?.victory_points ?? null);
       activateTasks(plan, maxActiveChildTasks, input);
@@ -2945,6 +3242,8 @@ function createTaskManager({
         metric: task.progress_metric || ""
       }]));
       const progress = localTaskProgress(plan, input, stepRecord);
+      const anchor = plan.children.find((task) => task.type === "preserve_scoring_anchor");
+      if (anchor) reconcileJulyScoringAnchor(anchor, taskMetrics(anchor, plan, input), input);
       const events = taskEvents(input, stepRecord, progress).filter((event) => !executionLedger
         || !["excessive_passive_holds", "route_blocked"].includes(event));
       const executionFeedback = executionLedger ? updateTaskExecutionHistory(plan, stepRecord, input) : [];
@@ -2961,7 +3260,7 @@ function createTaskManager({
       }
       const observedTask = progress?.task_id
         ? plan.children.find((task) => task.id === progress.task_id)
-        : (plan.children || []).find((task) => task.status === "active");
+        : (plan.children || []).find((task) => task.status === "active" && !task.observation_only);
       const actionFeedback = taskActionFeedback(plan, input, stepRecord, observedTask, progress?.progress ?? null, progress?.evidence || "");
       plan.last_action_feedback = actionFeedback;
       plan.last_task_events = events;
@@ -2988,7 +3287,7 @@ function createTaskManager({
       const acceptedNonPass = !!acceptedAttempt(stepRecord) && (stepRecord?.final_action?.type || "") !== "pass";
       if (acceptedNonPass && cooldownActionsRemaining > 0) cooldownActionsRemaining -= 1;
       const activeTask = (plan.children || [])
-        .filter((task) => task.status === "active")
+        .filter((task) => task.status === "active" && !task.observation_only)
         .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id))[0];
       const countsAsNoProgress = events.includes("no_task_progress");
       const progressKey = countsAsNoProgress

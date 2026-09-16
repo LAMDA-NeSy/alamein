@@ -83,6 +83,68 @@ test("July skeleton respects model targets without raising them to a preset colu
   assert.deepEqual(modelDefined.children, []);
 });
 
+test("model-defined July Axis plans retain a route-free scoring anchor invariant", () => {
+  const modelDefined = buildTaskSkeleton({ state, side: "axis", taskGeneration: "model_defined", scoringAnchorPolicy: "july_terminal_v1" });
+  assert.deepEqual(modelDefined.children.map((task) => task.id), ["july_scoring_anchor"]);
+  assert.equal(modelDefined.children[0].target_column, 35);
+  assert.deepEqual(modelDefined.children[0].assigned_units, []);
+  assert.equal(modelDefined.children[0].source, "local_safety_invariant");
+
+  const plan = normalizeTaskPlan({ children: Array.from({ length: 6 }, (_, index) => ({
+    id: `model_${index}`,
+    task_type: "maneuver",
+    assigned_unit_ids: []
+  })) }, modelDefined, { state, side: "axis", allocation: {}, maxChildTasks: 6 });
+  assert.equal(plan.children.length, 6);
+  assert.ok(plan.children.some((task) => task.type === "preserve_scoring_anchor"));
+  assert.ok(plan.normalization_corrections.some((item) => item.correction === "preserved_local_scoring_anchor"));
+});
+
+test("July Axis scoring anchor records secure, loss, and final settlement states", () => {
+  const manager = createTaskManager({ executionLedger: true, taskGeneration: "model_defined", replanCooldownActions: 0, scoringAnchorPolicy: "july_terminal_v1" });
+  const initial = structuredClone(state);
+  const unitId = Object.keys(initial.units).find((id) => initial.units[id].side === "axis"
+    && initial.units[id].kind !== "supply" && initial.units[id].hex);
+  manager.initialize({ input: { state: initial, side: "axis", turn: 1, phase: initial.phase },
+    intent: { side: "axis" }, operation: "july_anchor", taskGeneration: "model_defined",
+    rawPlan: { children: [{ id: "maneuver", task_type: "maneuver", assigned_unit_ids: [unitId] }] },
+    allocation: { spearhead: [{ unit: unitId }], support: [], supply: [], reserve: [] } });
+
+  const reached = structuredClone(initial);
+  reached.units[unitId].hex = "3510";
+  reached.units[unitId].supply_state = "supplied";
+  let plan = manager.refresh({ state: reached, side: "axis", turn: 1, phase: reached.phase });
+  let anchor = plan.children.find((task) => task.id === "july_scoring_anchor");
+  assert.equal(anchor.scoring_anchor_state, "secured");
+  assert.equal(anchor.status, "active");
+  assert.equal(manager.consumeReplanReason(), "");
+
+  const lost = structuredClone(reached);
+  lost.units[unitId].hex = "3410";
+  plan = manager.refresh({ state: lost, side: "axis", turn: 2, phase: lost.phase, step: 1 });
+  anchor = plan.children.find((task) => task.id === "july_scoring_anchor");
+  assert.equal(anchor.scoring_anchor_state, "lost");
+  assert.equal(manager.consumeReplanReason(), "scoring_anchor_lost");
+  manager.refresh({ state: lost, side: "axis", turn: 2, phase: lost.phase, step: 2 });
+  assert.equal(manager.consumeReplanReason(), "");
+
+  const final = structuredClone(reached);
+  final.turn = RulesEngine.scenarioFinalTurn("july");
+  final.phase = "end_game_turn";
+  plan = manager.settle({ state: final, side: "axis", turn: final.turn, phase: final.phase, status: "completed" });
+  anchor = plan.children.find((task) => task.id === "july_scoring_anchor");
+  assert.equal(anchor.status, "completed");
+  assert.equal(anchor.terminal_reason, "scoring_anchor_held_at_final_evaluation");
+});
+
+test("July scoring anchor is isolated from September and October", () => {
+  for (const scenario of ["september", "october"]) {
+    const scenarioState = JSON.parse(fs.readFileSync(path.join(__dirname, `../../scenarios/${scenario}.json`), "utf8"));
+    const skeleton = buildTaskSkeleton({ state: scenarioState, side: "axis", taskGeneration: "model_defined", scoringAnchorPolicy: "july_terminal_v1" });
+    assert.equal(skeleton.children.some((task) => task.type === "preserve_scoring_anchor"), false, scenario);
+  }
+});
+
 test("September and October local task fallbacks do not import July breakthrough checkpoints", () => {
   for (const scenario of ["september", "october"]) {
     const scenarioState = JSON.parse(fs.readFileSync(path.join(__dirname, `../../scenarios/${scenario}.json`), "utf8"));
@@ -135,6 +197,67 @@ test("model-defined task mode preserves a flexible model task tree", () => {
   assert.deepEqual(plan.children[0].phase_scope, ["initial_movement"]);
   assert.equal(plan.children.some((task) => task.type === "breakthrough_step"), false);
   assert.equal(plan.children.some((task) => task.type === "clear_blocker"), false);
+});
+
+test("July Axis model tasks use a defense-compression operation and choose exploitation columns dynamically", () => {
+  const axisUnits = Object.keys(state.units)
+    .filter((id) => state.units[id].side === "axis" && state.units[id].hex)
+    .slice(0, 4);
+  const skeleton = buildTaskSkeleton({
+    intent: { side: "axis" },
+    operation: "model_operation",
+    state,
+    side: "axis",
+    taskGeneration: "model_defined",
+    scoringAnchorPolicy: "july_terminal_v1"
+  });
+  assert.equal(skeleton.parent.operation_family, "breakthrough_and_exploit");
+  assert.equal(skeleton.parent.operation_stage, "compress_defense");
+  assert.match(skeleton.parent.title, /压缩 Allied 防线/);
+  assert.equal(skeleton.parent.target_column, null);
+  assert.deepEqual(skeleton.children.map((task) => task.id), ["july_scoring_anchor"]);
+
+  const plan = normalizeTaskPlan({
+    parent: { title: "模型选择的南侧突破" },
+    children: [
+      { id: "recon", task_type: "recon", task_role: "recon", operation_stage: "compress_defense", assigned_unit_ids: [axisUnits[0]] },
+      { id: "breach", task_type: "attack", task_role: "breach", operation_stage: "breach_window", assigned_unit_ids: [axisUnits[1]] },
+      { id: "exploit", task_type: "maneuver", task_role: "exploit", operation_stage: "exploit_frontier", assigned_unit_ids: [axisUnits[2]] }
+    ]
+  }, skeleton, { state, side: "axis", allocation: {}, maxChildTasks: 6 });
+
+  assert.equal(plan.parent.title, "压缩 Allied 防线并形成可持续突破");
+  assert.equal(plan.parent.model_title, "模型选择的南侧突破");
+  assert.equal(plan.parent.operation_family, "breakthrough_and_exploit");
+  assert.equal(plan.children.some((task) => task.type === "breakthrough_step"), false);
+  assert.equal(plan.children.filter((task) => task.type === "preserve_scoring_anchor").length, 1);
+  for (const id of ["recon", "breach", "exploit"]) {
+    const task = plan.children.find((item) => item.id === id);
+    assert.ok(task);
+    assert.equal(task.target_column, undefined);
+    assert.equal(task.target_column_source, "none");
+    assert.ok(task.task_role);
+    assert.ok(task.operation_stage);
+  }
+  assert.equal(plan.parent.operational_target_column, undefined);
+
+  const selectedTarget = normalizeTaskPlan({
+    children: [{ id: "exploit_38", task_type: "maneuver", task_role: "exploit", target_column: 38, assigned_unit_ids: [axisUnits[0]] }]
+  }, skeleton, { state, side: "axis", allocation: {}, maxChildTasks: 6 });
+  const exploit = selectedTarget.children.find((task) => task.id === "exploit_38");
+  assert.equal(exploit.target_column, 38);
+  assert.equal(exploit.target_column_source, "model_selected");
+  assert.equal(exploit.target_selection_policy, "model_selected_after_breakthrough");
+});
+
+test("July Axis operation metadata is isolated from Allies and other scenarios", () => {
+  for (const scenario of ["september", "october"]) {
+    const scenarioState = JSON.parse(fs.readFileSync(path.join(__dirname, `../../scenarios/${scenario}.json`), "utf8"));
+    const plan = buildTaskSkeleton({ state: scenarioState, side: "axis", taskGeneration: "model_defined" });
+    assert.equal(plan.parent.operation_family, undefined, scenario);
+  }
+  const allies = buildTaskSkeleton({ state, side: "allies", taskGeneration: "model_defined" });
+  assert.equal(allies.parent.operation_family, undefined);
 });
 
 test("final settlement closes non-terminal child tasks", () => {

@@ -9,7 +9,7 @@ const { readConfigFile } = require("./config_file.js");
 const { CONFIG_DIR, PROJECT_ROOT } = require("./project_paths.js");
 
 const REGISTRY_FILE = path.join(CONFIG_DIR, "ai_models.yaml");
-const ADAPTERS = new Set(["openai_compatible", "mock"]);
+const ADAPTERS = new Set(["openai_compatible", "anthropic_messages", "mock"]);
 const THINKING_MODES = new Set(["disabled", "enabled", "omitted"]);
 
 function clone(value) {
@@ -48,7 +48,9 @@ function normalizeProfile(profileId, raw) {
   assertPositiveInteger(raw.limits?.context, `${profileId}.limits.context`);
   assertPositiveInteger(raw.limits?.output, `${profileId}.limits.output`);
   if (Number(raw.limits.output) >= Number(raw.limits.context)) throw new Error(`${profileId}.limits.output must be smaller than context`);
-  if (raw.adapter === "openai_compatible" && !raw.api_key_env) throw new Error(`model profile ${profileId} requires api_key_env`);
+  if (["openai_compatible", "anthropic_messages"].includes(raw.adapter) && !raw.api_key_env) {
+    throw new Error(`model profile ${profileId} requires api_key_env`);
+  }
   return {
     profile_id: profileId,
     adapter: raw.adapter,
@@ -704,6 +706,153 @@ async function callOpenAiCompatible(runtime, body, attempt, timeoutMs) {
   }
 }
 
+function textContent(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map((item) => {
+    if (typeof item === "string") return item;
+    if (item?.type === "text") return String(item.text || "");
+    return "";
+  }).join("");
+  return String(value);
+}
+
+function anthropicSystem(messages) {
+  const system = messages.filter((message) => message.role === "system").map((message) => textContent(message.content)).filter(Boolean);
+  return system.length ? system.join("\n\n") : undefined;
+}
+
+function anthropicMessages(messages = []) {
+  const output = [];
+  for (const message of messages.filter((item) => item.role !== "system")) {
+    if (message.role === "tool") {
+      const toolResult = {
+        type: "tool_result",
+        tool_use_id: String(message.tool_call_id || ""),
+        content: textContent(message.content)
+      };
+      const previous = output[output.length - 1];
+      if (previous?.role === "user" && Array.isArray(previous.content) && previous.content.every((item) => item.type === "tool_result")) {
+        previous.content.push(toolResult);
+      } else output.push({ role: "user", content: [toolResult] });
+      continue;
+    }
+    const content = Array.isArray(message.content)
+      ? message.content.map((item) => {
+        if (item?.type === "text") return { type: "text", text: String(item.text || "") };
+        if (item?.type === "tool_use") return { type: "tool_use", id: item.id, name: item.name, input: item.input || {} };
+        return item;
+      })
+      : textContent(message.content);
+    if (Array.isArray(message.tool_calls)) {
+      const blocks = [];
+      if (content) blocks.push({ type: "text", text: content });
+      for (const call of message.tool_calls) {
+        blocks.push({
+          type: "tool_use",
+          id: String(call.id || crypto.randomUUID()),
+          name: String(call.function?.name || ""),
+          input: typeof call.function?.arguments === "string" ? parseBody(call.function.arguments) : (call.function?.arguments || {})
+        });
+      }
+      output.push({ role: "assistant", content: blocks });
+    } else output.push({ role: message.role === "assistant" ? "assistant" : "user", content });
+  }
+  return output;
+}
+
+function anthropicTools(tools = []) {
+  return tools.map((tool) => ({
+    name: String(tool.function?.name || tool.name || ""),
+    description: String(tool.function?.description || tool.description || ""),
+    input_schema: tool.function?.parameters || tool.input_schema || { type: "object", properties: {} }
+  }));
+}
+
+function anthropicRequestBody(runtime, body) {
+  const request = {
+    model: runtime.profile.model,
+    max_tokens: Number(body.max_tokens || body.max_completion_tokens || runtime.profile.limits.output),
+    messages: anthropicMessages(body.messages || [])
+  };
+  const system = anthropicSystem(body.messages || []);
+  if (system) request.system = system;
+  if (body.temperature != null) request.temperature = Number(body.temperature);
+  if (body.top_p != null) request.top_p = Number(body.top_p);
+  if (body.tools?.length) request.tools = anthropicTools(body.tools);
+  if (body.tool_choice === "required") request.tool_choice = { type: "any" };
+  else if (body.tool_choice === "auto") request.tool_choice = { type: "auto" };
+  else if (body.tool_choice?.function?.name) request.tool_choice = { type: "tool", name: body.tool_choice.function.name };
+  if (body.thinking?.type === "enabled") {
+    request.thinking = {
+      type: "enabled",
+      budget_tokens: Math.min(Number(body.thinking.budget_tokens || 4096), Math.max(1024, request.max_tokens - 1))
+    };
+    delete request.temperature;
+  }
+  return request;
+}
+
+function openAiCompatibleResponseFromAnthropic(json = {}) {
+  const text = (json.content || []).filter((item) => item.type === "text").map((item) => item.text || "").join("");
+  const reasoning = (json.content || []).filter((item) => item.type === "thinking").map((item) => item.thinking || "").join("");
+  const toolCalls = (json.content || []).filter((item) => item.type === "tool_use").map((item) => ({
+    id: String(item.id || crypto.randomUUID()),
+    type: "function",
+    function: { name: String(item.name || ""), arguments: JSON.stringify(item.input || {}) }
+  }));
+  const message = { role: "assistant", content: text || null };
+  if (reasoning) message.reasoning_content = reasoning;
+  if (toolCalls.length) message.tool_calls = toolCalls;
+  return {
+    id: json.id || `anthropic-${crypto.randomUUID()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: json.model,
+    choices: [{ index: 0, finish_reason: toolCalls.length ? "tool_calls" : "stop", message }],
+    usage: json.usage || {}
+  };
+}
+
+async function callAnthropicMessages(runtime, body, attempt, timeoutMs) {
+  const controller = new AbortController();
+  const effectiveTimeoutMs = Math.max(1, Number(timeoutMs || runtime.profile.defaults.timeout_ms));
+  const timeout = setTimeout(() => controller.abort(), effectiveTimeoutMs);
+  let timeoutId;
+  try {
+    const request = (async () => {
+      const { response, responseText } = await requestHttps(`${runtime.profile.base_url}/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": runtime._credential,
+          "anthropic-version": "2023-06-01"
+        },
+        signal: controller.signal
+      }, JSON.stringify(anthropicRequestBody(runtime, body)));
+      const json = parseBody(responseText);
+      const successful = Number(response.statusCode || 0) >= 200 && Number(response.statusCode || 0) < 300;
+      return { response, responseText, json: successful ? openAiCompatibleResponseFromAnthropic(json) : json };
+    })();
+    const result = await Promise.race([
+      request,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();
+          const error = new Error(`upstream request exceeded ${effectiveTimeoutMs}ms`);
+          error.name = "AbortError";
+          reject(error);
+        }, effectiveTimeoutMs);
+      })
+    ]);
+    return { status: result.response.statusCode, headers: normalizeHttpsHeaders(result.response.headers), json: result.json, attempt };
+  }
+  finally {
+    clearTimeout(timeout);
+    clearTimeout(timeoutId);
+  }
+}
+
 async function dispatchUpstream(runtime, body, options = {}) {
   const started = Date.now();
   const requestId = options.requestId || crypto.randomUUID();
@@ -762,7 +911,9 @@ async function dispatchUpstream(runtime, body, options = {}) {
     try {
       result = runtime.profile.adapter === "mock"
         ? await callMock(runtime, body, attempt, remaining)
-        : await callOpenAiCompatible(runtime, body, attempt, remaining);
+        : runtime.profile.adapter === "anthropic_messages"
+          ? await callAnthropicMessages(runtime, body, attempt, remaining)
+          : await callOpenAiCompatible(runtime, body, attempt, remaining);
       if (Date.now() >= deadline) {
         const expired = new Error("response arrived after the request deadline");
         expired.name = "AbortError";
@@ -1108,6 +1259,7 @@ async function closeModelRuntime(runtime) {
 
 module.exports = {
   applyProfileRequestDefaults,
+  anthropicRequestBody,
   buildChatCompletionsBody,
   closeModelRuntime,
   classifyTransportFailure,
@@ -1117,6 +1269,7 @@ module.exports = {
   loadRegistry,
   loadRegistryDocument,
   modelContractConfiguration,
+  openAiCompatibleResponseFromAnthropic,
   publicRuntimeMetadata,
   resolveModel,
   startModelGateway,

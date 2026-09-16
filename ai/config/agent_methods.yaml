@@ -161,6 +161,7 @@ methods:
     task_management: multi_task
     task_protocol: side-aware-task-v4
     task_generation: model_defined
+    scoring_anchor_policy: july_terminal_v1
     task_dependency_policy: hard_soft_conditional_v1
     task_switching: existing_tasks_only
     max_child_tasks: 6

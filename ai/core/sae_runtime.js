@@ -334,7 +334,7 @@ function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocatio
   const currentVp = Number(victory.current_vp ?? state.victory_points ?? state.vp ?? 0);
   const baselineVp = Number(feedback.baselineVp ?? RulesEngine.scenarioStartingVp(scenario, 0));
   const activeTasks = (taskPlan?.children || [])
-    .filter((task) => task.status === "active")
+    .filter((task) => task.status === "active" && !task.observation_only)
     .sort((left, right) => Number(left.priority || 99) - Number(right.priority || 99))
     .slice(0, 6);
   const taskUnits = activeTasks.map((task) => ({
@@ -450,6 +450,7 @@ function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocatio
     baseline_vp: baselineVp,
     vp_delta_from_baseline: currentVp - baselineVp,
     next_scoring_change: nextScoringChange,
+    scoring_anchor: taskPlan?.children?.find((task) => task.type === "preserve_scoring_anchor") || null,
     active_tasks: taskUnits,
     route_feasibility: routeFeasibility,
     task_units: taskUnits.flatMap((task) => task.assigned_units.map((unit) => ({ unit, task_id: task.task_id, task_class: task.task_class }))),
@@ -755,7 +756,7 @@ function operationState(intent, allocation, input, built, taskPlan = null, feedb
       hex: unit?.hex || ""
     }];
   }));
-  const activeTasks = (taskPlan?.children || []).filter((task) => task.status === "active")
+  const activeTasks = (taskPlan?.children || []).filter((task) => task.status === "active" && !task.observation_only)
     .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
   const phaseDispatch = taskPlan ? phaseDispatchTasks(taskPlan, {
     ...input,
@@ -846,6 +847,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       executionLedger,
       taskProtocol: config.task_management_options?.protocol || config.task_management_options?.task_protocol || "",
       taskGeneration: config.task_management_options?.task_generation || "fixed_skeleton",
+      scoringAnchorPolicy: config.task_management_options?.scoring_anchor_policy || "none",
       maxChildTasks: Number(config.task_management_options?.max_child_tasks || 6),
       maxActiveChildTasks: Number(config.task_management_options?.max_active_child_tasks || 3),
       noProgressThreshold: Number(config.task_management_options?.no_progress_replan_threshold || 3),
@@ -1025,10 +1027,17 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     const payload = publicPayload(config, built.publicContext, []);
     const strategicPayload = compactAgentPayload(payload, { includeInitialMap: false });
     strategicPayload.request_capabilities = { tools_callable: false, output: "structured strategic JSON", facts_source: "provided state; do not invent tool results" };
+    if (taskManager) strategicPayload.task_policy = {
+      scoring_anchor_policy: input.state?.scenario === "july" && input.side === "axis"
+        ? config.task_management_options?.scoring_anchor_policy || "none" : "none",
+      max_child_tasks: config.task_management_options?.max_child_tasks || 6
+    };
     if (taskManager?.plan) strategicPayload.previous_task_acceptance = taskManager.plan.children.map((task) => ({
       id: task.id, title: task.title, status: task.status, acceptance_contract: task.acceptance_contract,
       completion_criteria: task.completion_criteria, completion_evidence: task.completion_evidence,
-      failure_evidence: task.failure_evidence
+      failure_evidence: task.failure_evidence, observation_only: task.observation_only,
+      scoring_anchor_state: task.scoring_anchor_state, scoring_anchor_loss_count: task.scoring_anchor_loss_count,
+      scoring_anchor_history: task.scoring_anchor_history
     }));
     if (executionLedger) strategicPayload.goal_history = goalHistory.report({ ...input, ctx: built.ctx }, taskManager?.plan);
     if (recentCombatResults.length) strategicPayload.recent_combat_results = clone(recentCombatResults);

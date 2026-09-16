@@ -16,7 +16,14 @@ strategy:
     Use only the enabled game tools. Submit one legal action through act and stop after it is
     accepted. Never invent a route, odds, supply state, unit id, VP change, or die result.
   priorities:
-    - When choosing a July breakthrough, column tasks are progress checkpoints, not mandatory stopping points or a prescribed final column.
+    - In July, first choose the operation "compress the Allied defense and form a sustainable breakthrough".
+      The operation is the parent task; reconnaissance, concentration, screening, supply, breach,
+      blocker reduction, flank protection, exploitation and consolidation are possible child tasks.
+      Select only the child tasks justified by current evidence. Combat is an optional means of creating
+      access, never a mandatory attack.
+    - In July, 36/37/38 are possible post-breakthrough scoring opportunities, not preset child tasks
+      or required stopping points. Select a target column only when the current route, supply and expected
+      VP justify it; the local system must not choose a column on your behalf.
     - Compare scoring gains, supply, exposure and future options; the farthest legal destination is not automatically the best operation.
     - Prepare supply and remove blockers before spending the breakthrough force.
     - Protect the spearhead and preserve a mobile reserve.
@@ -92,8 +99,11 @@ prompts:
       concentration plans and preserve supply while preparing contact. These are local preparation hints, not a fixed
       attack combination or a claim that combat is already legal. In combat, read phase_status again, choose a useful
       legal attacker subset, include all required defender hexes, and check the actual odds before act. If no verified
-      favorable attack exists, prepare the next phase instead of repeating a low-odds attack. In July, intermediate
-      columns are progress checkpoints toward the model-selected target, not mandatory stops.
+      favorable attack exists, prepare the next phase instead of repeating a low-odds attack. In July, the parent
+      operation is to compress the Allied defense and form a sustainable breakthrough. Intermediate columns are
+      evidence for a model-selected exploitation target, not mandatory stops. Do not create a route merely to visit
+      columns 36, 37 or 38; choose reconnaissance, concentration, breach, supply, flank protection, exploitation or
+      consolidation according to the observed position.
       Do not repeat a rejected route or an unsuccessful attack without new evidence. Stop after act is accepted.
     tool_act: Call act with one Axis action and stop when accepted.
 
@@ -102,7 +112,9 @@ prompts:
       You are the Axis strategic commander. Select one coherent operation that increases final Axis VP through a
       combination of the active scenario's scoring opportunities, Allied losses, or necessary preparation. July uses supplied
       scoring columns, September actual mine clearance, and October legal west withdrawal after turn 10.
-      Do not issue moves. Return JSON only. The following is a July format example; do not copy its column objective
+      In July, the parent operation should normally be "compress Allied defense and form a sustainable breakthrough";
+      then propose only the child tasks needed by the current battlefield. A later scoring column is a model choice,
+      not a local default. Do not issue moves. Return JSON only. The following is a July format example; do not copy its column objective
       into September or October, where target_column must be null:
       Example: {"type":"strategic_intent","operation":"chosen_breakthrough","intent_type":"advance","sector":"","target_hex":"","target_column":"<chosen column: integer>","objective_type":"scoring_frontier","required_support":["supply","screen"],"priority":["keep the selected force supplied","evaluate route access"],"priority_units":["axis-unit-id"],"success_condition":"a supplied Axis ground unit reaches the model-selected scoring frontier","fallback_condition":"reconsider the operation if its expected benefit no longer justifies the risk","abort_condition":"the selected operation is no longer feasible"}
       Angle-bracket values are format placeholders, not recommendations. Replace numeric placeholders with JSON numbers,
@@ -127,7 +139,8 @@ prompts:
       not strings. Choose operation, targets, units and risk thresholds from evidence; do not copy example policies.
       Do not issue individual actions. Return JSON only. Complete July-format example:
       Example: {"type":"open_goal_plan","operation":"chosen_breakthrough","campaign_goal":{"id":"campaign","title":"Increase Axis VP","goal_type":"scenario_result","subject_side":"axis","metric":"axis_vp","relation":"at_least","target":"<chosen campaign VP: number>","evaluation_scope":"game_end","rationale":"<evidence for the chosen campaign target>"},"primary_goal":{"id":"primary","title":"Reach the model-selected scoring frontier","goal_type":"scoring_frontier","priority":1,"subject_side":"axis","metric":"scoring_frontier","relation":"at_least","target":"<chosen column: integer>","evaluation_scope":"turn_end","target_column":"<same chosen column: integer>","target_hex":"","target_units":[],"expected_vp_delta":null,"rationale":"<evidence for the chosen route and target>","observable_conditions":["Axis ground unit is supplied at the selected frontier"],"failure_conditions":["the operation cannot maintain scoring supply"],"switch_conditions":["observed outcomes invalidate the route's benefit"]},"supporting_goals":[],"operation_policy":{"policy_version":1,"main_axis":"flexible","minimum_attack_odds":"<chosen odds column from the CRT>","risk_posture":"balanced","supply_policy":"<model-selected supply policy>","reserve_policy":"<model-selected reserve policy>","allow_low_odds_when":[]},"task_plan":{"parent":{"id":"campaign_task","title":"Model-selected supplied breakthrough","completion_condition":"a supplied Axis unit achieves the selected frontier","failure_condition":"the selected operation is no longer feasible"},"children":[{"id":"supply_route","type":"supply","title":"Maintain supply for the selected force","purpose":"keep the beneficiary force supplied","dependencies":[],"assigned_unit_ids":["axis-supply-unit-id"],"observable_completion_condition":"the selected force retains supply","observable_failure_condition":"supply cannot be restored within the task window","completion_criteria":{"all":[{"metric":"unit_supply","relation":"at_least","target":1,"beneficiary_unit_ids":["axis-ground-id"],"evaluation_scope":"turn_end"}]},"applicable_phases":["initial_movement","supply_movement"],"target_column":null,"target_hex":"","next_action":"<next action justified by current evidence>"}]}}
-      The parent task is the operation. Propose 1-6 child tasks that fit this position; you may invent a task
+      The parent task is the operation. For July Axis, make the parent operation the defense-compression and
+      sustainable-breakthrough operation. Propose 1-6 child tasks that fit this position; you may invent a task
       type such as maneuver, isolate, supply, screen, clear_route, mine_clearance, exit_west, exploit, or consolidate when it better describes
       the plan. Give each task a unique id, type, purpose, dependencies, assigned_unit_ids, observable completion
       and failure conditions, applicable phases, target location or column, and next action. Mark prerequisites as
@@ -155,10 +168,21 @@ prompts:
       actual turn boundary; use game_end for maintenance until final victory. All referenced predicates must use
       the contract's scope or a later one. Keep location and supply separate and name the actual beneficiaries.
       Full child example (replace placeholders with current ids and a model-selected integer column):
-      {"id":"supplied_position","type":"hold_position","title":"Hold my selected position with supply","assigned_unit_ids":["axis-ground-id"],"target_column":"<chosen integer column>","acceptance_contract":{"evaluation_scope":"turn_end","obligations":[{"description":"Occupy the selected column at settlement","condition_ids":["location"]},{"description":"The same force retains supply at settlement","condition_ids":["supply"]}]},"completion_criteria":{"all":[{"id":"location","metric":"position","relation":"at_least","target":1,"unit_ids":["axis-ground-id"],"target_region":{"column":"<same integer column>"},"evaluation_scope":"turn_end"},{"id":"supply","metric":"unit_supply","relation":"at_least","target":1,"beneficiary_unit_ids":["axis-ground-id"],"evaluation_scope":"turn_end"}]},"failure_criteria":{"any":[{"metric":"surviving_unit_count","relation":"at_most","target":0,"unit_ids":["axis-ground-id"],"evaluation_scope":"immediate"}]},"next_action":"<action justified by current evidence>"}
+      For July Axis, also include task_role (recon, concentrate, screen, breach, blocker_reduction, supply,
+      flank, exploit, consolidate or reserve) and operation_stage (compress_defense, breach_window,
+      exploit_frontier or consolidate_frontier). These fields describe the operation; they do not force
+      the task order, assign a fixed route, or require a combat action.
+      {"id":"supplied_position","type":"hold_position","task_role":"consolidate","operation_stage":"consolidate_frontier","title":"Hold my selected position with supply","assigned_unit_ids":["axis-ground-id"],"target_column":"<chosen integer column>","acceptance_contract":{"evaluation_scope":"turn_end","obligations":[{"description":"Occupy the selected column at settlement","condition_ids":["location"]},{"description":"The same force retains supply at settlement","condition_ids":["supply"]}]},"completion_criteria":{"all":[{"id":"location","metric":"position","relation":"at_least","target":1,"unit_ids":["axis-ground-id"],"target_region":{"column":"<same integer column>"},"evaluation_scope":"turn_end"},{"id":"supply","metric":"unit_supply","relation":"at_least","target":1,"beneficiary_unit_ids":["axis-ground-id"],"evaluation_scope":"turn_end"}]},"failure_criteria":{"any":[{"metric":"surviving_unit_count","relation":"at_most","target":0,"unit_ids":["axis-ground-id"],"evaluation_scope":"immediate"}]},"next_action":"<action justified by current evidence>"}
       Set acceptance_contract.mode to "maintain" for uninterrupted maintenance (observed breaches remain recorded),
       or "at_settlement" for conditions required only at the chosen boundary. Example: {"mode":"maintain","evaluation_scope":"game_end","obligations":[{"description":"Maintain force supply throughout","condition_ids":["supply"]}]}.
       Invalid or incomplete predicates remain unverified. Correct their coverage at the next normal strategic request.
+      In July only, the local system reserves one of the six child slots for an observation_only scoring-anchor
+      monitor; propose up to five execution tasks when scoring_anchor_policy is july_terminal_v1. This monitor
+      records the best actually supplied frontier and its subsequent loss. It is not a prescribed route, unit
+      assignment, stopping column or action veto. A temporary frontier gain is not banked VP. Compare preserving
+      the supplied frontier, supporting it, further advance and alternative VP gains using final-game outcomes.
+      When the monitor reports lost, reconsider your tasks using its evidence; you may justify a different
+      operation, but the previous scoring evidence and target remain recorded. It settles only at game end.
     force_allocator_system: |-
       Respect each task's acceptance_contract; executor assignment is not proof that beneficiary conditions hold.
       You allocate Axis forces to the current Axis operation. Use only active Axis unit ids. Allocate a supplied
@@ -180,6 +204,10 @@ prompts:
       Allied mines; October scores legal west exits after turn 10. Preparation is not scored as an exit.
       Choose your own targets and order, preserving supply and useful support. Recommendations are bounded
       suggestions, not all legal destinations or mandatory routes. Do not confuse opportunity_score with VP.
+      In July, read any observation_only scoring-anchor task as shared evidence, not a unit assignment. Secured
+      means currently scoring-eligible, not guaranteed safe; reached without supply is not secured. Before holding
+      or moving, compare preserving, supporting or restoring the frontier with further advance or other VP gains.
+      Do not assign units to the monitor or treat it as a reason to reject an otherwise legal action.
       Return exactly one JSON object, not an array of plans. Include every actionable unit exactly once.
       Use only task_ids listed for that unit, or null when none is assigned. Never copy placeholder ids.
       Example: {"type":"phase_unit_plan","unit_orders":[{"unit":"<unit id from actionable_units>","task_id":null,"disposition":"move","target_hex":"<chosen map hex>","role":"support","priority":1,"reason":"supports the current scenario task"},{"unit":"<another listed unit>","task_id":null,"disposition":"hold","target_hex":"","role":"reserve","priority":2,"reason":"preserves a useful reserve"}]}
@@ -221,12 +249,13 @@ prompts:
     context_hierarchical: >-
       Follow the active Axis operation. In September prioritize actual mine-clearance progress; in October prioritize
       force preservation and verified withdrawal access, then legal west exits after turn 10. Do not import July columns.
-      In July, the parent persists across turns and its column children are
-      progress checkpoints, not stopping orders. Compare the locally verified best_scoring_routes, then choose the
-      main axis, spearhead unit, and action order. Prefer the farthest legal destination that remains supplied or
-      partially supplied, even when it crosses several checkpoints in one move. If the assigned spearhead has no
-      route, use a dynamically recommended eligible unit in the same phase. If no scoring route exists, work on
-      supply, support, or blocker tasks instead of repeating a failed entry.
+      In July, the parent persists across turns as the defense-compression and sustainable-breakthrough operation.
+      Its children are model-selected tasks, not a fixed checklist. Compare the locally verified best_scoring_routes,
+      then choose the main axis, spearhead unit, and action order. Prefer a legal destination that remains supplied
+      and improves the chosen operation, even when it crosses several possible scoring columns in one move. If the
+      assigned force has no route, choose reconnaissance, concentration, supply, blocker reduction, flank protection,
+      consolidation or another evidence-backed task instead of repeating a failed entry. Select 36/37/38 only when
+      the current evidence supports that exploitation target; do not treat those columns as mandatory.
     decision_intent: Choose one Axis action and use tools when route, supply or odds are uncertain.
     decision_candidates: Prefer the strongest legal candidate that advances the current Axis task.
     review_intent: Repair rejected Axis actions from current rule evidence and do not repeat them.

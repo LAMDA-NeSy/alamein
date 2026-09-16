@@ -75,6 +75,8 @@ pnpm run ai:full-game -- \
 
 `config/` 只包含 YAML：`agent_methods.yaml` 配置方法和工具组合；`agent_tools.yaml` 使用 `name`、`description` 和 `parameters` 定义工具；`ai_models.yaml` 配置模型；`ai_config.yaml` 配置 API 兼容入口与上下文边界；`agent_tool_profiles.schema.yaml` 约束工具组合。
 
+真实模型档案包括 `claude_opus_51`（Anthropic Messages）和 `gpt_6`（OpenAI-compatible），均需显式指定，并分别使用 `ANTHROPIC_API_KEY` 与 `OPENAI_API_KEY`。对应的 checker 档案是 `claude_opus_51_checker` 与 `gpt_6_checker`；默认仍为本地 Mock。
+
 `config/research_metrics.yaml` 固定论文评估口径。`ai:metrics` 统一输出 `result_metrics`、`tactical_metrics`、`reliability_metrics`、`efficiency_metrics`、`judge_metrics`、`baseline_comparison`、`scenario_metrics` 和 `ranking_eligibility`。July 只计算有效计分列，September 只计算规则引擎确认的清雷，October 只计算合法西撤和撤退 VP；Allies 使用 Axis 计分威胁和防守指标，不使用己方最东位置作为主要效果指标。命令支持重复 `--baseline`，只有同场景、同外部阵营、同 seed 和 replicate 的 rules-vs-rules 完整日志才会生成配对基准差值。正式排名使用已确认完整且带 benchmark artifact 清单的样本；重试和方法自身 fallback 属于端到端方法的一部分，可以进入排名，但必须同时报告 `sample_status`、传输失败、恢复次数和 fallback 率。部分对局与 Harness 错误仍被排除。`ai:compare` 按 `seed + replicate` 输出配对 VP 差值，异常或重复配对的差值为空。
 
 在提交排名或比较结果前，可以只使用转录日志运行一致性审计：
