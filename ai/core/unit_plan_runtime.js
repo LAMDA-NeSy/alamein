@@ -123,10 +123,13 @@ function planControlFingerprint(input, phaseIntent) {
     strategic_intent: input.strategicIntent || null,
     allocation: input.forceAllocation || null,
     parent: operation.task_plan?.parent?.id || null,
+    execution_constraints: operation.task_execution_summary || operation.task_plan?.execution_summary || null,
     tasks: tasks.map((task) => ({
       id: task.id, status: task.status, priority: task.priority,
       assigned_units: task.assigned_units, target: task.target,
-      target_hex: task.target_hex, blocked_reason: task.blocked_reason
+      target_hex: task.target_hex, blocked_reason: task.blocked_reason,
+      execution_blocked: task.execution_blocked, blocking_mode: task.blocking_mode,
+      repeat_allowed: task.repeat_allowed, blocked_targets: task.blocked_targets
     })).sort((left, right) => String(left.id).localeCompare(String(right.id)))
   }))).digest("hex");
 }
@@ -309,6 +312,19 @@ function buildPlanningSnapshot(config, input, phaseIntent, history, settings) {
   }
   const remaining = input.phaseStatus ? new Set(input.phaseStatus.remaining_units) : null;
   const tasks = input.operationState?.task_plan?.children || input.operationState?.active_tasks || [];
+  const executionConstraints = input.operationState?.task_execution_summary
+    || input.operationState?.task_plan?.execution_summary
+    || { blocked_tasks: [], forbidden_targets: [], recent_execution_errors: [], required_replanning: false };
+  const forbiddenTargets = Array.isArray(executionConstraints.forbidden_targets)
+    ? executionConstraints.forbidden_targets : [];
+  const isForbiddenTarget = (hex, unitId) => {
+    if (!hex) return false;
+    const normalized = String(hex);
+    return forbiddenTargets.some((entry) => String(entry.target_hex || "") === normalized
+      && (!entry.unit_id || entry.unit_id === unitId));
+  };
+  const executableTasks = tasks.filter((task) => task.status === "active"
+    && task.execution_blocked !== true && task.repeat_allowed !== false);
   const units = actionableUnits(built, input.side)
     .filter((unit) => !remaining || remaining.has(unit.id))
     .filter((unit) => !settings.focus_units || settings.focus_units.includes(unit.id))
@@ -317,21 +333,31 @@ function buildPlanningSnapshot(config, input, phaseIntent, history, settings) {
     if (!supplyNetworks.has(unit.side)) {
       supplyNetworks.set(unit.side, RulesEngine.buildSupplyNetwork(built.ctx, unit.side));
     }
-    const requestedTaskTarget = tasks.find((task) => task.status === "active"
-      && task.assigned_units?.includes(unit.id) && task.target_hex)?.target_hex;
-    const taskTarget = RulesEngine.onMap(requestedTaskTarget) ? RulesEngine.normalizeHex(requestedTaskTarget) : "";
-    const target = taskTarget || (RulesEngine.onMap(phaseIntent.target_hex) ? RulesEngine.normalizeHex(phaseIntent.target_hex) : moveTarget(built.ctx, unit, built.allUnits));
+    const requestedTaskTarget = executableTasks.find((task) =>
+      task.assigned_units?.includes(unit.id) && task.target_hex)?.target_hex;
+    const rawTaskTarget = RulesEngine.onMap(requestedTaskTarget) ? RulesEngine.normalizeHex(requestedTaskTarget) : "";
+    const taskTarget = isForbiddenTarget(rawTaskTarget, unit.id) ? "" : rawTaskTarget;
+    const rawPhaseTarget = RulesEngine.onMap(phaseIntent.target_hex) ? RulesEngine.normalizeHex(phaseIntent.target_hex) : "";
+    const phaseTarget = isForbiddenTarget(rawPhaseTarget, unit.id) ? "" : rawPhaseTarget;
+    const localTargetCandidate = moveTarget(built.ctx, unit, built.allUnits);
+    const localTarget = isForbiddenTarget(localTargetCandidate, unit.id) ? unit.hex : localTargetCandidate;
+    const target = taskTarget || phaseTarget || localTarget;
     const options = unitOptions(built, unit, { ...phaseIntent, target_hex: target,
-      verified_task_target: !!taskTarget || RulesEngine.onMap(phaseIntent.target_hex) }, history, settings);
+      verified_task_target: !!taskTarget }, history, settings);
     return {
       unit: unit.id,
-      task_ids: tasks.filter((task) => (task.assigned_units || task.units || []).includes(unit.id)
+      task_ids: executableTasks.filter((task) => (task.assigned_units || task.units || []).includes(unit.id)
         && !["completed", "failed", "skipped"].includes(task.status)).map((task) => task.id),
       hex: unit.hex,
       recommendation_target: target,
-      recommendation_source: taskTarget ? "task_target" : RulesEngine.onMap(phaseIntent.target_hex) ? "phase_intent" : "local_candidate_search",
-      target_corrections: [requestedTaskTarget, phaseIntent.target_hex].filter((hex) => hex && !RulesEngine.onMap(hex))
-        .map((hex) => ({ requested: hex, correction: "invalid_recommendation_target_ignored" })),
+      recommendation_source: taskTarget ? "task_target" : phaseTarget ? "phase_intent" : "local_candidate_search",
+      target_corrections: [
+        ...[requestedTaskTarget, phaseIntent.target_hex].filter((hex) => hex && !RulesEngine.onMap(hex))
+          .map((hex) => ({ requested: hex, correction: "invalid_recommendation_target_ignored" })),
+        ...[rawTaskTarget, rawPhaseTarget, localTargetCandidate].filter((hex) => hex && isForbiddenTarget(hex, unit.id))
+          .map((hex) => ({ requested: hex, correction: "execution_blocked_target_ignored" }))
+      ],
+      forbidden_targets: forbiddenTargets.filter((entry) => !entry.unit_id || entry.unit_id === unit.id),
       kind: unit.kind || "ground",
       attack: Number(unit.attack || 0),
       defense: Number(unit.defense ?? unit.attack ?? 0),
@@ -347,10 +373,10 @@ function buildPlanningSnapshot(config, input, phaseIntent, history, settings) {
         applicable_phase: input.phase,
         remaining_task_phases_this_turn: RulesEngine.turnSequence(built.ctx).slice(
           Math.max(0, RulesEngine.turnSequence(built.ctx).indexOf(input.phase)))
-          .filter((phase) => phase.startsWith(`${input.side}_`) && tasks.some((task) => task.assigned_units?.includes(unit.id)
+          .filter((phase) => phase.startsWith(`${input.side}_`) && executableTasks.some((task) => task.assigned_units?.includes(unit.id)
             && (!task.phase_scope?.length || task.phase_scope.includes(phase) || task.phase_scope.includes(phaseKind(phase))))),
         future_eligibility: "conditional; recheck actual rules state at each phase start",
-        dependent_units: tasks.filter((task) => task.assigned_units?.includes(unit.id)).flatMap((task) => task.assigned_units || []),
+        dependent_units: executableTasks.filter((task) => task.assigned_units?.includes(unit.id)).flatMap((task) => task.assigned_units || []),
         routes: options.map((option) => ({ target_hex: option.destination, path: option.action.path,
           movement_cost: option.action.spent, projected_supply: option.projected_supply, risks: option.risks })),
         search: { exhaustive: false, max_expansions_per_mode: Number(settings.max_recommendation_expansions || 32),
@@ -380,11 +406,12 @@ function buildPlanningSnapshot(config, input, phaseIntent, history, settings) {
       strategic_goal: input.strategicIntent?.goal_plan?.primary_goal || input.operationState?.goal_plan?.primary_goal || null,
       last_action_effect: input.operationState?.tactical_summary?.last_action_effect || null,
       tactical_opportunities: input.operationState?.tactical_summary?.tactical_opportunities || [],
+      execution_constraints: executionConstraints,
       reasoning_memory: input.reasoningMemory || null,
       turn: Number(input.turn),
       phase: input.phase,
       side: input.side,
-      active_task_ids: input.operationState?.active_tasks?.map((task) => task.id) || [],
+      active_task_ids: executableTasks.map((task) => task.id),
       tasks: tasks.map((task) => ({
         id: task.id, status: task.status, type: task.model_task_type || task.type,
         title: task.title, target_hex: task.target_hex, target: task.target,
@@ -392,7 +419,10 @@ function buildPlanningSnapshot(config, input, phaseIntent, history, settings) {
         scoring_anchor_state: task.scoring_anchor_state, scoring_anchor_loss_count: task.scoring_anchor_loss_count,
         progress_evidence: task.progress_evidence,
         completion_condition: task.completion_condition, next_action: task.next_action,
-        phase_scope: task.phase_scope, progress: task.progress, assigned_units: task.assigned_units
+        phase_scope: task.phase_scope, progress: task.progress, assigned_units: task.assigned_units,
+        execution_blocked: task.execution_blocked, blocking_mode: task.blocking_mode,
+        repeat_allowed: task.repeat_allowed, last_execution_error: task.last_execution_error,
+        blocked_targets: task.blocked_targets
       })),
       phase_intent: phaseIntent,
       movement_phase_policy: "rule_complete",
@@ -422,10 +452,14 @@ function normalizeUnitPlan(raw, snapshot, source = "model") {
       try {
         targetHex = RulesEngine.normalizeHex(item.target_hex || item.targetHex || "");
         if (!RulesEngine.onMap(targetHex)) throw new Error("target outside map");
+        if ((eligible.get(item.unit)?.forbidden_targets || []).some((entry) => String(entry.target_hex || "") === targetHex)) {
+          targetHex = "";
+          throw new Error("target is execution-blocked and cannot be retried");
+        }
       }
-      catch {
+      catch (error) {
         status = "needs_repair";
-        invalidOrders.push({ unit: item.unit, reason: "invalid target hex" });
+        invalidOrders.push({ unit: item.unit, reason: error.message || "invalid target hex" });
       }
     }
     if (disposition === "exit_west" && !eligible.get(item.unit).legal_exit_west) {
@@ -711,6 +745,10 @@ function createUnitPlanRuntime({ config, runtime, client, bridge, sessionId, dec
       let targetHex;
       try { targetHex = RulesEngine.normalizeHex(parsed.target_hex || parsed.targetHex || ""); }
       catch { return { disposition: "hold", error: "invalid repair target", api: request.result, requested: true }; }
+      if (plan.actionable_units.find((unit) => unit.unit === order.unit)?.forbidden_targets
+        ?.some((entry) => String(entry.target_hex || "") === targetHex)) {
+        return { disposition: "hold", error: "repair target is execution-blocked and cannot be retried", api: request.result, requested: true };
+      }
       return { disposition: "move", target_hex: targetHex, api: request.result, raw: parsed, requested: true };
     }
     catch (error) {
@@ -865,11 +903,15 @@ function createUnitPlanRuntime({ config, runtime, client, bridge, sessionId, dec
       }
       const prepared = prepare(input, phaseIntent);
       let targetHex = order.target_hex;
+      const forbiddenTarget = plan.actionable_units.find((unit) => unit.unit === order.unit)?.forbidden_targets
+        ?.some((entry) => String(entry.target_hex || "") === String(targetHex || ""));
       const cachedRoute = plan.actionable_units.find((unit) => unit.unit === order.unit)
         ?.recommended_actions?.find((action) => action.destination === targetHex);
       const reusableRoute = cachedRoute && RulesEngine.checkMove(bridge.current().built.ctx,
         order.unit, cachedRoute.path, { mode: cachedRoute.mode }).legal ? cachedRoute : null;
-      let result = order.status === "needs_repair"
+      let result = forbiddenTarget
+        ? { accepted: false, reason: "execution-blocked target cannot be retried" }
+        : order.status === "needs_repair"
         ? { accepted: false, reason: "unit plan target requires repair" }
         : bridge.executeTool("act", { action: order.disposition === "exit_west"
           ? { type: "exit_west", unit: order.unit }

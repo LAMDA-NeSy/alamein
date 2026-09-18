@@ -95,7 +95,7 @@ test("replay movement phases have no artificial action budget", () => {
   replay.state.phase = "axis_supply_movement";
   assert.equal(replay.debugPhaseActionLimit("axis"), 0);
   replay.state.phase = "axis_combat";
-  assert.equal(replay.debugPhaseActionLimit("axis"), 3);
+  assert.equal(replay.debugPhaseActionLimit("axis"), 0);
 });
 
 test("planning snapshot exposes computed supply for every eligible unit", () => {

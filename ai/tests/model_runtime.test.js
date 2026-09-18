@@ -83,6 +83,28 @@ test("mock planning uses current scoring and allowed intents without a fixed map
   finally { await closeModelRuntime(runtime); }
 });
 
+test("mock strategic routing follows structured request and side, not prompt wording", async () => {
+  const runtime = createModelRuntime("mock_primary", { run_id: "structured-planning-routing" });
+  try {
+    const client = createChatCompletionsClient(runtime);
+    const { resolveSidePrompt } = require("../core/prompt_registry.js");
+    for (const scenario of ["july", "september", "october"]) for (const side of ["axis", "allies"]) {
+      for (const discriminator of [{ planning_request: "goal_plan" }, { goal_management: { protocol: "side-aware-goal-v2" } }]) {
+        const result = await client.complete({ audit_stage: "strategic", messages: [
+          { role: "system", content: resolveSidePrompt(side, "external.goal_manager_system") },
+          { role: "user", content: JSON.stringify({ ...discriminator, context: { game: { scenario, active_side: side },
+            victory: { current_scoring: { july_advance: { next_scoring_column: 38 } } } } }) }
+        ] });
+        const plan = JSON.parse(result.response_json.choices[0].message.content);
+        assert.equal(plan.type, "strategic_intent");
+        assert.equal(plan.primary_metric, { july: "scoring_frontier", september: "mine_clearance", october: "withdrawal_vp" }[scenario]);
+        assert.equal(plan.relation, side === "allies" ? "keep_below" : "at_least");
+        assert.equal(plan.target_column, scenario === "july" ? 38 : null);
+      }
+    }
+  } finally { await closeModelRuntime(runtime); }
+});
+
 test("model profiles normalize defaults and reject invalid entries", () => {
   const primary = resolveModel("mock_primary");
   assert.equal(primary.profile_id, "mock_primary");

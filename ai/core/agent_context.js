@@ -64,9 +64,24 @@ function compactGoalPlan(plan) {
   if (!plan || typeof plan !== "object") return plan;
   return {
     ...pickDefined(plan, ["type", "protocol", "side", "operation", "strategy_mode", "operation_policy", "hard_facts", "grounding", "source"]),
+    persistent_operation: compactPersistentOperation(plan.persistent_operation),
+    current_subgoal: compactGoal(plan.current_subgoal),
     campaign_goal: compactGoal(plan.campaign_goal),
     primary_goal: compactGoal(plan.primary_goal),
     supporting_goals: boundedList(plan.supporting_goals, 4).map(compactGoal)
+  };
+}
+
+function compactPersistentOperation(operation) {
+  if (!operation || typeof operation !== "object") return operation;
+  return {
+    ...pickDefined(operation, ["id", "title", "status", "scenario", "side", "revision", "last_change_reason"]),
+    original_goal: operation.original_goal
+      ? pickDefined(operation.original_goal, ["campaign_goal", "opening_subgoal", "fixed_evaluation"])
+      : null,
+    current_subgoal: compactGoal(operation.current_subgoal),
+    subgoal_history: boundedList(operation.subgoal_history, 8).map(compactGoal),
+    operation_history: boundedList(operation.operation_history, 4)
   };
 }
 
@@ -83,30 +98,41 @@ function compactStrategicIntent(intent, includeGoalPlan = true) {
 }
 
 function compactTask(task) {
-  return pickDefined(task, [
+  const result = pickDefined(task, [
     "id", "type", "model_task_type", "title", "priority", "depends_on", "target_column",
     "task_class", "block_conditions", "progress_metric", "progress_value",
     "soft_depends_on", "conditional_dependencies", "dependency_status", "target_hex", "target_region", "target_units",
     "sequence_index", "checkpoint_only", "allows_overshoot", "requires_scoring_supply", "required_for_parent",
     "assigned_units", "compatible_units", "completion_condition", "failure_condition", "phase_scope",
     "progress", "status", "next_action", "last_blocked_reason", "source",
+    "execution_blocked", "blocking_mode", "execution_errors", "blocked_targets", "repeat_allowed", "last_execution_error",
     "activation_reason", "tactical_opportunities", "combat_preparation", "preparation_actions",
+    "candidate_blockers", "candidate_unit_ids", "activation_policy", "completion_evaluator", "blocker_resolution",
+    "task_role", "operation_stage",
     "current_metrics", "progress_evidence", "normalization_corrections",
     "observation_only", "scoring_anchor_state", "scoring_anchor_loss_count", "scoring_anchor_history",
-    "completion_criteria", "failure_criteria", "acceptance_contract", "completion_evidence", "checker_assessment", "checker_suggested_switch"
+    "completion_criteria", "failure_criteria", "acceptance_contract", "completion_evidence", "checker_assessment", "checker_suggested_switch",
+    "wait_state", "review_request", "review_window", "stagnant_windows", "action_window", "acceptance_diagnostics", "target_role"
   ]);
+  if (task?.candidate_blockers) result.candidate_blockers = boundedList(task.candidate_blockers, 4);
+  if (task?.candidate_unit_ids) result.candidate_unit_ids = boundedList(task.candidate_unit_ids, 12);
+  return result;
 }
 
 function compactTaskPlan(plan) {
   if (!plan || typeof plan !== "object") return plan;
   return {
-    ...pickDefined(plan, ["type", "protocol", "side", "normalized", "last_action_feedback", "last_task_events"]),
+    ...pickDefined(plan, ["type", "protocol", "side", "normalized", "last_action_feedback", "last_task_events", "review_policy", "monitor_policy", "execution_summary", "breakthrough_access_policy", "breakthrough_planning"]),
     parent: pickDefined(plan.parent, [
       "id", "title", "objective", "completion_condition", "failure_condition",
       "target_column", "subject_side", "metric", "relation", "evaluation_scope",
-      "state", "started_turn", "started_vp", "partial_success", "goal_progress_evidence"
+      "state", "started_turn", "started_vp", "partial_success", "goal_progress_evidence",
+      "persistent_operation", "current_subgoal", "operation_revision"
     ]),
+    persistent_operation: compactPersistentOperation(plan.persistent_operation),
+    current_subgoal: compactGoal(plan.current_subgoal),
     children: boundedList(plan.children, 6).map(compactTask),
+    monitors: boundedList(plan.monitors, 6).map(compactTask),
     task_switches: boundedList(plan.task_switches, 8)
   };
 }
@@ -135,7 +161,7 @@ function compactPhaseDispatch(dispatch) {
       "allowed_unit_ids", "eligible_units_at_phase_start", "dynamic_spearhead_unit_ids",
       "dynamic_spearhead_reassignment", "execution_source", "tactical_opportunities",
       "upcoming_combat_opportunities", "preparation_actions", "recommended_preparation_unit_ids",
-      "blocked_tasks"
+      "blocked_tasks", "breakthrough_planning"
     ]),
     tasks: boundedList(dispatch.tasks, 3).map(compactTask),
     frontier_breakthrough: compactFrontierBreakthrough(dispatch.frontier_breakthrough)
@@ -150,7 +176,8 @@ function compactTacticalSummary(summary) {
       "remaining_action_opportunities", "current_vp", "baseline_vp",
       "vp_delta_from_baseline", "next_scoring_change", "must_process_units",
       "can_hold_units", "should_not_act_units", "next_required_task",
-      "replanning_trigger", "allocation_corrections"
+      "replanning_trigger", "allocation_corrections", "scoring_recovery", "remaining_phase_windows", "combat_preparation",
+      "blocked_tasks", "forbidden_targets", "recent_execution_errors", "required_replanning"
     ]),
     active_tasks: boundedList(summary.active_tasks, 4).map(compactTask),
     scoring_anchor: summary.scoring_anchor ? compactTask(summary.scoring_anchor) : null,
@@ -176,7 +203,8 @@ function compactOperationState(state) {
     ...pickDefined(state, [
       "version", "operation", "target_column", "operation_policy", "status", "target",
       "units", "phase", "phase_kind", "current_vp", "next_required_task", "progress",
-      "execution_brief", "warnings", "source"
+      "execution_brief", "warnings", "source", "persistent_operation", "current_subgoal", "operation_revision",
+      "task_execution_summary"
     ]),
     tactical_summary: compactTacticalSummary(state.tactical_summary),
     task_plan: compactTaskPlan(state.task_plan),

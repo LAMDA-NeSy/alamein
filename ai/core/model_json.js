@@ -29,9 +29,11 @@ function unwrap(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) break;
     // Only an unambiguous envelope is normalized. Never infer missing fields.
     const keys = Object.keys(value);
-    if (keys.length !== 1 || !["answer", "final_answer"].includes(keys[0])) break;
-    wrappers.push(keys[0]);
-    value = value[keys[0]];
+    const envelopes = keys.filter((key) => ["answer", "final_answer"].includes(key));
+    if (envelopes.length !== 1 || keys.some((key) => key !== envelopes[0]
+      && !(key === "operational_note" && typeof value[key] === "string"))) break;
+    wrappers.push(envelopes[0]);
+    value = value[envelopes[0]];
     if (typeof value === "string") {
       try { value = JSON.parse(value); } catch { return { value: null, wrappers }; }
     }
@@ -40,6 +42,9 @@ function unwrap(value) {
 }
 
 function parseModelObject(result, accepts = () => true, label = "model") {
+  if (result?.response_json?.choices?.[0]?.finish_reason === "length") {
+    return { error: `${label} output truncated at token limit`, parse_status: "truncated" };
+  }
   const message = result?.response_json?.choices?.[0]?.message || {};
   for (const source of ["content", "reasoning_content"]) {
     const candidates = objectsInText(message[source]).map(unwrap).filter(({ value }) =>

@@ -6,7 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const RulesEngine = require("../../rule_engine.js");
-const { goalIntent, groundGoalPlan, localGoalPlan } = require("../core/goal_manager.js");
+const { goalIntent, groundGoalPlan, localGoalPlan, goalFingerprint } = require("../core/goal_manager.js");
 
 const state = JSON.parse(fs.readFileSync(path.join(__dirname, "../../scenarios/july.json"), "utf8"));
 const rules = JSON.parse(fs.readFileSync(path.join(__dirname, "../../rules_el_alamein.json"), "utf8"));
@@ -147,4 +147,46 @@ test("Allied campaign target is normalized from generic target and drives recove
   assert.equal(plan.primary_goal.target_column, 37);
   assert.equal(plan.strategy_mode, "recover_result");
   assert.equal(goalIntent(plan).intent.type, "pressure");
+});
+
+test("goal fingerprint ignores presentation ids and titles", () => {
+  const first = { id: "breakthrough_to_35", title: "Reach the first frontier", goal_type: "breakthrough_step",
+    subject_side: "axis", metric: "scoring_frontier", relation: "at_least", target: 35,
+    target_column: 35, evaluation_scope: "turn_end" };
+  const renamed = { ...first, id: "restore_scoring_anchor", title: "Restore the scoring anchor" };
+  assert.equal(goalFingerprint(first), goalFingerprint(renamed));
+});
+
+test("July checkpoint changes stay inside one persistent operation", () => {
+  const first = groundGoalPlan({
+    operation: "breakthrough_to_35",
+    primary_goal: { id: "breakthrough_to_35", title: "Reach column 35", goal_type: "breakthrough_step",
+      metric: "scoring_frontier", relation: "at_least", target: 35, target_column: 35 }
+  }, { publicContext: publicContext(), state, side: "axis", ctx });
+  const second = groundGoalPlan({
+    operation: "breakthrough_to_37",
+    primary_goal: { id: "breakthrough_to_37", title: "Reach column 37", goal_type: "breakthrough_step",
+      metric: "scoring_frontier", relation: "at_least", target: 37, target_column: 37 }
+  }, { publicContext: publicContext(), state, side: "axis", ctx,
+    previousOperation: first.persistent_operation, replanReason: "operational_goal_completed" });
+  assert.equal(first.persistent_operation.id, "sustainable_breakthrough");
+  assert.equal(second.persistent_operation.id, first.persistent_operation.id);
+  assert.equal(second.persistent_operation.revision, first.persistent_operation.revision + 1);
+  assert.equal(second.persistent_operation.subgoal_history.length, 1);
+  assert.equal(second.persistent_operation.subgoal_history[0].target_column, 35);
+  assert.equal(second.current_subgoal.target_column, 37);
+});
+
+test("local fallback inherits the existing persistent operation", () => {
+  const first = groundGoalPlan({
+    operation: "model_breakthrough",
+    primary_goal: { id: "advance_to_35", title: "Advance to the next scoring opportunity",
+      metric: "scoring_frontier", relation: "at_least", target: 35, target_column: 35 }
+  }, { publicContext: publicContext(), state, side: "axis", ctx });
+  const fallback = localGoalPlan({ publicContext: publicContext(), state, side: "axis",
+    previousOperation: first.persistent_operation, replanReason: "provider_error" });
+  assert.equal(fallback.source, "local_default");
+  assert.equal(fallback.persistent_operation.id, first.persistent_operation.id);
+  assert.equal(fallback.persistent_operation.original_goal.opening_subgoal.target_column, 35);
+  assert.equal(fallback.persistent_operation.current_subgoal.parent_operation, first.persistent_operation.id);
 });

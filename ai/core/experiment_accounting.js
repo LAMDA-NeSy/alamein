@@ -55,7 +55,7 @@ function attachRuntimeAccounting(transcript, runtimes) {
 function refreshRuntimeAccounting(transcript) {
   const runtimes = bindings.get(transcript);
   if (!runtimes) return;
-  transcript.accounting_version = "all-runtime-requests-v2-delivery-and-usage";
+  transcript.accounting_version = "all-runtime-requests-v3-actual-planner-calls";
   transcript.model_usage_by_component = Object.fromEntries(Object.entries(runtimes).map(([name, runtime]) => [name, { ...runtime.usage }]));
   transcript.model_transport_by_component = Object.fromEntries(Object.entries(runtimes).map(([name, runtime]) => [name, runtime.transport]));
   transcript.model_usage = sumUsage(transcript.model_usage_by_component);
@@ -88,6 +88,7 @@ function refreshRuntimeAccounting(transcript) {
   }
   transcript.counts = {
     ...transcript.counts,
+    sae_plan_calls: records.filter((record) => ["strategic", "allocation"].includes(record.stage)).length,
     ...transportCounts(records),
     protocol_failures: new Set([
       ...records.filter((record) => record.protocol_failure).map((record) => record.request_id),
@@ -95,6 +96,7 @@ function refreshRuntimeAccounting(transcript) {
     ]).size,
     circuit_open_events: Object.values(runtimes).reduce((sum, runtime) => sum + Number(runtime.transport_health?.circuit_open_events || 0), 0)
   };
+  transcript.sae_plan_calls = transcript.counts.sae_plan_calls;
 }
 
 function recordedTransportCounts(transcript) {

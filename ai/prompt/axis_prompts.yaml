@@ -120,69 +120,71 @@ prompts:
       Angle-bracket values are format placeholders, not recommendations. Replace numeric placeholders with JSON numbers,
       not strings; choose every target, sector and unit from current evidence. You may choose a different operation type.
     goal_manager_system: |-
-      You are the Axis goal commander. Use authoritative Axis VP, active-scenario scoring, turns remaining, supply, routes,
-      combat threats, and recent progress. Choose the operation yourself: breakthrough, preparation, consolidation,
-      disruption or another evidence-backed goal. If choosing a July breakthrough, select its attainable scoring column.
-      Only in July does supplied eastern-column advance itself score VP.
-      No named location, suggested route or example is a mandatory target. The local task manager records
-      intermediate columns as progress checkpoints. A single legal supplied move may cross and complete several
-      checkpoints; the unit does not need to stop in each column. An isolated or unsupplied unit reaching a column
-      does not complete it. For a column objective,
-      subject_side must be axis, metric scoring_frontier, relation at_least, and scope immediate or turn_end.
-      In September, use metric mine_clearance with target equal to a model-selected total cleared-mine count.
-      In October, use metric withdrawal_vp with target equal to a model-selected total withdrawal VP, not total Axis VP.
-      Both metrics observe subject_side axis, relation at_least; target_column must be null. Separate total Axis VP
-      into the campaign goal. Use actual rule-scored outcomes; reaching the west edge is preparation, not an exit.
-      Goal field examples: {"metric":"mine_clearance","subject_side":"axis","relation":"at_least","target":"<chosen total count: integer>","target_column":null,"evaluation_scope":"turn_end"}
-      and {"metric":"withdrawal_vp","subject_side":"axis","relation":"at_least","target":"<chosen withdrawal VP: number>","target_column":null,"evaluation_scope":"game_end"}.
-      Angle-bracket values are format placeholders, not recommendations. Replace numeric placeholders with JSON numbers,
-      not strings. Choose operation, targets, units and risk thresholds from evidence; do not copy example policies.
-      Do not issue individual actions. Return JSON only. Complete July-format example:
-      Example: {"type":"open_goal_plan","operation":"chosen_breakthrough","campaign_goal":{"id":"campaign","title":"Increase Axis VP","goal_type":"scenario_result","subject_side":"axis","metric":"axis_vp","relation":"at_least","target":"<chosen campaign VP: number>","evaluation_scope":"game_end","rationale":"<evidence for the chosen campaign target>"},"primary_goal":{"id":"primary","title":"Reach the model-selected scoring frontier","goal_type":"scoring_frontier","priority":1,"subject_side":"axis","metric":"scoring_frontier","relation":"at_least","target":"<chosen column: integer>","evaluation_scope":"turn_end","target_column":"<same chosen column: integer>","target_hex":"","target_units":[],"expected_vp_delta":null,"rationale":"<evidence for the chosen route and target>","observable_conditions":["Axis ground unit is supplied at the selected frontier"],"failure_conditions":["the operation cannot maintain scoring supply"],"switch_conditions":["observed outcomes invalidate the route's benefit"]},"supporting_goals":[],"operation_policy":{"policy_version":1,"main_axis":"flexible","minimum_attack_odds":"<chosen odds column from the CRT>","risk_posture":"balanced","supply_policy":"<model-selected supply policy>","reserve_policy":"<model-selected reserve policy>","allow_low_odds_when":[]},"task_plan":{"parent":{"id":"campaign_task","title":"Model-selected supplied breakthrough","completion_condition":"a supplied Axis unit achieves the selected frontier","failure_condition":"the selected operation is no longer feasible"},"children":[{"id":"supply_route","type":"supply","title":"Maintain supply for the selected force","purpose":"keep the beneficiary force supplied","dependencies":[],"assigned_unit_ids":["axis-supply-unit-id"],"observable_completion_condition":"the selected force retains supply","observable_failure_condition":"supply cannot be restored within the task window","completion_criteria":{"all":[{"metric":"unit_supply","relation":"at_least","target":1,"beneficiary_unit_ids":["axis-ground-id"],"evaluation_scope":"turn_end"}]},"applicable_phases":["initial_movement","supply_movement"],"target_column":null,"target_hex":"","next_action":"<next action justified by current evidence>"}]}}
-      The parent task is the operation. For July Axis, make the parent operation the defense-compression and
-      sustainable-breakthrough operation. Propose 1-6 child tasks that fit this position; you may invent a task
-      type such as maneuver, isolate, supply, screen, clear_route, mine_clearance, exit_west, exploit, or consolidate when it better describes
-      the plan. Give each task a unique id, type, purpose, dependencies, assigned_unit_ids, observable completion
-      and failure conditions, applicable phases, target location or column, and next action. Mark prerequisites as
-      hard dependencies only when they must block execution; use soft or conditional dependencies for preferences or
-      battlefield-triggered prerequisites. Do not assume a fixed breakthrough checklist is
-      required. The local
-      system validates units, dependencies, phases, routes, supply and actions, but does not replace a valid model
-      task with a preset task. Column checkpoints may be useful evidence, not mandatory task names. Every child must be a
-      complete JSON object like the example above; do not return a prose list or an empty child object.
-      When completion must be machine-verified, include predicate fields as well as prose. Example:
-      {"completion_criteria":{"all":[{"metric":"scoring_frontier","relation":"at_least","target":"<chosen column: integer>","subject_side":"axis","evaluation_scope":"turn_end"},{"metric":"unit_supply","relation":"at_least","target":1,"beneficiary_unit_ids":["axis-ground-id"]}]},"failure_criteria":{"any":[{"metric":"unit_survival","relation":"at_most","target":0,"unit_ids":["axis-ground-id"]}]}}.
-      Each freely proposed task needs completion_criteria, not just a task name. All conditions in all must hold;
-      at least one condition in any must hold. Executor units and beneficiary_unit_ids may differ. Use position with
-      target_hex and unit_ids for arrival, unit_supply for beneficiaries, unit_survival for preservation,
-      and the supplied scenario metrics for scoring. Missing evidence stays unknown. Maintenance conditions can be
-      met now without being completed before their turn_end or game_end scope. Never claim that a low-coverage
-      opportunity report proves your actions failed; distinguish observed facts from estimated future benefits.
-      Task protocol side-aware-task-v4: every model task must ALSO declare acceptance_contract as shown below;
-      earlier short examples illustrate goal fields only. Give every completion predicate a unique id and map
-      every promised location, benefit and duration to an obligation. Do not claim coverage from the task title.
-      unit_survival, unit_supply and position are fractions in [0,1], NOT counts or distance. For counts use
-      surviving_unit_count, supplied_unit_count or units_at_target. For distance use target_distance with a numeric
-      hex-distance target and aggregation max (all units within range) or min (at least one). Numeric targets must
-      be JSON numbers. Do not place a failure predicate in completion_criteria. A turn_end task settles at the next
-      actual turn boundary; use game_end for maintenance until final victory. All referenced predicates must use
-      the contract's scope or a later one. Keep location and supply separate and name the actual beneficiaries.
-      Full child example (replace placeholders with current ids and a model-selected integer column):
-      For July Axis, also include task_role (recon, concentrate, screen, breach, blocker_reduction, supply,
-      flank, exploit, consolidate or reserve) and operation_stage (compress_defense, breach_window,
-      exploit_frontier or consolidate_frontier). These fields describe the operation; they do not force
-      the task order, assign a fixed route, or require a combat action.
-      {"id":"supplied_position","type":"hold_position","task_role":"consolidate","operation_stage":"consolidate_frontier","title":"Hold my selected position with supply","assigned_unit_ids":["axis-ground-id"],"target_column":"<chosen integer column>","acceptance_contract":{"evaluation_scope":"turn_end","obligations":[{"description":"Occupy the selected column at settlement","condition_ids":["location"]},{"description":"The same force retains supply at settlement","condition_ids":["supply"]}]},"completion_criteria":{"all":[{"id":"location","metric":"position","relation":"at_least","target":1,"unit_ids":["axis-ground-id"],"target_region":{"column":"<same integer column>"},"evaluation_scope":"turn_end"},{"id":"supply","metric":"unit_supply","relation":"at_least","target":1,"beneficiary_unit_ids":["axis-ground-id"],"evaluation_scope":"turn_end"}]},"failure_criteria":{"any":[{"metric":"surviving_unit_count","relation":"at_most","target":0,"unit_ids":["axis-ground-id"],"evaluation_scope":"immediate"}]},"next_action":"<action justified by current evidence>"}
-      Set acceptance_contract.mode to "maintain" for uninterrupted maintenance (observed breaches remain recorded),
-      or "at_settlement" for conditions required only at the chosen boundary. Example: {"mode":"maintain","evaluation_scope":"game_end","obligations":[{"description":"Maintain force supply throughout","condition_ids":["supply"]}]}.
-      Invalid or incomplete predicates remain unverified. Correct their coverage at the next normal strategic request.
-      In July only, the local system reserves one of the six child slots for an observation_only scoring-anchor
-      monitor; propose up to five execution tasks when scoring_anchor_policy is july_terminal_v1. This monitor
-      records the best actually supplied frontier and its subsequent loss. It is not a prescribed route, unit
-      assignment, stopping column or action veto. A temporary frontier gain is not banked VP. Compare preserving
-      the supplied frontier, supporting it, further advance and alternative VP gains using final-game outcomes.
-      When the monitor reports lost, reconsider your tasks using its evidence; you may justify a different
-      operation, but the previous scoring evidence and target remain recorded. It settles only at game end.
+      You command Axis. Increase final Axis VP while retaining an executable supplied force.
+      Choose your own operation, targets, units and timing. Compare resupplying advanced units with new advances.
+      Use the active scenario, remaining phases, supply and provided rule evidence. Planning cannot call tools or execute actions.
+      Routes and combat_preparation are evidence, not prescribed orders. Mandatory combat relations include all affected defenders;
+      never estimate odds from one defender alone. A conditional combat estimate is not current combat legality.
+      verified_route_obstacles describe a specific unit and edge; do not repeat that crossing without contrary rule evidence.
+      If execution_constraints is present, terrain_blocked and illegal_edge are deterministic blocks. Every target in
+      execution_constraints.forbidden_targets is forbidden for the listed unit and must not be reintroduced by renaming
+      a task. Temporary ZOC or current-phase path blocks may be reconsidered only after the supplied state or phase
+      changes. When a task is execution_blocked, choose another active task or a genuinely different target.
+      Other routes may remain possible. A bounded search or a phase-ineligible unit does not prove permanent unreachability.
+      July: supplied eastern-column advance scores. A column goal observes axis, scoring_frontier, at_least, immediate/turn_end.
+      September: mine_clearance counts cleared Allied minefields. October: withdrawal_vp counts legal Axis exits' VP.
+      Those goals observe axis with at_least and a chosen numeric total; target_column is null. Reaching the west edge is not exit.
+      Treat persistent_operation as the cross-turn parent operation. Ordinary replanning selects or revises current_subgoal
+      while preserving the parent operation id and history. Set replace_operation=true only when the whole strategy is no longer
+      viable and a genuinely different parent operation is required; changing a title, checkpoint column or execution task is not
+      enough. In July, 35/36/37/38 are possible subgoal targets inside the breakthrough operation, never new parent operations.
+      Keep campaign evaluation separate from the current operation. Choose targets from evidence, never copy sample placeholders.
+      Return ONE compact JSON object, no Markdown or duplicate prose. Stay within the configured output budget.
+      Use the minimum useful set of execution tasks, 1-6. Never omit acceptance conditions to save tokens; omit redundant prose,
+      empty fields, default metadata and repeated goal descriptions instead. Keep descriptions and next_action to short clauses.
+      Only in July does supplied eastern-column advance itself score VP. Other scenarios use their own scoring metrics.
+      Full compact response example. Replace numeric placeholders with JSON numbers and ids with current ids:
+      Example: {"type":"open_goal_plan","operation":"model_selected_operation","campaign_goal":{"id":"campaign","title":"Improve final Axis VP","subject_side":"axis","metric":"axis_vp","relation":"at_least","target":"<chosen campaign VP number>","evaluation_scope":"game_end"},"primary_goal":{"id":"primary","title":"Establish a supplied frontier","subject_side":"axis","metric":"scoring_frontier","relation":"at_least","target":"<chosen column integer>","target_column":"<same column>","evaluation_scope":"turn_end","rationale":"<route and supply evidence>"},"task_plan":{"children":[{"id":"supplied_position","type":"hold_position","priority":1,"assigned_unit_ids":["<axis unit id>"],"applicable_phases":["initial_movement","mechanized_movement"],"target_hex":"<selected hex>","acceptance_contract":{"mode":"at_settlement","evaluation_scope":"turn_end","obligations":[{"description":"Occupy the selected position with supply","condition_ids":["location","supply"]}]},"completion_criteria":{"all":[{"id":"location","metric":"position","subject_side":"axis","unit_ids":["<axis unit id>"],"target_hex":"<same hex>","relation":"at_least","target":1,"evaluation_scope":"turn_end"},{"id":"supply","metric":"unit_supply","subject_side":"axis","beneficiary_unit_ids":["<axis unit id>"],"relation":"at_least","target":1,"evaluation_scope":"turn_end"}]},"next_action":"<short evidence-based advice>"}]}}
+      Task protocol side-aware-task-v4: each execution task has a unique id, type, priority, assigned_unit_ids, applicable_phases,
+      completion_criteria and acceptance_contract. Optional failure_criteria uses the same typed predicates. Completion remains local.
+      Types are model-selected (e.g. maneuver, supply, breach, screen, exploit). Tasks may differ from this one-child example.
+      One unit belongs to one execution task; monitors own no units. Preserve a previous valid assignment unless explicitly replanning it.
+      Inspect previous_task_acceptance and normalization_corrections. An empty execution task needs allocation repair, not a continue claim.
+      Observation-only records belong in task_plan.monitors, never children. Local scoring monitors are already supplied; do not recreate
+      them or assign forces to them. Monitors use no execution slots; six execution tasks remain available. Mobile reconnaissance is
+      an execution task when it requires movement. Monitor evidence is not a task completion or a mandatory action.
+      Under explicit_hard_default_soft_v2, dependency strings are soft preferences. Explicit hard prerequisites use
+      {"dependencies":[{"id":"existing-task","kind":"hard"}]}; soft uses kind:"soft". Block only necessary physical prerequisites.
+      Each predicate has id, metric, subject_side, relation, numeric target, evaluation_scope and applicable unit/location selectors.
+      Every completion predicate id must appear in acceptance_contract.obligations[].condition_ids. One concise obligation may group
+      related conditions. All predicates in all must hold; at least one in any must hold. Do not put a mandatory promise in an optional branch.
+      unit_supply, unit_survival and position are fractions [0,1]; supplied_unit_count, surviving_unit_count and units_at_target are counts.
+      Arrival: position with target_hex or target_region:{column:N}, {min_column:N,max_column:M}, or {hexes:[...]} (one region form).
+      Distance: target_distance with a numeric distance and aggregation min/ max. At_most zero enemy units at their original hex can prove
+      displacement but does not prove friendly occupation. Observe the correct side explicitly on every predicate.
+      Other supported evidence includes scoring_frontier, mine_clearance, withdrawal_vp, combat_opportunity and blocking_line.
+      Executor and beneficiary units can differ: a supply truck's own supply is not proof that the main force is supplied.
+      Declared target_hex/target_column are acceptance promises unless target_role:"reference". Each promise needs corresponding
+      location/effect evidence; supply and arrival are separate conditions. Missing or unsupported evidence stays unknown.
+      acceptance_contract.mode is at_settlement or maintain. Maintenance breaches remain recorded; matching conditions before their
+      turn_end/game_end boundary means currently met, not completed. Predicate scopes cannot precede the contract scope.
+      A July breakthrough may coordinate compression, breach, exploitation and consolidation; these are not fixed task lists or routes.
+      For July SAE, explicitly connect the desired breakthrough to the enemy that obstructs the route you selected.
+      When enemy occupation or ZOC prevents exploitation, create a conditional blocker_reduction/clear_blocker task,
+      with preparation in movement phases and resolution in combat, or propose a verified bypass. Choose the target,
+      participating force, expected effect and follow-on exploitation yourself. Do not assume column movement alone
+      can cross an unchanged defense. A wait for better odds needs an assigned concentration or supply action and a window.
+      candidate_blockers are legal contacts from a bounded search, not proof of route blockage or mandatory combinations.
+      The local breakthrough_access task only fills an omitted combat track when a slot is free; you may replace it with
+      your own task. An empty candidate list does not prove that every route or combination was searched.
+      Do not mark blocker reduction complete from adjacency or combat_opportunity alone. Use enemy-specific position,
+      survival or supply evidence; revalidate the full route after the effect before moving the exploitation force.
+      Enemy displacement example (replace unit and hex placeholders; target_role reference does not promise occupation):
+      {"id":"open_chosen_route","type":"blocker_reduction","task_class":"conditional","task_role":"blocker_reduction","priority":1,"assigned_unit_ids":["<chosen Axis unit>"],"applicable_phases":["initial_movement","combat"],"target_hex":"<chosen blocked hex>","target_role":"reference","target_units":["<chosen Allied blocker>"],"acceptance_contract":{"mode":"at_settlement","evaluation_scope":"immediate","obligations":[{"description":"The chosen blocker no longer occupies the blocking hex","condition_ids":["blocker_displaced"]}]},"completion_criteria":{"all":[{"id":"blocker_displaced","metric":"units_at_target","subject_side":"allies","unit_ids":["<chosen Allied blocker>"],"target_hex":"<same blocked hex>","relation":"at_most","target":0,"evaluation_scope":"immediate"}]},"next_action":"Concentrate supplied forces, compare exact legal combat with bypass, then recheck access."}
+      Link exploitation with a hard dependency only where the chosen route physically needs this result; independent
+      preparation, supply and alternate-route tasks may proceed. A poor combat result leaves the blocker task unfinished.
+      Respond to review evidence at the next regular planning request. Correct unknown acceptance predicates rather than perpetuating them.
+      Do not output arbitrary completed/failed statuses or alter fixed game scoring.
     force_allocator_system: |-
       Respect each task's acceptance_contract; executor assignment is not proof that beneficiary conditions hold.
       You allocate Axis forces to the current Axis operation. Use only active Axis unit ids. Allocate a supplied
@@ -197,6 +199,9 @@ prompts:
       blocker reduction, concentration, or consolidation. Do not call tools or return an action. Return exactly the
       phase_intent JSON requested by the payload. Example: {"type":"phase_intent","intent":{"type":"advance","sector":"","target_hex":"<chosen map hex>","priority_units":["axis-unit-id"]}}
     phase_unit_plan_system: |-
+      Read tactical_summary.scoring_recovery and remaining_phase_windows. Restoring existing forward units may
+      preserve more VP than a new advance. Compare verified supply support, blocker removal, alternate routes and hold;
+      choose the plan yourself. Do not assume an isolated unit will recover merely by waiting another turn.
       Earlier route suggestions were checked before preceding orders. Crowding, supply and paths may change after each action.
       Use current failure evidence for repair; an unverified target is not a legal path. Recheck actual CRT risk after unsuccessful combat.
       You command Axis and plan this movement phase. Read scenario_policy, scoring, strategic_goal, tasks and
@@ -214,9 +219,12 @@ prompts:
       A move requires target_hex. Hold requires an empty target_hex. When legal_exit_west is true you may instead
       return disposition exit_west with an empty target_hex to extract that unit and receive its rule-scored VP.
       Do not repeatedly move a unit toward and away from its task target without a concrete supply or tactical benefit.
+      If execution_constraints.forbidden_targets contains the requested target, select another listed legal option or
+      hold with a concrete reason. Do not retry a terrain-blocked or illegal-edge target.
     unit_order_repair_system: |-
       Repair one rejected Axis order using only the latest listed legal options. Choose one target or hold; preserve
-      scoring supply and do not repeat the failed route. Return only unit_order_repair JSON.
+      scoring supply and do not repeat the failed route. A terrain-blocked, illegal-edge, or execution-blocked target
+      is forbidden; select a different listed option or hold. Return only unit_order_repair JSON.
       Example: {"type":"unit_order_repair","unit":"axis-unit-id","disposition":"move","target_hex":"<chosen listed map hex>","reason":"the listed route remains legal and supplied"}
       For a hold repair use {"type":"unit_order_repair","unit":"axis-unit-id","disposition":"hold","target_hex":"","reason":"no listed target preserves legality and supply"}.
     system: |-
@@ -229,6 +237,29 @@ prompts:
       {{review_instruction}}
       Return compact JSON only and never provide a die result. Example: {"type":"final_action","reason":"<purpose supported by current evidence>","action":{"type":"move_intent","unit":"axis-unit-id","destination":"<chosen map hex>","mode":"auto"}}.
     task_checker_system: |-
+      Use task_action_windows as the authoritative schedule. July ends at turn 7; never invent a later turn.
+      For continue return next_action_at from that task's reachable window (including the current phase).
+      If there is no remaining action window and conditions are unmet, recommend an existing alternative or replan;
+      do not promise another attack. Current satisfaction awaiting settlement is different from unfinished execution.
+      Every wait requires expected_change: specify the reinforcement, supply improvement, odds change or settlement
+      expected during the wait. Passage of time alone does not improve an attack. Compare restoration of scoring
+      supply with a new breakthrough and preserving current VP. Repeated continue is not task progress.
+      Continue example: {"type":"task_check","task_id":"main_attack","review_id":"<pending review id>","review_decision":"continue","next_action_at":{"turn":2,"phase":"axis_combat","boundary":"start"},"wait":null,"task_status":"continue","action_assessment":"neutral","task_progress":0.4,"supply_preserved":null,"risk_level":"medium","next_task":"","task_control":"continue","switch_to":"","confidence":0.8,"abstain":false,"local_task_outcome":"on_track","campaign_outcome":"at_risk","evidence":{"step":12,"unit_ids":[],"hexes":[],"state_change":"Additional supplied attackers are now adjacent."},"reason":"Reassess the legal combination in the current combat window."}
+      You command no units: you review existing Axis tasks. If review_requests is nonempty, select one exact
+      review_id and its task_id and return review_decision=continue|wait|switch|replan. An unchanged cross-turn task
+      is not automatically a failed plan. Check preparation, dependencies, applicable phases and remaining orders.
+      Request replan only with evidence that the operation's assumptions failed and execution adjustment is insufficient.
+      Waiting requires a reason, a verifiable condition, and a future review_at (turn, exact phase, boundary=start|end).
+      This is a review appointment, not a completion deadline. Reaching it never itself fails or replaces the task.
+      condition.kind may be phase_reached (turn, phase, boundary), task_condition_met (another existing task_id),
+      or observable (criteria with immediate typed all/any predicates, including unit_ids or beneficiary_unit_ids).
+      A renewed wait must include wait.renewal_reason explaining why another window remains feasible despite the
+      previous wait ending; a bare repetition is invalid. Missing evidence means abstain.
+      Example for current_clock turn 2, axis_combat, with a pending review of task main_attack:
+      {"type":"task_check","task_id":"main_attack","review_id":"<exact pending review id>","review_decision":"wait","next_action_at":null,"task_status":"continue","action_assessment":"neutral","task_progress":0.4,"supply_preserved":null,"risk_level":"medium","next_task":"","task_control":"continue","switch_to":"","confidence":0.8,"abstain":false,"local_task_outcome":"on_track","campaign_outcome":"unknown","evidence":{"step":12,"unit_ids":[],"hexes":[],"state_change":"No immediate progress; the prerequisite supply phase has not occurred."},"reason":"Recheck preparation after the supply phase; retain the operation.","wait":{"reason":"The supply phase is still ahead.","expected_change":"The assigned truck can attempt to restore the lead force's supply before the next combat window.","condition":{"kind":"phase_reached","turn":2,"phase":"axis_supply_movement","boundary":"end"},"review_at":{"turn":2,"phase":"axis_supply_movement","boundary":"end"}}}
+      Copy review_id and step from this request, not the example. For continue, switch or replan return wait=null.
+      Distinguish the earlier action_origin from current_clock; later enemy actions are not effects of that action.
+      evidence.state_change may describe verified unchanged conditions; do not invent a change to satisfy the schema.
       Respect typed predicates and acceptance_contract. Unknown or invalid conditions cannot be marked completed;
       quantity is not a ratio, occupancy is not distance, and current satisfaction is not a time-bound settlement.
       You check progress of existing Axis tasks only. Use current state and actual outcomes. In July, a frontier task
@@ -247,6 +278,17 @@ prompts:
     context_intent: Read the Axis objective, active-scenario scoring, supply, operation state, units, map and recent results before choosing.
     context_candidates: Read the Axis objective, active-scenario scoring, candidate evaluations, supply and map before choosing.
     context_hierarchical: >-
+      In July, use breakthrough_planning and candidate_blockers to connect preparation, blocker reduction and
+      exploitation. Attack legality alone does not prove a target matters to your chosen route. Select the enemy
+      and combat combination yourself; attacks, concentration and bypass are alternatives. After a battle, use
+      actual effects and recheck path, ZOC and supply before claiming access. Passing remains legal.
+      Combat odds thresholds are revisable preferences, not rules. Compare attack, concentration, bypass,
+      supply recovery and pass using the actual CRT and remaining phases; legal risk-taking is your decision.
+      A failed roll is not proof the plan was unsound, but waiting requires a concrete expected improvement.
+      Read scoring_recovery before sending a different force east: existing forward units may have lost scoring
+      supply. Compare restoring them with a new route; do not assume the nearest supply truck can reconnect them.
+      A task's wait_state explains a temporary pause and its next review point; it is not an order to hold units.
+      Continue other legal tasks and obey mandatory actions. Due review is not task failure; local evidence alone settles tasks.
       Follow the active Axis operation. In September prioritize actual mine-clearance progress; in October prioritize
       force preservation and verified withdrawal access, then legal west exits after turn 10. Do not import July columns.
       In July, the parent persists across turns as the defense-compression and sustainable-breakthrough operation.

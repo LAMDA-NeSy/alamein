@@ -162,7 +162,7 @@ methods:
     task_protocol: side-aware-task-v4
     task_generation: model_defined
     scoring_anchor_policy: july_terminal_v1
-    task_dependency_policy: hard_soft_conditional_v1
+    task_dependency_policy: explicit_hard_default_soft_v2
     task_switching: existing_tasks_only
     max_child_tasks: 6
     max_active_child_tasks: 3
@@ -170,6 +170,10 @@ methods:
     task_checker_model_profile: mock_secondary
     task_checker_timeout_ms: 60000
     task_checker_max_calls_per_turn: 4
+    task_review_policy: model_review_wait_v1
+    monitor_policy: separate_monitors_v1
+    strategic_output_tokens: 3600
+    allocation_output_tokens: 3000
     no_progress_replan_threshold: 3
     blocked_replan_threshold: 2
     supply_worsened_replan_threshold: 2

@@ -4,6 +4,16 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { attachRuntimeAccounting, transportCounts } = require("../core/experiment_accounting.js");
 
+test("planner calls count actual requests, including failed and retained-plan attempts", () => {
+  const records = ["strategic", "allocation"].flatMap((stage) => Array.from({ length: stage === "strategic" ? 9 : 4 }, (_, index) =>
+    ({ request_id: `${stage}:${index}`, stage })));
+  const transcript = { counts: { sae_plan_calls: 8 } };
+  const runtime = { usage: {}, transport: records };
+  attachRuntimeAccounting(transcript, { main: runtime, alias: runtime });
+  assert.equal(transcript.counts.sae_plan_calls, 13);
+  assert.equal(transcript.sae_plan_calls, 13);
+});
+
 test("request accounting deduplicates failures and separates protocol from transport", () => {
   const failure = { request_id: "one", error_class: "connection_error", attempts: 1 };
   const counts = transportCounts([failure, failure, { request_id: "two", error_class: "none", protocol_failure: { error: "bad JSON" } }]);

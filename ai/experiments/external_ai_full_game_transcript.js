@@ -1307,6 +1307,8 @@ async function main() {
   const modelProfile = requestedModelProfile || (externalSides.length ? methodConfig.model_profile : "mock_primary");
   const toolProfile = resolveToolProfile(argValue("--tool-profile", "") || methodConfig.tool_profile);
   const stepTimeoutMs = Number(argValue("--step-timeout-ms", "") || methodConfig.step_timeout_ms);
+  const combatPhasePolicy = argValue("--combat-phase-policy", "rule_complete");
+  if (!["rule_complete", "combat_experiment_budget"].includes(combatPhasePolicy)) throw new Error("invalid --combat-phase-policy");
   // Explicit disabled mode retains the historical SAE without task management.
   const taskManagementDefaults = decisionMode === "hierarchical_sae"
     && argValue("--task-management", methodConfig.task_management?.mode || "disabled") === "multi_task"
@@ -1396,6 +1398,7 @@ async function main() {
     contextProfile: CONTEXT_PROFILE_ID,
     timeoutMs: stepTimeoutMs,
     maxSteps,
+    combatPhasePolicy,
     unitPlanSettings: methodConfig.rolling_unit,
     toolChoice: EXECUTION_TOOL_CHOICE,
     thinkingMode: runtime.profile.defaults.thinking,
@@ -1485,6 +1488,7 @@ async function main() {
   }));
   const replay = makeReplay(scenario, {
     seed,
+    combatPhasePolicy,
     onStateChangeFilter: (event) => externalSides.includes(event.side),
     onStateChange: (event) => {
       // Rule-AI actions can be numerous and do not need an external-agent
@@ -1563,7 +1567,8 @@ async function main() {
     goal_protocol: taskManagement ? "side-aware-goal-v2" : null,
     task_management: taskManagement ? "multi_task" : "disabled",
     task_protocol: taskManagement?.protocol || null,
-    task_dependency_policy: taskManagement ? "hard_soft_conditional_v1" : null,
+    task_dependency_policy: taskManagement?.dependency_policy || null,
+    combat_phase_policy: combatPhasePolicy,
     task_switching: taskManagement ? "existing_tasks_only" : null,
     task_progress_version: comparison.contract.task_progress_version,
     task_action_feedback_version: taskManagement ? "post-action-feedback-v1" : null,
@@ -1673,7 +1678,8 @@ async function main() {
           archived_task_plans: finalTaskPlan.archived_task_plans || [],
           task_execution_history: finalTaskPlan.task_execution_history || {},
           child_statuses: Object.fromEntries((finalTaskPlan.children || []).map((task) => [task.id, task.status])),
-          children: finalTaskPlan.children || []
+          children: finalTaskPlan.children || [],
+          monitors: finalTaskPlan.monitors || []
         };
       }
     }
@@ -1739,7 +1745,6 @@ async function main() {
       retry_attempts: runtime.transport.reduce((sum, item) => sum + Math.max(0, Number(item.attempts || 1) - 1), 0)
         + transcript.model_steps.reduce((sum, step) => sum + step.rounds.reduce((roundSum, round) => roundSum + Math.max(0, (round.attempts?.length || 1) - 1), 0), 0),
       model_tool_calls: transcript.model_steps.reduce((sum, step) => sum + step.rounds.filter((round) => round.tool_result).length, 0),
-      sae_plan_calls: transcript.model_steps.reduce((sum, step) => sum + (step.sae_plan && !step.sae_plan.reused ? 2 : 0), 0),
       sae_plan_fallbacks: transcript.model_steps.reduce((sum, step) => sum + (step.sae_plan && (!step.sae_plan.reused || step.sae_plan.planning_attempted === true) ? Number(step.sae_plan.strategic_fallback) + Number(step.sae_plan.allocation_fallback) : 0), 0),
       sae_replans: transcript.model_steps.filter((step) => step.sae_plan?.replanned && !step.sae_plan.reused).length,
       replan_reasons: transcript.model_steps.reduce((counts, step) => {
@@ -1847,9 +1852,31 @@ async function main() {
       transcript.force_allocation = transcript.model_steps.find((step) => step.force_allocation)?.force_allocation || null;
       const latestOperationState = [...transcript.model_steps].reverse().find((step) => step.operation_state)?.operation_state || null;
       const latestTaskSettlement = transcript.final_task_settlement;
+      transcript.task_outcomes = Object.fromEntries(externalSides.map((side) => {
+        const settled = externalSides.length === 1 ? latestTaskSettlement : latestTaskSettlement?.[side];
+        const tasks = new Map();
+        for (const archive of settled?.archived_task_plans || []) for (const task of archive.children || []) tasks.set(task.id, task);
+        for (const task of settled?.children || []) tasks.set(task.id, task);
+        const executionTasks = [...tasks.values()].filter((task) => !task.observation_only);
+        return [side, { source: "final_task_settlement_unique_ids", total: executionTasks.length,
+          completed: executionTasks.filter((task) => task.status === "completed").length,
+          failed: executionTasks.filter((task) => task.status === "failed").length,
+          skipped: executionTasks.filter((task) => task.status === "skipped").length,
+          replaced: executionTasks.filter((task) => task.status === "replaced").length,
+          by_source: Object.fromEntries([...new Set(executionTasks.map((task) => task.source || "unknown"))].map((source) => {
+            const group = executionTasks.filter((task) => (task.source || "unknown") === source);
+            return [source, { total: group.length, completed: group.filter((task) => task.status === "completed").length }];
+          })),
+          unverified: executionTasks.filter((task) => task.completion_evidence?.status === "unknown" || task.verification_status === "unverified").length }];
+      }));
       transcript.operation_state = latestOperationState;
       transcript.task_plan = [...transcript.model_steps].reverse().find((step) => step.sae_plan?.task_plan)?.sae_plan.task_plan
         || (latestTaskSettlement && externalSides.length === 1 ? latestTaskSettlement : null);
+      if (externalSides.length === 1 && transcript.task_plan && latestTaskSettlement?.children) {
+        transcript.task_plan = { ...transcript.task_plan, children: latestTaskSettlement.children, monitors: latestTaskSettlement.monitors,
+          parent: { ...transcript.task_plan.parent, state: latestTaskSettlement.parent_state },
+          snapshot_source: "final_task_settlement" };
+      }
       transcript.sae_plan_calls = transcript.counts.sae_plan_calls;
       transcript.sae_plan_fallbacks = transcript.counts.sae_plan_fallbacks;
     }

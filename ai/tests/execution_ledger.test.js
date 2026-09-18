@@ -188,6 +188,27 @@ test("goal revisions retain original target, prior failure and fixed evaluation"
   assert.equal(report.fixed_game_evaluation.initial_vp, -20);
 });
 
+test("goal revision ledger records the persistent operation and subgoal relationship", () => {
+  const history = createGoalRevisionLedger(() => ({ completed: false, evidence: [] }));
+  const input = { step: 1, turn: 1, side: "axis", phase: "axis_initial_movement" };
+  const operation = {
+    id: "sustainable_breakthrough",
+    revision: 0,
+    status: "active",
+    current_subgoal: { id: "breakthrough_to_35", metric: "scoring_frontier", target_column: 35 }
+  };
+  history.revise({ id: "breakthrough_to_35", metric: "scoring_frontier", relation: "at_least",
+    target_column: 35, persistent_operation: operation, current_subgoal: operation.current_subgoal }, { input });
+  history.revise({ id: "renamed_checkpoint", title: "Same checkpoint, clearer label", metric: "scoring_frontier", relation: "at_least",
+    target_column: 35, persistent_operation: { ...operation, current_subgoal: { ...operation.current_subgoal, title: "Renamed" } },
+    current_subgoal: { ...operation.current_subgoal, title: "Renamed" } }, { input: { ...input, step: 2 } });
+  const report = history.report(input);
+  assert.equal(report.persistent_operation_id, "sustainable_breakthrough");
+  assert.equal(report.operation_revision, 0);
+  assert.equal(report.revisions.length, 1);
+  assert.equal(report.revisions[0].current_subgoal.target_column, 35);
+});
+
 test("task failures are scoped, infrastructure and legal holds are not tactical blockers", () => {
   const plan = { children: ["a", "b"].map((id) => ({ id, assigned_units: [id], status: "active" })) };
   const events = [

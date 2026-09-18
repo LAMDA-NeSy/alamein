@@ -256,6 +256,7 @@ test("task completion counts one stable task across replanned criteria", () => {
   const metrics = deterministicRunMetrics(transcript).scenario_metrics;
   assert.equal(metrics.task_count, 1);
   assert.equal(metrics.measurable_task_count, 1);
+  assert.equal(metrics.unverified_task_count, 0);
   assert.equal(metrics.task_completion_rate, 1);
 });
 
@@ -268,6 +269,34 @@ test("local observation monitors do not inflate model task completion rates", ()
   const metrics = deterministicRunMetrics(transcript).scenario_metrics;
   assert.equal(metrics.task_count, 1);
   assert.equal(metrics.task_completion_rate, 0);
+});
+
+test("task outcomes use the latest archive and separate local completions from model tasks", () => {
+  const transcript = completeTranscript("latest-archive");
+  const old = { id: "advance", source: "model", status: "active", completion_criteria: { metric: "position" } };
+  transcript.model_steps = [{ task_observation: { plan: { children: [old] } } }];
+  transcript.final_task_settlement = { child_statuses: { fallback: "completed" },
+    archived_task_plans: [{ children: [old] }, { children: [{ ...old, status: "replaced" }] }],
+    children: [{ id: "fallback", source: "local_fallback", status: "completed", completion_criteria: { metric: "position" } }],
+    monitors: [{ id: "observation", status: "completed" }] };
+  const metrics = deterministicRunMetrics(transcript).scenario_metrics;
+  assert.equal(metrics.task_count, 2);
+  assert.equal(metrics.replaced_task_count, 1);
+  assert.deepEqual(metrics.task_outcomes_by_source, { model: { total: 1, completed: 0 }, local_fallback: { total: 1, completed: 1 } });
+});
+
+test("unknown task evidence is missing coverage, not an observed task failure", () => {
+  const transcript = completeTranscript("unverified-task");
+  transcript.final_task_settlement = { child_statuses: { known: "completed", unknown: "skipped" }, children: [
+    { id: "known", status: "completed", completion_criteria: { metric: "position" }, completion_evidence: { status: "met", validation_errors: [] } },
+    { id: "unknown", status: "skipped", completion_criteria: { metric: "position" }, completion_evidence: { status: "unknown", validation_errors: ["invalid_target_region"] } }
+  ] };
+  const metrics = deterministicRunMetrics(transcript).scenario_metrics;
+  assert.equal(metrics.task_count, 2);
+  assert.equal(metrics.measurable_task_count, 1);
+  assert.equal(metrics.unverified_task_count, 1);
+  assert.equal(metrics.task_completion_rate, 1);
+  assert.equal(metrics.task_evidence_coverage, 0.5);
 });
 
 test("request totals include the independently configured checker without double counting", () => {

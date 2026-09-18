@@ -97,6 +97,24 @@ pnpm run ai:acceptance -- \
 
 SAE 流程是：战略模型生成目标，Goal Manager 结构化目标，Task Manager 管理任务树，兵力分配模型分配角色，执行模型按阶段逐个执行动作，规则桥验证每个动作，任务检查模型评估进展。规则引擎始终是最终合法性判定者。
 
+SAE 的 `task_review_policy: model_review_wait_v1` 将任务停滞作为模型复核信号，而非直接换计划。无进展按任务有实际行动的适用阶段累计；保持、未知证据和模型确认的等待不算失败。checker 可选择继续、等待、建议切换现有任务或请求战略重规划，不能修改任务完成状态。
+
+等待必须包含原因、可验证条件和未来的回合/阶段复核点，例如“第 2 回合 Axis 补给阶段结束后检查主力补给”。条件提前满足、依赖失败或相关单位损失时提前复核；到期本身不导致失败或自动重规划。等待只是作战说明，不强制保持单位，也不能绕过强制动作。检查超时、协议错误或额度不足时保留任务，同一阶段不反复重试，到下一阶段再检查；每回合最多 4 次 checker 调用保持不变。
+
+日志的 `task_plan.children[].wait_state` 保存等待条件和复核点，`review_request` 保存触发证据，`model_steps[].sae_plan.task_reviews` 保存检查结果，终局任务快照中的 `task_review_history` 保留完整决策历史。比较合同为 `single-action-comparison-v22-monitor-isolation`；旧合同不能直接混排。关闭新策略可将方法配置的 `task_review_policy` 设为 `legacy`，但新旧 PE 和代码版本仍需分别记录。
+
+SAE 默认将观察记录放在 `task_plan.monitors`，不占执行任务名额、不分配单位、不计入任务完成率。单位重复分配会在 `normalization_corrections` 留痕；缺少执行单位的任务优先进入 checker 复核，由模型决定如何调整。`combat_preparation` 提供条件性的强制参战关系和规则赔率，不替模型选择攻击组合。`verified_route_obstacles` 记录规则确认的特定单位、模式和边的障碍，不把有限搜索失败当成全局不可达。
+
+战略输出上限仍为 3600 Token，分配输出上限为 3000 Token，可在方法配置中分别设置；精简 PE 中的重复字段，不增加请求预算。截断单独记为 `parse_status: truncated`；`sae_plan_calls` 按实际战略与分配请求计数，包含失败后保留旧计划的请求，而不是按计划版本估算。
+
+checker 的 `continue` 必须给出可到达的 `next_action_at`，等待必须给出 `expected_change`，不能安排到场景终局之后。任务按明确的观察阵营与区域验收；省略观察阵营时，仅在引用单位全部已知且同属一方时推导。区域支持格子集合、单列及 `min_column` / `max_column` 区间。SAE 的 `explicit_hard_default_soft_v2` 把未注明类型的依赖视为偏好；必要前置条件需显式声明 `kind: hard`。
+
+新实验的战斗阶段采用 `rule_complete`，不再因固定战斗次数自动结束阶段，双方均适用。模型可合法 `pass`，单位资格、强制参战及重复攻击限制仍由规则引擎判定。历史诊断可显式传入 `--combat-phase-policy combat_experiment_budget`，但不可与新合同混排。每步工具预算及全局步数上限不变。
+
+`tactical_summary.scoring_recovery` 区分当前计分与前出单位失去补给后的潜在恢复收益，不保证恢复可行；路线和动作仍需验证。终局任务数见 `task_outcomes`，其中 `unverified` 与状态计数可能重叠；`task_completed_events` 仅表示执行期间事件，不能当作终局完成总数。场景、地图、VP 和复杂规则 AI 文件未作修改。
+
+指标版本为 `wargame-research-metrics-v7-latest-task-evidence`。验收证据未知的任务单列为 `unverified_task_count`，不计入可验证任务完成率的分母；报告同时给出 `task_evidence_coverage`，不能只凭完成率判断效果。重复任务 ID 使用最新归档与最终结算，替换任务单列；`task_outcomes_by_source` 区分模型任务和本地兜底任务。
+
 单局真实模型示例：
 
 ```bash

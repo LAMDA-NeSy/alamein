@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const crypto = require("node:crypto");
 const {
   BENCHMARK_VERSION,
   compareArtifactManifests,
@@ -77,6 +78,7 @@ test("artifact manifest covers the fixed rules and scenario inputs", () => {
   assert.match(manifest.files.rule_engine.sha256, /^[a-f0-9]{64}$/);
   assert.equal(manifest.files.scenario.path, "scenarios/july.json");
   assert.equal(manifest.files.counter_stats.path, "counter_stats.json");
+  assert.equal(manifest.files.task_review.path, "ai/core/task_review.js");
   assert.match(manifest.files.counter_stats.sha256, /^[a-f0-9]{64}$/);
   assert.equal(compareArtifactManifests([manifest, structuredClone(manifest)]).comparable, true);
   const changed = structuredClone(manifest);
@@ -92,6 +94,20 @@ test("artifact manifest covers the fixed rules and scenario inputs", () => {
     changedRuntime.files[key].sha256 = "0".repeat(64);
     assert.equal(validateArtifactManifest(changedRuntime, changedRuntime.artifact_manifest_hash), false, key);
   }
+});
+
+test("review implementation is hashed without invalidating historical schema-3 manifests", () => {
+  const manifest = createArtifactManifest("july", { includeGitMetadata: false });
+  assert.equal(manifest.manifest_schema, 5);
+  assert.equal(manifest.files.task_predicates.path, "ai/core/task_predicate_schema.js");
+  delete manifest.files.task_predicates;
+  delete manifest.files.task_review;
+  manifest.manifest_schema = 3;
+  const hash = crypto.createHash("sha256").update(JSON.stringify({ manifest_schema: 3,
+    benchmark_version: manifest.benchmark_version, scenario: manifest.scenario, files: manifest.files })).digest("hex");
+  assert.equal(validateArtifactManifest(manifest, hash), true);
+  manifest.manifest_schema = 4;
+  assert.equal(validateArtifactManifest(manifest, hash), false);
 });
 
 test("comparison validator accepts complete paired variants that used declared fallback", () => {

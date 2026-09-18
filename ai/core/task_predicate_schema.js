@@ -6,6 +6,15 @@ const METRICS = new Set([...RATIO_METRICS, ...COUNT_METRICS, "target_distance", 
 const SCOPES = new Set(["immediate", "turn_end", "game_end"]);
 const RELATIONS = new Set(["at_least", "at_most", "keep_below", "preserve", "reduce", "equal", "equals", "eq", "greater_than", "gt"]);
 
+function regionContains(region, hex) {
+  if (!region || !hex) return false;
+  if (Array.isArray(region.hexes)) return region.hexes.includes(hex);
+  const column = Number(String(hex).slice(0, 2));
+  if (Number.isInteger(region.column)) return column === region.column;
+  return (region.min_column != null || region.max_column != null)
+    && column >= (region.min_column ?? 1) && column <= (region.max_column ?? 99);
+}
+
 function predicateErrors(item) {
   const errors = [];
   if (!METRICS.has(item.metric)) errors.push("unknown_metric");
@@ -22,6 +31,17 @@ function predicateErrors(item) {
   if (item.target_hex && (typeof item.target_hex !== "string" || !/^\d{4}$/.test(item.target_hex))) errors.push("invalid_target_hex");
   if (item.target_region?.hexes && (!Array.isArray(item.target_region.hexes)
     || item.target_region.hexes.some((hex) => typeof hex !== "string" || !/^\d{4}$/.test(hex)))) errors.push("invalid_target_region");
+  if (item.target_region) {
+    const region = item.target_region;
+    const forms = Number(region.hexes != null) + Number(region.column != null)
+      + Number(region.min_column != null || region.max_column != null);
+    if (forms !== 1 || Object.keys(region).some((key) => !["hexes", "column", "min_column", "max_column"].includes(key))) errors.push("invalid_target_region");
+    for (const key of ["column", "min_column", "max_column"]) {
+      if (region[key] != null && (!Number.isInteger(region[key]) || region[key] < 1 || region[key] > 99)) errors.push("invalid_region_column");
+    }
+    if (region.min_column != null && region.max_column != null && region.min_column > region.max_column) errors.push("reversed_region_bounds");
+    if (Array.isArray(region.hexes) && !region.hexes.length) errors.push("empty_target_region");
+  }
   return errors;
 }
 
@@ -52,12 +72,22 @@ function acceptanceErrors(task, criteria) {
   }
   if (ids.some((id) => !covered.has(id))) errors.push("completion_condition_without_obligation");
   // Check explicit structured targets only, never infer a mission from prose.
-  if (task.target_hex && !conditions.some((item) => item.target_hex === task.target_hex
-    && ["position", "at_target", "units_at_target", "target_distance", "mine_clearance"].includes(item.metric))) errors.push("declared_hex_without_location_or_effect_evidence");
-  if (task.target_column != null && !conditions.some((item) =>
-    ["position", "at_target", "units_at_target"].includes(item.metric) && Number(item.target_region?.column) === Number(task.target_column)
+  const occupies = (item) => ["position", "at_target", "units_at_target"].includes(item.metric)
+    && ["at_least", "equal", "equals", "eq", "greater_than", "gt"].includes(item.relation) && Number(item.target) > 0;
+  const exactLocation = (item) => occupies(item)
+    || item.metric === "target_distance" && Number(item.target) === 0 && ["at_most", "equal", "equals", "eq"].includes(item.relation);
+  const guaranteed = (predicate) => (criteria.all || []).some(predicate)
+    || !!criteria.any?.length && criteria.any.every(predicate);
+  if (task.target_role !== "reference" && task.target_hex && !guaranteed((item) =>
+    item.target_hex === task.target_hex && (exactLocation(item) || item.metric === "mine_clearance")
+    || exactLocation(item) && item.target_region?.hexes?.length === 1 && item.target_region.hexes[0] === task.target_hex)) errors.push("declared_hex_without_location_or_effect_evidence");
+  if (task.target_role !== "reference" && task.target_column != null && !guaranteed((item) =>
+    exactLocation(item) && item.target_hex && Number(item.target_hex.slice(0, 2)) === Number(task.target_column)
+    || occupies(item) && item.target_region?.hexes?.length && item.target_region.hexes.every((hex) => Number(hex.slice(0, 2)) === Number(task.target_column))
+    || occupies(item)
+      && (Number(item.target_region?.column) === Number(task.target_column) || Number(item.target_region?.min_column) === Number(task.target_column))
     || ["scoring_frontier", "target_column"].includes(item.metric) && Number(item.target) === Number(task.target_column))) errors.push("declared_column_without_location_evidence");
   return [...new Set(errors)];
 }
 
-module.exports = { predicateErrors, acceptanceErrors };
+module.exports = { predicateErrors, acceptanceErrors, regionContains };

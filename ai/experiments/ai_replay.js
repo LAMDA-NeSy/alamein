@@ -33,6 +33,8 @@ function clone(value) {
 }
 
 function makeReplay(scenarioName, options = {}) {
+  const combatPhasePolicy = options.combatPhasePolicy || "rule_complete";
+  if (!["rule_complete", "combat_experiment_budget"].includes(combatPhasePolicy)) throw new Error(`Unknown combat phase policy ${combatPhasePolicy}`);
   const rules = readJson("rules_el_alamein.json", Rules.DEFAULT_RULES) || Rules.DEFAULT_RULES;
   const terrain = readJson("terrain.json", { hexes: {}, edges: {} }) || { hexes: {}, edges: {} };
   const state = readJson(SCENARIO_FILES[scenarioName] || SCENARIO_FILES.july);
@@ -698,8 +700,8 @@ function makeReplay(scenarioName, options = {}) {
   }
 
   function aiPhaseActionLimit(side = state.active_side, kind = phaseKind()) {
-    // Movement phases are rule-complete: every eligible unit may act once.
-    // Only combat keeps the existing experimental action budget in v6.
+    // Historical action caps are available only for explicit legacy replay.
+    if (combatPhasePolicy === "rule_complete") return 0;
     if (kind !== "combat") return 0;
     if (state.scenario === "october" && side === "axis" && Number(state.turn || 1) > 10) return 0;
     if (state.scenario === "july") return side === "axis" ? 3 : 2;

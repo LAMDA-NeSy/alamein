@@ -50,7 +50,7 @@ test("comparison contract is harness-independent but changes when a controlled f
     assert.match(first.contract.prompt_registry_hash, /^[a-f0-9]{64}$/);
     assert.equal(first.contract.harness_prompt_version, "harness-prompt-v2-side-aware");
     assert.match(first.contract.harness_prompt_hash, /^[a-f0-9]{64}$/);
-    assert.equal(first.contract.version, "single-action-comparison-v19-typed-task-settlement");
+    assert.equal(first.contract.version, "single-action-comparison-v22-monitor-isolation");
     assert.equal(first.contract.scoring_context_version, "scenario-scoring-v4-grounded-metrics");
     assert.equal(first.contract.opportunity_filter_version, "intent-backfill-v1");
     assert.equal(first.contract.movement_supply_projection_version, "post-move-supply-v1");
@@ -59,7 +59,7 @@ test("comparison contract is harness-independent but changes when a controlled f
     assert.equal(first.contract.execution_thinking_mode, "omitted");
     assert.equal(first.contract.execution_tool_choice_protocol, "application-validated-auto-v1");
     assert.equal(first.contract.movement_phase_policy, "rule_complete");
-    assert.equal(first.contract.combat_phase_policy, "combat_experiment_budget");
+    assert.equal(first.contract.combat_phase_policy, "rule_complete");
     assert.equal(first.contract.fixed_movement_action_limits, false);
     assert.equal(first.contract.tool_argument_contract, "canonical-tool-arguments-v2");
     assert.equal(first.contract.rule_bridge_version, "rolling-unit-bookkeeping-v5-phase-plan");
@@ -71,7 +71,7 @@ test("comparison contract is harness-independent but changes when a controlled f
     assert.ok(first.contract.source_control);
     assert.equal(Object.hasOwn(first.contract, "harness"), false);
     const sae = createComparisonContract({ ...common, decisionPolicy: "hierarchical_sae", toolProfile: resolveToolProfile("rolling_unit_tactical"), toolConfigHash: toolProfileHash(resolveToolProfile("rolling_unit_tactical")) });
-    assert.equal(sae.contract.version, "single-action-comparison-v19-typed-task-settlement");
+    assert.equal(sae.contract.version, "single-action-comparison-v22-monitor-isolation");
     assert.equal(sae.contract.planning_thinking_mode, "disabled");
     assert.equal(sae.contract.objective_resolution_version, "objective-resolution-v2");
     assert.equal(sae.contract.adaptive_replanning_version, "adaptive-replanning-v1");
@@ -87,7 +87,7 @@ test("comparison contract is harness-independent but changes when a controlled f
       taskManagement: "side-aware-task-v2",
       taskCheckerProfile: "mock_secondary"
     });
-    assert.equal(taskSae.contract.version, "single-action-comparison-v19-typed-task-settlement");
+    assert.equal(taskSae.contract.version, "single-action-comparison-v22-monitor-isolation");
     assert.equal(taskSae.contract.transport_fallback_ranking_policy, "complete-game-method-fallback-v1");
     assert.equal(taskSae.contract.strategic_combat_guard_version, "allied-threat-aware-odds-v2");
     assert.equal(taskSae.contract.supply_assignment_grounding_version, "executable-supply-v1");

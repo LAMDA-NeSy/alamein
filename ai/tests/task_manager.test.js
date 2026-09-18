@@ -85,10 +85,14 @@ test("July skeleton respects model targets without raising them to a preset colu
 
 test("model-defined July Axis plans retain a route-free scoring anchor invariant", () => {
   const modelDefined = buildTaskSkeleton({ state, side: "axis", taskGeneration: "model_defined", scoringAnchorPolicy: "july_terminal_v1" });
-  assert.deepEqual(modelDefined.children.map((task) => task.id), ["july_scoring_anchor"]);
-  assert.equal(modelDefined.children[0].target_column, 35);
-  assert.deepEqual(modelDefined.children[0].assigned_units, []);
-  assert.equal(modelDefined.children[0].source, "local_safety_invariant");
+  assert.deepEqual(modelDefined.children.map((task) => task.id), ["breakthrough_access", "july_scoring_anchor"]);
+  assert.equal(modelDefined.children.find((task) => task.id === "july_scoring_anchor").target_column, 35);
+  assert.deepEqual(modelDefined.children.find((task) => task.id === "july_scoring_anchor").assigned_units, []);
+  assert.equal(modelDefined.children.find((task) => task.id === "july_scoring_anchor").source, "local_safety_invariant");
+  const access = modelDefined.children.find((task) => task.id === "breakthrough_access");
+  assert.equal(access.task_role, "blocker_reduction");
+  assert.equal(access.target_hex, undefined);
+  assert.equal(access.assigned_units.length, 0);
 
   const plan = normalizeTaskPlan({ children: Array.from({ length: 6 }, (_, index) => ({
     id: `model_${index}`,
@@ -215,7 +219,7 @@ test("July Axis model tasks use a defense-compression operation and choose explo
   assert.equal(skeleton.parent.operation_stage, "compress_defense");
   assert.match(skeleton.parent.title, /压缩 Allied 防线/);
   assert.equal(skeleton.parent.target_column, null);
-  assert.deepEqual(skeleton.children.map((task) => task.id), ["july_scoring_anchor"]);
+  assert.deepEqual(skeleton.children.map((task) => task.id), ["breakthrough_access", "july_scoring_anchor"]);
 
   const plan = normalizeTaskPlan({
     parent: { title: "模型选择的南侧突破" },
@@ -407,11 +411,75 @@ test("Axis combat opportunities are rule-verified and dispatched before ordinary
   });
   const opportunities = axisTacticalOpportunities(plan, { state: combatState, side: "axis", phase: combatState.phase, ctx });
   assert.equal(opportunities.clear_blocker.length, 1);
+  assert.equal(opportunities.candidate_blocker.length, 0);
   assert.deepEqual(opportunities.clear_blocker[0].defender_hexes, ["2524"]);
   assert.equal(opportunities.clear_blocker[0].odds_column, "4-1");
   const dispatch = phaseDispatchTasks(plan, { state: combatState, side: "axis", phase: combatState.phase, ctx });
   assert.equal(dispatch.primary_task_id, "clear_blocker");
   assert.deepEqual(dispatch.tasks.find((task) => task.type === "clear_blocker").eligible_units, ["axis-a", "axis-b"]);
+});
+
+test("July Axis keeps a low-odds but legal breakthrough blocker as a model choice", () => {
+  const combatState = {
+    scenario: "july",
+    turn: 1,
+    phase: "axis_combat",
+    active_side: "axis",
+    units: {
+      "axis-a": { side: "axis", hex: "3515", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      "axis-b": { side: "axis", hex: "3514", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      "allied-blocker": { side: "allies", hex: "3516", state: "fresh", attack: 5, defense: 4, movement: 4, kind: "ground" }
+    }
+  };
+  const rules = JSON.parse(fs.readFileSync(path.join(__dirname, "../../rules_el_alamein.json"), "utf8"));
+  const terrain = JSON.parse(fs.readFileSync(path.join(__dirname, "../../terrain.json"), "utf8"));
+  const ctx = RulesEngine.createContext({ state: combatState, rules, terrain });
+  const plan = { side: "axis", children: [], breakthrough_access_policy: "model_selected_blockers_v1" };
+  const opportunities = axisTacticalOpportunities(plan, { state: combatState, side: "axis", phase: combatState.phase, ctx });
+  assert.equal(opportunities.clear_blocker.length, 0);
+  assert.equal(opportunities.candidate_blocker.length, 1);
+  assert.equal(opportunities.candidate_blocker[0].route_blocking_verified, false);
+  assert.equal(opportunities.candidate_blocker[0].odds_column, "1-4");
+  assert.match(opportunities.candidate_blocker[0].reason, /lower-odds/);
+});
+
+test("July model-defined breach tasks receive blocker candidates without forcing the attack", () => {
+  const combatState = {
+    scenario: "july",
+    turn: 1,
+    phase: "axis_combat",
+    active_side: "axis",
+    units: {
+      "axis-a": { side: "axis", hex: "3515", state: "fresh", attack: 1, defense: 1, movement: 4, kind: "ground" },
+      "allied-blocker": { side: "allies", hex: "3516", state: "fresh", attack: 5, defense: 4, movement: 4, kind: "ground" }
+    }
+  };
+  const rules = JSON.parse(fs.readFileSync(path.join(__dirname, "../../rules_el_alamein.json"), "utf8"));
+  const terrain = JSON.parse(fs.readFileSync(path.join(__dirname, "../../terrain.json"), "utf8"));
+  const ctx = RulesEngine.createContext({ state: combatState, rules, terrain });
+  const manager = createTaskManager({
+    taskGeneration: "model_defined",
+    scoringAnchorPolicy: "july_terminal_v1",
+    monitorPolicy: "separate_monitors_v1",
+    taskProtocol: "side-aware-task-v4",
+    replanCooldownActions: 0
+  });
+  const plan = manager.initialize({
+    intent: { side: "axis" },
+    operation: "model_breakthrough",
+    input: { state: combatState, side: "axis", phase: combatState.phase, ctx },
+    rawPlan: { children: [{ id: "breach", task_type: "breach", task_role: "breach", assigned_unit_ids: ["axis-a"], applicable_phases: ["combat"] }] },
+    allocation: { spearhead: [{ unit: "axis-a" }], support: [], supply: [], reserve: [] },
+    taskGeneration: "model_defined"
+  });
+  const breach = plan.children.find((task) => task.id === "breach");
+  const local = plan.children.find((task) => task.id === "breakthrough_access");
+  assert.ok(breach);
+  assert.equal(breach.status, "active");
+  assert.equal(breach.candidate_blockers.length, 1);
+  assert.deepEqual(breach.candidate_unit_ids, ["axis-a"]);
+  assert.equal(local, undefined);
+  assert.equal(phaseDispatchTasks(plan, { state: combatState, side: "axis", phase: combatState.phase, ctx }).primary_task_id, "breach");
 });
 
 test("open goal target column is decomposed into ordered breakthrough steps", () => {

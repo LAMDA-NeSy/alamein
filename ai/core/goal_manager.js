@@ -126,7 +126,106 @@ function validHex(value, ctx = null) {
   catch { return ""; }
 }
 
-function groundGoalPlan(raw, { publicContext = {}, state = {}, side = "", ctx = null } = {}) {
+function goalFingerprint(goal = {}) {
+  return JSON.stringify({
+    // IDs and prose labels are presentation-level fields. A model may rename
+    // the same operational objective without creating a new subgoal version.
+    goal_type: goal.goal_type,
+    subject_side: goal.subject_side,
+    metric: goal.metric,
+    relation: goal.relation,
+    target: goal.target,
+    target_column: goal.target_column,
+    target_vp: goal.target_vp,
+    target_hex: goal.target_hex,
+    target_units: goal.target_units,
+    evaluation_scope: goal.evaluation_scope,
+    observable_conditions: goal.observable_conditions || [],
+    failure_conditions: goal.failure_conditions || [],
+    switch_conditions: goal.switch_conditions || []
+  });
+}
+
+function normalizeSubgoal(goal, operationId, { source = "model", reason = "" } = {}) {
+  if (!goal) return null;
+  return {
+    ...clone(goal),
+    id: id(goal.id, "subgoal"),
+    kind: "operational_subgoal",
+    parent_operation: operationId,
+    status: "active",
+    source,
+    change_reason: text(reason, "", 240)
+  };
+}
+
+function persistentOperation({ primary, campaign, source = {}, facts, side, previous = null, reason = "" } = {}) {
+  const candidate = id(source.operation || primary?.id, "open_operation");
+  const previousStatus = String(previous?.status || "").toLowerCase();
+  const replaceRequested = source.replace_operation === true
+    || source.replace_parent_operation === true
+    || source.operation_action === "replace"
+    || source.operation_mode === "replace"
+    || source.new_operation === true;
+  const previousActive = previous?.id && !["completed", "failed", "cancelled", "superseded"].includes(previousStatus);
+  const julyBreakthrough = side === "axis" && facts?.scenario === "july"
+    && (primary?.metric === "scoring_frontier" || /advance|breakthrough|score|frontier/i.test(`${primary?.goal_type || ""} ${candidate}`));
+  const operationId = previousActive && !replaceRequested
+    ? id(previous.id, candidate)
+    : julyBreakthrough && !replaceRequested ? "sustainable_breakthrough" : candidate;
+  const operationTitle = previousActive && !replaceRequested
+    ? text(previous.title, "持续作战行动", 160)
+    : julyBreakthrough
+      ? "压缩 Allied 防线并形成持续突破"
+      : text(source.operation_title || primary?.title, "持续作战行动", 160);
+  const previousSubgoal = previous?.current_subgoal || null;
+  const currentSubgoal = normalizeSubgoal(primary, operationId, {
+    source: source?.error ? "local_default" : "model",
+    reason: previousSubgoal && goalFingerprint(previousSubgoal) !== goalFingerprint(primary)
+      ? reason || "model_selected_new_operational_subgoal" : ""
+  });
+  const subgoalHistory = Array.isArray(previous?.subgoal_history) ? clone(previous.subgoal_history) : [];
+  if (previousSubgoal && goalFingerprint(previousSubgoal) !== goalFingerprint(currentSubgoal)) {
+    const priorEntry = {
+      ...clone(previousSubgoal),
+      status: previousSubgoal.status || "superseded",
+      ended_at: { turn: facts?.turn || null },
+      ended_reason: reason || "replaced_by_new_operational_subgoal"
+    };
+    if (!subgoalHistory.some((entry) => goalFingerprint(entry) === goalFingerprint(priorEntry))) subgoalHistory.push(priorEntry);
+  }
+  const operationHistory = Array.isArray(previous?.operation_history) ? clone(previous.operation_history) : [];
+  if (replaceRequested && previousActive && previous.id !== operationId) {
+    operationHistory.push({ id: previous.id, title: previous.title, status: "superseded", reason: reason || "model_requested_operation_replacement" });
+  }
+  return {
+    id: operationId,
+    title: operationTitle,
+    status: previousActive && !replaceRequested ? previous.status || "active" : "active",
+    scenario: facts?.scenario || null,
+    side,
+    original_goal: previous?.original_goal || {
+      campaign_goal: clone(campaign),
+      opening_subgoal: clone(currentSubgoal),
+      fixed_evaluation: {
+        type: "final_scenario_result",
+        evaluator: "rules_engine",
+        scenario: facts?.scenario || null,
+        subject_side: "axis",
+        metric: facts?.scenario_metric || "scenario_scoring",
+        evaluation_scope: "game_end"
+      }
+    },
+    current_subgoal: currentSubgoal,
+    subgoal_history: subgoalHistory.slice(-24),
+    operation_history: operationHistory.slice(-12),
+    revision: Number(previous?.revision || 0) + (previousSubgoal && goalFingerprint(previousSubgoal) !== goalFingerprint(currentSubgoal) ? 1 : 0),
+    last_change_reason: previousSubgoal && goalFingerprint(previousSubgoal) !== goalFingerprint(currentSubgoal)
+      ? reason || "model_selected_new_operational_subgoal" : (previous?.last_change_reason || "opening_operation")
+  };
+}
+
+function groundGoalPlan(raw, { publicContext = {}, state = {}, side = "", ctx = null, previousOperation = null, replanReason = "", sourceOverride = null } = {}) {
   const source = raw?.goal_plan || raw?.strategic_goal_plan || raw || {};
   const facts = hardFacts(publicContext);
   const campaignRaw = source.campaign_goal || {};
@@ -350,12 +449,23 @@ function groundGoalPlan(raw, { publicContext = {}, state = {}, side = "", ctx = 
   }
   if (campaign.target_vp == null && Number.isFinite(Number(facts.next_threshold?.vp))) campaign.target_vp = Number(facts.next_threshold.vp);
   if (!primary.rationale) primary.rationale = text(source.rationale, "Choose and execute the most valuable feasible operation from the current position.", 420);
-  const operation = id(source.operation || primary.id, "open_operation");
+  const persistent = persistentOperation({
+    primary,
+    campaign,
+    facts,
+    side,
+    previous: previousOperation,
+    reason: replanReason,
+    source: sourceOverride ? { ...source, error: sourceOverride !== "model" } : source
+  });
+  const operation = persistent.id;
   const plan = {
     type: "grounded_goal_plan",
     protocol: "side-aware-goal-v2",
     side,
     operation,
+    persistent_operation: persistent,
+    current_subgoal: clone(persistent.current_subgoal),
     campaign_goal: campaign,
     primary_goal: primary,
     supporting_goals: supporting,
@@ -376,12 +486,12 @@ function groundGoalPlan(raw, { publicContext = {}, state = {}, side = "", ctx = 
       source: "rule_grounded"
     },
     task_plan: source.task_plan || null,
-    source: raw?.error ? "local_default" : "model"
+    source: sourceOverride || (raw?.error ? "local_default" : "model")
   };
   return plan;
 }
 
-function localGoalPlan({ publicContext = {}, state = {}, side = "" } = {}) {
+function localGoalPlan({ publicContext = {}, state = {}, side = "", previousOperation = null, replanReason = "" } = {}) {
   const facts = hardFacts(publicContext);
   const defensive = side === "allies";
   const targetColumn = facts.scenario === "july" ? facts.next_scoring_column : null;
@@ -446,7 +556,14 @@ function localGoalPlan({ publicContext = {}, state = {}, side = "" } = {}) {
       relation: "preserve"
     }],
     operation_policy: { main_axis: "flexible", minimum_attack_odds: "2-1", risk_posture: "balanced" }
-  }, { publicContext, state, side });
+  }, {
+    publicContext,
+    state,
+    side,
+    previousOperation,
+    replanReason,
+    sourceOverride: "local_default"
+  });
   plan.source = "local_default";
   return plan;
 }
@@ -492,5 +609,7 @@ module.exports = {
   groundGoalPlan,
   hardFacts,
   localGoalPlan,
-  normalizePolicy
+  normalizePolicy,
+  goalFingerprint,
+  persistentOperation
 };

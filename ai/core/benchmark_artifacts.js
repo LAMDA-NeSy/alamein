@@ -9,7 +9,7 @@ const { PROJECT_ROOT } = require("./project_paths.js");
 const BENCHMARK_VERSION = "alamein-benchmark-v3-verified-counter-stats";
 const RULE_KEYS = ["rule_engine", "rule_configuration", "terrain", "scenario", "counter_stats"];
 const OPPONENT_KEYS = ["rules_ai", "controllers", "replay"];
-const CURRENT_FILES = {
+const LEGACY_SCHEMA_3_FILES = {
   counter_stats: "counter_stats.json",
   counter_stats_validator: "ai/core/counter_stats.js",
   model_json: "ai/core/model_json.js",
@@ -20,6 +20,8 @@ const CURRENT_FILES = {
   metrics_runner: "ai/experiments/evaluate_research_metrics.js",
   artifact_validator: "ai/core/benchmark_artifacts.js"
 };
+const LEGACY_SCHEMA_4_FILES = { ...LEGACY_SCHEMA_3_FILES, task_review: "ai/core/task_review.js" };
+const CURRENT_FILES = { ...LEGACY_SCHEMA_4_FILES, task_predicates: "ai/core/task_predicate_schema.js" };
 
 // Schema 2 was emitted before counter_stats was promoted to a benchmark
 // artifact. Historical manifests must be validated against the file set they
@@ -120,7 +122,7 @@ function createArtifactManifest(scenario, options = {}) {
   }
   if (missing.length) throw new Error(`benchmark artifact files are missing: ${missing.join(", ")}`);
   const manifest = {
-    manifest_schema: 3,
+    manifest_schema: 5,
     benchmark_version: String(options.benchmarkVersion || BENCHMARK_VERSION),
     scenario: String(scenario),
     files: entries
@@ -142,11 +144,11 @@ function validateArtifactManifest(manifest, expectedHash) {
   try {
     expectedFiles = {
       ...artifactFiles(scenario),
-      ...(schema === 1 ? {} : schema === 2 ? LEGACY_SCHEMA_2_FILES : schema === 3 ? CURRENT_FILES : null)
+      ...(schema === 1 ? {} : schema === 2 ? LEGACY_SCHEMA_2_FILES : schema === 3 ? LEGACY_SCHEMA_3_FILES : schema === 4 ? LEGACY_SCHEMA_4_FILES : schema === 5 ? CURRENT_FILES : null)
     };
   }
   catch { return false; }
-  if (![1, 2, 3].includes(schema)) return false;
+  if (![1, 2, 3, 4, 5].includes(schema)) return false;
   if (Object.entries(expectedFiles).some(([key, file]) => {
     if (files[key]?.path !== file || !/^[a-f0-9]{64}$/.test(files[key]?.sha256 || "")) return true;
     return false;

@@ -4,6 +4,7 @@ const { resolveSidePrompt } = require("./prompt_registry.js");
 const { thinkingRequest } = require("./model_runtime.js");
 const { compactToolFeedback } = require("./agent_context.js");
 const { parseModelObject } = require("./model_json.js");
+const { REVIEW_POLICY, reviewClock, phaseSequence, remainingTaskWindows, continuationErrors } = require("./task_review.js");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -45,7 +46,11 @@ function normalizeCheck(raw, taskPlan) {
       state_change: String(value.evidence?.state_change || "").slice(0, 300)
     },
     reason: String(value.reason || "").slice(0, 300),
-    source: "model"
+    source: "model",
+    review_id: typeof value.review_id === "string" ? value.review_id : "",
+    review_decision: typeof value.review_decision === "string" ? value.review_decision : "",
+    next_action_at: value.next_action_at && typeof value.next_action_at === "object" ? clone(value.next_action_at) : null,
+    wait: value.wait && typeof value.wait === "object" ? clone(value.wait) : null
   };
 }
 
@@ -62,20 +67,32 @@ function compactTask(task) {
     scoring_anchor_state: task.scoring_anchor_state,
     scoring_anchor_loss_count: task.scoring_anchor_loss_count,
     assigned_units: (task.assigned_units || []).slice(0, 12),
+    compatible_units: (task.compatible_units || []).slice(0, 12),
+    candidate_blockers: (task.candidate_blockers || []).slice(0, 6),
+    activation_policy: task.activation_policy || null,
+    completion_evaluator: task.completion_evaluator || null,
+    blocker_resolution: task.blocker_resolution || null,
     dependency_status: task.dependency_status || null,
     phase_scope: task.phase_scope || [],
     completion_condition: task.completion_condition || "",
     completion_criteria: task.completion_criteria || null,
     completion_evidence: task.completion_evidence || null,
+    acceptance_diagnostics: task.acceptance_diagnostics || null,
     failure_condition: task.failure_condition || "",
     current_metrics: task.current_metrics || null,
     progress_evidence: task.progress_evidence || "",
-    last_blocked_reason: task.last_blocked_reason || ""
+    last_blocked_reason: task.last_blocked_reason || "",
+    wait_state: task.wait_state || null,
+    review_request: task.review_request || null,
+    stagnant_windows: task.stagnant_windows || 0,
+    review_window: task.review_window || null,
+    recent_reviews: (task.review_history || []).slice(-3)
   };
 }
 
-function checkerPayload({ input, taskPlan, stepRecord, events }) {
+function checkerPayload({ input, taskPlan, stepRecord, events, reviewRequests = [] }) {
   const activeTasks = (taskPlan?.children || []).filter((task) => task.status === "active").map(compactTask);
+  const reviewedTasks = (taskPlan?.children || []).filter((task) => reviewRequests.some((request) => request.task_id === task.id)).map(compactTask);
   const accepted = [...(stepRecord?.action_attempts || [])].reverse().find((item) => item.accepted) || null;
   const action = stepRecord?.final_action || null;
   const compactAccepted = accepted
@@ -92,7 +109,9 @@ function checkerPayload({ input, taskPlan, stepRecord, events }) {
   const referencedUnits = new Set([
     ...(action?.unit ? [action.unit] : []),
     ...(action?.attackers || []),
-    ...activeTasks.flatMap((task) => [...task.assigned_units,
+    ...[...activeTasks, ...reviewedTasks].flatMap((task) => [...task.assigned_units,
+      ...(task.activation_policy === "rule_verified_breakthrough_contact" ? task.compatible_units : []),
+      ...(task.wait_state?.watched_unit_ids || []),
       ...Object.values(task.completion_criteria || {}).flat().flatMap((condition) =>
         [...(condition.unit_ids || []), ...(condition.beneficiary_unit_ids || [])])])
   ]);
@@ -103,16 +122,31 @@ function checkerPayload({ input, taskPlan, stepRecord, events }) {
       hex: unit.hex || "",
       state: unit.state || "",
       eliminated: !!unit.eliminated,
-      isolated: !!unit.isolated
+      supply: unit.supply_state || unit.supply || "unknown",
+      isolated: unit.supply_state === "isolated" || unit.supply === "isolated" || !!unit.isolated
     } : { missing: true }];
   }));
   return {
-    protocol: "task-check-evidence-v2",
+    protocol: taskPlan?.review_policy === REVIEW_POLICY ? "task-check-review-v4-action-windows" : "task-check-evidence-v2",
     turn: input?.turn,
     step: input?.step,
     phase: input?.phase,
     side: input?.side,
     trigger_events: events,
+    current_clock: reviewClock(input),
+    phase_sequence: phaseSequence(input),
+    task_action_windows: Object.fromEntries([...activeTasks, ...reviewedTasks].map((task) => {
+      const { windows, ...summary } = remainingTaskWindows(input, task);
+      return [task.id, summary];
+    })),
+    action_origin: stepRecord ? { step: stepRecord.step, turn: stepRecord.turn, phase: stepRecord.phase } : null,
+    review_requests: reviewRequests,
+    selected_review: reviewRequests[0] || null,
+    review_tasks: reviewedTasks,
+    scoring_recovery: taskPlan?.scoring_recovery || null,
+    breakthrough_planning: taskPlan?.breakthrough_planning || null,
+    existing_tasks: (taskPlan?.children || []).map((task) => ({ id: task.id, status: task.status,
+      dependency_status: task.dependency_status, phase_scope: task.phase_scope })),
     parent: {
       id: taskPlan?.parent?.id || "",
       state: taskPlan?.parent?.state || "",
@@ -134,7 +168,7 @@ function checkerPayload({ input, taskPlan, stepRecord, events }) {
     rule_grounded_unit_state: unitEvidence,
     required_response: {
       type: "task_check",
-      task_id: "exact id from active_tasks",
+      task_id: reviewRequests.length ? "task_id of the selected review_request" : "exact id from active_tasks",
       task_status: "continue|completed|blocked|failed",
       action_assessment: "weak|neutral|good",
       task_progress: "number from 0 to 1",
@@ -148,9 +182,15 @@ function checkerPayload({ input, taskPlan, stepRecord, events }) {
       local_task_outcome: "on_track|at_risk|blocked|achieved|failed|unknown",
       campaign_outcome: "on_track|at_risk|blocked|achieved|failed|unknown",
       evidence: { step: "current step", unit_ids: [], hexes: [], state_change: "observed before/after change" },
-      reason: "short grounded explanation"
+      reason: "short grounded explanation",
+      ...(reviewRequests.length ? {
+        review_id: "exact pending review request id; task_id must match this request",
+        review_decision: "continue|wait|switch|replan",
+        next_action_at: "For continue, select a reachable applicable {turn,phase,boundary:start} from task_action_windows. Null for other decisions. If no action window remains and evidence is unmet, choose switch/replan, not a fictional future turn.",
+        wait: "null unless waiting; then {reason, expected_change, renewal_reason (required when renewing), condition, review_at:{turn,phase,boundary:start|end}}. expected_change explains what improves or settles during the wait. condition.kind is phase_reached (turn,phase,boundary), task_condition_met (task_id), or observable (criteria with immediate typed all/any predicates)."
+      } : {})
     },
-    control_rules: "You may continue, pause, switch to an existing task, or cancel an existing task. Never create a task, reassign a unit, or execute an action. Use switch_to only for an existing task id."
+    control_rules: "Assess selected_review first and copy its short id exactly. Do not replace it with an unrelated satisfied task. An execution task without assigned units cannot continue; consider switching or strategic allocation repair through replan. The local rule_verified_breakthrough_contact task may instead use its current rule-verified compatible_units; this does not reassign them. Candidate combat legality does not prove route blockage or successful clearance. Assess facts without changing task status. Waiting is advisory, not a hold order. Due reviews never automatically fail or replace a task. Replan requires evidence that local adjustment cannot repair the operation. Distinguish action_origin from current_clock. Evidence may explicitly state nothing changed. Never create a task, reassign units, or execute an action."
   };
 }
 
@@ -159,7 +199,7 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
   let currentTurn = null;
   const records = [];
   const recentEvents = new Map();
-  async function check({ input, taskPlan, stepRecord, events = [], timeoutMs: timeoutOverride } = {}) {
+  async function check({ input, taskPlan, stepRecord, events = [], reviewRequests = [], timeoutMs: timeoutOverride } = {}) {
     if (!client || !runtime || !events.length) return { skipped: true, reason: "no_trigger" };
     if (currentTurn !== input?.turn) {
       currentTurn = input?.turn;
@@ -167,7 +207,7 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
     }
     if (callsThisTurn >= maxCallsPerTurn) return { skipped: true, reason: "turn_check_limit" };
     const eventKey = JSON.stringify([input?.turn, input?.phase, input?.side,
-      (taskPlan?.children || []).filter((task) => task.status === "active").map((task) => task.id).sort(), [...events].sort()]);
+      (taskPlan?.children || []).filter((task) => task.status === "active").map((task) => task.id).sort(), [...events].sort(), reviewRequests.map((request) => request.id)]);
     const previousStep = recentEvents.get(eventKey);
     if (cooldownActions > 0 && previousStep != null && Number(input?.step || 0) - previousStep < cooldownActions) {
       return { skipped: true, reason: "event_cooldown", event_key: eventKey };
@@ -176,7 +216,7 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
     callsThisTurn += 1;
     const started = Date.now();
     const requestTimeoutMs = Math.max(1, Number(timeoutOverride ?? timeoutMs));
-    const payload = checkerPayload({ input, taskPlan, stepRecord, events });
+    const payload = checkerPayload({ input, taskPlan, stepRecord, events, reviewRequests });
     let result;
     try {
       result = await client.complete({
@@ -197,10 +237,21 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
       const parsed = parseJson(result);
       if (!parsed) throw new Error("task checker returned invalid JSON");
       const checkResult = normalizeCheck(parsed, taskPlan);
+      if (reviewRequests.length && !checkResult.abstain && (!reviewRequests.some((request) =>
+        request.id === checkResult.review_id && request.task_id === checkResult.task_id)
+        || !["continue", "wait", "switch", "replan"].includes(checkResult.review_decision)
+        || checkResult.evidence.step !== Number(input.step))) {
+        throw new Error("task checker returned a stale or invalid review decision");
+      }
       if (!checkResult.abstain && !checkResult.evidence.state_change) {
         throw new Error("task checker omitted state-change evidence");
       }
-      const record = { ok: true, events, result: checkResult, request_id: result.request_id,
+      if (reviewRequests.length && !checkResult.abstain) {
+        const task = taskPlan.children.find((item) => item.id === checkResult.task_id);
+        const errors = continuationErrors(checkResult, input, task);
+        if (errors.length) throw new Error(`task checker invalid continuation: ${errors.join(", ")}`);
+      }
+      const record = { ok: true, events, review_requests: clone(reviewRequests), result: checkResult, request_id: result.request_id,
         raw_output: result.response_json, elapsed_ms: Date.now() - started, status: result.status ?? 200 };
       records.push(record);
       return record;
@@ -211,7 +262,7 @@ function createTaskCheckerRuntime({ client, runtime, timeoutMs = 60000, maxCalls
         const requestRecord = runtime.transport?.find((item) => item.request_id === result.request_id);
         if (requestRecord) requestRecord.protocol_failure = { stage: "checker", error: error.message };
       }
-      const record = { ok: false, events, fallback: true, reason: error.message, request_id: result?.request_id,
+      const record = { ok: false, events, review_requests: clone(reviewRequests), fallback: true, reason: error.message, request_id: result?.request_id,
         raw_output: result?.response_json || null, elapsed_ms: Date.now() - started, status: result?.status ?? 0 };
       records.push(record);
       return record;

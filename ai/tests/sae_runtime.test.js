@@ -46,6 +46,67 @@ function reasoningResponse(value) {
   };
 }
 
+test("SAE waits across phases, reviews due waits once, and honors checker continue without replanning", async () => {
+  const current = structuredClone(state);
+  const ids = Object.keys(current.units).filter((id) => current.units[id].side === "axis" && current.units[id].hex);
+  const input = { state: current, turn: 1, side: "axis", phase: current.phase, step: 1 };
+  let plans = 0;
+  let checks = 0;
+  const sae = createSaeRuntime({
+    config: { ...readConfig(), task_management: "multi_task", task_management_options: {
+      execution_ledger: true, review_policy: "model_review_wait_v1", task_generation: "model_defined",
+      route_feasibility_budget_ms: 10
+    } }, runtime: runtime(),
+    client: { async complete(request) {
+      plans += 1;
+      return request.audit_stage === "allocation" ? response({ type: "force_allocation", spearhead: [{ unit: ids[0] }], support: [], supply: [], reserve: [] })
+        : response({ type: "strategic_intent", operation: "prepare", intent: { type: "consolidate", sector: "central" },
+          children: [{ id: "prepare_main", task_type: "maneuver", assigned_unit_ids: [ids[0]],
+            completion_criteria: { all: [{ metric: "position", relation: "at_least", target: 1, unit_ids: [ids[0]], target_hex: "4910", evaluation_scope: "immediate" }] } }] });
+    } },
+    taskChecker: { timeoutMs: 1000, async check({ reviewRequests, input: checkInput }) {
+      checks += 1;
+      const request = reviewRequests[0];
+      assert.ok(request);
+      return { ok: true, result: { task_id: request.task_id, review_id: request.id,
+        review_decision: checks === 1 ? "wait" : "continue", confidence: 0.9, abstain: checks === 3, reason: "Retain preparation.",
+        next_action_at: { turn: checkInput.state.turn, phase: checkInput.state.phase, boundary: "start" },
+        evidence: { step: checkInput.step, state_change: "The phase schedule explains the pause." },
+        wait: checks === 1 ? { reason: "Wait for the supply phase.", expected_change: "The truck can restore supply.",
+          condition: { kind: "phase_reached", turn: 1, phase: "axis_supply_movement", boundary: "end" },
+          review_at: { turn: 1, phase: "axis_supply_movement", boundary: "end" } } : null } };
+    } }
+  });
+  await sae.plan(input);
+  assert.equal(plans, 2);
+  current.phase = "axis_combat";
+  await sae.observe(input, { step: 1, turn: 1, phase: input.phase, final_action: { type: "pass" } });
+  input.phase = current.phase; input.step = 2;
+  const waiting = await sae.plan(input);
+  assert.equal(checks, 1);
+  assert.equal(waiting.record.task_reviews[0].review_application.accepted, true);
+  assert.equal(waiting.operation_state.task_plan.children[0].wait_state.status, "waiting");
+  assert.equal(waiting.record.task_plan.children[0].wait_state.status, "waiting");
+  assert.equal(plans, 2);
+  current.phase = "axis_supply_movement"; input.phase = current.phase; input.step = 3;
+  await sae.plan(input);
+  assert.equal(checks, 1);
+  current.turn = 2; input.turn = 2; current.phase = "axis_initial_movement"; input.phase = current.phase; input.step = 4;
+  const resumed = await sae.plan(input);
+  assert.equal(checks, 2);
+  assert.equal(plans, 2);
+  assert.equal(resumed.record.replanned, false);
+  assert.equal(resumed.operation_state.task_plan.children[0].wait_state.status, "reviewed");
+  await sae.plan({ ...input, step: 5 });
+  assert.equal(checks, 2);
+  await sae.observe(input, { step: 5, turn: 2, phase: input.phase, final_action: { type: "pass" } });
+  current.phase = "axis_combat"; input.phase = current.phase; input.step = 6;
+  const abstained = await sae.plan(input);
+  assert.equal(checks, 3);
+  assert.equal(abstained.record.task_reviews[0].review_application, null);
+  assert.equal(plans, 2);
+});
+
 test("SAE normalizes intent and filters allocation to active-side units", () => {
   const config = readConfig();
   const firstUnit = Object.keys(state.units).find((id) => state.units[id].side === state.active_side);
@@ -195,8 +256,10 @@ test("SAE caches a turn-side plan and records separate planner fallbacks", async
 test("SAE replans when the enemy battlefield fingerprint changes", async () => {
   const config = readConfig();
   let calls = 0;
+  const requests = [];
   const client = {
-    async complete() {
+    async complete(request) {
+      requests.push(request);
       calls += 1;
       return calls % 2
         ? response({ type: "strategic_intent", operation: "hold_the_front", intent_type: "pressure" })
@@ -209,12 +272,20 @@ test("SAE replans when the enemy battlefield fingerprint changes", async () => {
   assert.ok(enemy, "fixture must contain an enemy unit");
   const input = { state: first, turn: 1, side: first.active_side, phase: first.phase, step: 1 };
   await sae.plan(input);
+  const own = Object.entries(first.units).find(([, unit]) => unit.side === first.active_side && unit.kind === "ground" && unit.hex);
+  assert.ok(own);
+  const feedback = { action_attempts: [{ accepted: false,
+    action: { type: "move_intent", unit: own[0], destination: "3710" }, reason: "route rejected" }] };
+  await sae.observe(input, feedback);
+  assert.ok(feedback.verified_route_obstacles.some((item) => item.from === "3610" && item.to === "3710"));
   const changed = structuredClone(first);
   changed.units[enemy[0]].hex = changed.units[enemy[0]].hex === "2524" ? "2624" : "2524";
   const replanned = await sae.plan({ ...input, state: changed, step: 2 });
   assert.equal(calls, 4);
   assert.equal(replanned.record.replanned, true);
   assert.equal(replanned.record.replan_reason, "enemy_state_changed");
+  const payload = JSON.parse(requests[2].messages.at(-1).content);
+  assert.deepEqual(payload.verified_route_obstacles, feedback.verified_route_obstacles);
 });
 
 test("SAE uses local defaults when both planning responses fail", async () => {
@@ -308,6 +379,9 @@ test("multi-task SAE uses an open model goal and grounds its hard facts", async 
   assert.equal(result.strategic_intent.intent.sector, "south");
   assert.equal(result.operation_state.version, "sae-operation-v2+side-aware-goal-v2");
   assert.equal(result.record.goal_grounding.correction_count, 1);
+  assert.equal(result.operation_state.persistent_operation.id, result.goal_plan.persistent_operation.id);
+  assert.equal(result.operation_state.current_subgoal.id, result.goal_plan.current_subgoal.id);
+  assert.equal(result.operation_state.operation_revision, result.goal_plan.persistent_operation.revision);
 });
 
 test("multi-task SAE finalizes a defensive game-end goal from the terminal state", async () => {

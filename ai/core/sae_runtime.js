@@ -4,7 +4,8 @@ const RulesEngine = require("../../rule_engine.js");
 const { buildContext, publicPayload, phaseKind } = require("../experiments/external_ai_transcript.js");
 const { resolveSidePrompt, promptValue } = require("./prompt_registry.js");
 const { capabilityReferenceErrors } = require("./opportunity_ledger.js");
-const { createTaskManager, phaseDispatchTasks, groundedGoalCompleted } = require("./task_manager.js");
+const { createTaskManager, phaseDispatchTasks, groundedGoalCompleted, taskMonitors, taskExecutionSummary } = require("./task_manager.js");
+const { remainingTaskWindows } = require("./task_review.js");
 const { createGoalRevisionLedger } = require("./goal_revision_ledger.js");
 const { goalIntent, groundGoalPlan, localGoalPlan } = require("./goal_manager.js");
 const { thinkingRequest } = require("./model_runtime.js");
@@ -27,6 +28,17 @@ function requestTimeoutForDeadline(deadline, fallbackTimeout) {
 }
 
 function phaseKey(input) { return `${Number(input.turn)}:${input.side}`; }
+
+function persistentOperationFromPlan(plan) {
+  const candidates = [
+    plan?.parent?.persistent_operation,
+    plan?.operation_state?.persistent_operation,
+    plan?.goal_plan?.persistent_operation,
+    plan?.task_plan?.parent?.persistent_operation
+  ];
+  const value = candidates.find((candidate) => candidate && typeof candidate === "object" && candidate.id);
+  return value ? clone(value) : null;
+}
 
 function battlefieldFingerprint(input, built = null, options = {}) {
   const state = input?.state || {};
@@ -177,6 +189,33 @@ function safeUnitColumn(hex) {
   return Number.isFinite(column) ? column : null;
 }
 
+function scoringRecoveryEvidence(ctx, side, taskPlan, knownSupply) {
+  if (ctx?.state?.scenario !== "july" || side !== "axis") return null;
+  const supply = knownSupply || RulesEngine.checkSupply(ctx, side);
+  const units = Object.entries(ctx.state.units || {}).filter(([id, unit]) => unit.side === side && unit.hex
+    && !unit.eliminated && !unit.off_map && RulesEngine.isVictoryCombatUnit({ id, ...unit }));
+  const frontier = Math.max(34, ...units.filter(([id]) => scoringEligibleSupply(supply[id]))
+    .map(([, unit]) => safeUnitColumn(unit.hex)));
+  const atRisk = units.filter(([id, unit]) => safeUnitColumn(unit.hex) > frontier && !scoringEligibleSupply(supply[id]))
+    .sort((a, b) => safeUnitColumn(b[1].hex) - safeUnitColumn(a[1].hex)).slice(0, 4);
+  return {
+    current_scoring_column: frontier,
+    units_without_scoring_supply: atRisk.map(([id, unit]) => ({ unit: id, hex: unit.hex, supply: supply[id],
+      isolated_since: unit.isolated_since || null,
+      vp_gain_if_resupplied_now: Math.max(0, (safeUnitColumn(unit.hex) - frontier) * 3),
+      assigned_task: taskPlan?.children?.find((task) => task.assigned_units?.includes(id))?.id || null,
+      nearby_enemy_zoc: RulesEngine.neighbors(unit.hex).filter(RulesEngine.onMap).map((hex) => ({ hex,
+        sources: [...RulesEngine.enemyZocSources(ctx, side, hex)].map((enemy) => enemy.id || enemy) }))
+        .filter((entry) => entry.sources.length),
+      supply_path: supply[id] === "isolated" ? [] : RulesEngine.traceSupplyPath(ctx, id),
+      recovery_feasibility: "unknown_until_a_specific_supply_or_blocker_action_is_rule_checked"
+    })),
+    supply_units: atRisk.length ? Object.entries(ctx.state.units || {}).filter(([id, unit]) => unit.side === side
+      && RulesEngine.isSupplyUnit({ id, ...unit })).map(([id, unit]) => ({ unit: id, hex: unit.hex, supply: supply[id] })) : [],
+    decision: "Compare restoration of these units, another scoring route, or consolidation. Gains are alternatives, not additive or guaranteed; the model selects and verifies the plan."
+  };
+}
+
 function buildPhaseUnitFacts(input, built, phaseStatus = {}) {
   const state = input?.state || built?.ctx?.state || {};
   const side = input?.side || state.active_side;
@@ -242,6 +281,59 @@ function legalMoveDirections(ctx, id, limit = 8) {
   }
 }
 
+function terrainRouteEvidence(ctx, unitId, target) {
+  const unit = ctx?.state?.units?.[unitId];
+  if (!unit || !target || !RulesEngine.onMap(target)) return [];
+  const destination = RulesEngine.normalizeHex(target);
+  return RulesEngine.neighbors(destination).flatMap((from) => {
+    const result = RulesEngine.stepMovementCost(ctx, { ...unit, id: unitId }, from, destination, { mode: "normal" });
+    const tags = RulesEngine.hexTags(ctx, destination);
+    const edgeTags = RulesEngine.edgeTags(ctx, RulesEngine.normalizeEdge(from, destination));
+    // Never turn an impassable coast edge into a claim about all entries to a hex.
+    if (Number.isFinite(result.cost) || ![...tags, ...edgeTags].some((tag) => ["sea", "all_sea", "depression"].includes(tag))) return [];
+    return [{ category: "terrain", unit: unitId, from, to: destination, mode: "normal",
+      reason: result.reason, hex_tags: tags, edge_tags: edgeTags,
+      source: "rule_engine.stepMovementCost", scope: "this_unit_and_edge" }];
+  });
+}
+
+function combatPreparationEvidence(ctx, side, maxGroups = 6) {
+  if (!ctx?.state || !["initial_movement", "mechanized_movement"].includes(RulesEngine.phaseKind(ctx.state.phase))) return null;
+  const state = clone(ctx.state);
+  state.phase = `${side}_combat`;
+  state.active_side = side;
+  for (const unit of Object.values(state.units || {})) if (unit.side === side) unit.state = "fresh";
+  const projected = RulesEngine.createContext({ state, rules: ctx.rules, terrain: ctx.terrain });
+  const groups = new Map();
+  const coveredAttackers = new Set();
+  for (const unit of RulesEngine.friendlyUnits(projected, side).filter(RulesEngine.canAttackUnit)) {
+    if (groups.size >= maxGroups) break;
+    if (coveredAttackers.has(unit.id)) continue;
+    const attackers = new Set([unit.id]);
+    const defenders = new Set();
+    let changed = true;
+    while (changed) {
+      const count = attackers.size + defenders.size;
+      for (const hex of RulesEngine.requiredDefenderHexes(projected,
+        [...attackers].map((id) => ({ ...state.units[id], id })))) defenders.add(hex);
+      if (!defenders.size) break;
+      for (const id of RulesEngine.requiredAttackerIds(projected, [...defenders])) attackers.add(id);
+      changed = count !== attackers.size + defenders.size;
+    }
+    if (!defenders.size) continue;
+    for (const id of attackers) coveredAttackers.add(id);
+    const action = { type: "combat", attackers: [...attackers].sort(), defender_hexes: [...defenders].sort() };
+    const verdict = RulesEngine.checkCombat(projected, action);
+    const key = JSON.stringify([action.attackers, action.defender_hexes]);
+    groups.set(key, { mandatory_attackers: action.attackers, mandatory_defender_hexes: action.defender_hexes,
+      legal_under_assumptions: verdict.legal, reason: verdict.reason || null,
+      evaluation: verdict.legal ? verdict.details : null });
+  }
+  return { status: "conditional_estimate", groups: [...groups.values()], limit: maxGroups,
+    assumptions: ["positions and supply unchanged", "friendly units refreshed for combat", "other attack restrictions retained"],
+    authority: "Mandatory participation relations from shared rules, not selected attacks. The model chooses whether and how to prepare; recheck at execution." };
+}
+
 function taskRouteEvidence(ctx, tasks, phase, budgetMs = 2000, deadline = null) {
   if (!ctx?.state || !ctx?.rules || !ctx?.terrain) return [];
   const started = Date.now();
@@ -270,8 +362,14 @@ function taskRouteEvidence(ctx, tasks, phase, budgetMs = 2000, deadline = null) 
     catch { return { status: "unknown", reason: "invalid_target_hex" }; }
     const start = RulesEngine.normalizeHex(unit.hex);
     if (start === destination) return { status: "locally_reachable_now", path: [start], movement_cost: 0 };
+    const terrain = terrainRouteEvidence(ctx, unitId, destination);
+    if (unit.side !== ctx.state.active_side || !RulesEngine.canMoveInCurrentPhase(ctx, { ...unit, id: unitId })) {
+      return { status: "not_applicable_now", reason: "unit_phase_ineligible", terrain_obstacles: terrain, searched_hexes: 0 };
+    }
+    if ((unit.state || "fresh") !== "fresh") return { status: "not_applicable_now", reason: "unit_already_acted", terrain_obstacles: terrain, searched_hexes: 0 };
     const queue = [{ hex: start, path: [start], cost: 0 }];
     const best = new Map([[start, 0]]);
+    const blockers = new Set();
     while (queue.length) {
       if (expired()) return { status: "unknown", reason: "route_search_budget_exhausted", searched_hexes: best.size };
       queue.sort((left, right) => left.cost - right.cost);
@@ -282,7 +380,7 @@ function taskRouteEvidence(ctx, tasks, phase, budgetMs = 2000, deadline = null) 
         let verdict;
         try { verdict = RulesEngine.checkMove(ctx, unitId, path, { mode: "normal" }); }
         catch (error) { return { status: "unknown", reason: String(error.message || error) }; }
-        if (!verdict?.legal) continue;
+        if (!verdict?.legal) { if (blockers.size < 6) blockers.add(verdict?.reason || "rule_rejected"); continue; }
         const cost = Number(verdict.details?.spent ?? verdict.spent);
         if (!Number.isFinite(cost) || (best.has(next) && best.get(next) <= cost)) continue;
         best.set(next, cost);
@@ -290,7 +388,9 @@ function taskRouteEvidence(ctx, tasks, phase, budgetMs = 2000, deadline = null) 
         queue.push({ hex: next, path, cost });
       }
     }
-    return { status: "not_found_in_current_state", path: [], movement_cost: null, searched_hexes: best.size };
+    return { status: "not_found_in_current_state", path: [], movement_cost: null, searched_hexes: best.size,
+      search_scope: "current_phase_normal_movement_only", future_reachability: "unknown",
+      terrain_obstacles: terrain, rule_blockers: [...blockers] };
   };
   for (const task of tasks || []) {
     const target = task.target_hex || "";
@@ -337,6 +437,7 @@ function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocatio
     .filter((task) => task.status === "active" && !task.observation_only)
     .sort((left, right) => Number(left.priority || 99) - Number(right.priority || 99))
     .slice(0, 6);
+  const executionSummary = taskExecutionSummary(taskPlan);
   const taskUnits = activeTasks.map((task) => ({
     task_id: task.id,
     task_class: task.task_class || "soft",
@@ -450,14 +551,24 @@ function buildTacticalSummary(input = {}, built = {}, taskPlan = null, allocatio
     baseline_vp: baselineVp,
     vp_delta_from_baseline: currentVp - baselineVp,
     next_scoring_change: nextScoringChange,
-    scoring_anchor: taskPlan?.children?.find((task) => task.type === "preserve_scoring_anchor") || null,
+    scoring_anchor: taskMonitors(taskPlan).find((task) => task.type === "preserve_scoring_anchor") || null,
+    scoring_recovery: scoringRecoveryEvidence(built.ctx, side, taskPlan, supplyStates),
+    remaining_phase_windows: Object.fromEntries(activeTasks.map((task) => {
+      const { windows, ...summary } = remainingTaskWindows(input, task);
+      return [task.id, summary];
+    })),
     active_tasks: taskUnits,
     route_feasibility: routeFeasibility,
+    combat_preparation: combatPreparationEvidence(built.ctx, side),
     task_units: taskUnits.flatMap((task) => task.assigned_units.map((unit) => ({ unit, task_id: task.task_id, task_class: task.task_class }))),
     key_units: keyUnits,
     supply_bottlenecks: supplyBottlenecks,
     enemy_threats: enemyThreats.slice(0, 12),
     tactical_opportunities: opportunityList,
+    blocked_tasks: executionSummary.blocked_tasks,
+    forbidden_targets: executionSummary.forbidden_targets,
+    recent_execution_errors: executionSummary.recent_execution_errors,
+    required_replanning: executionSummary.required_replanning,
     must_process_units: mustProcess,
     can_hold_units: canHold,
     should_not_act_units: shouldNotAct,
@@ -770,9 +881,23 @@ function operationState(intent, allocation, input, built, taskPlan = null, feedb
     phaseStatus: feedback.phaseStatus || {},
     phaseDispatch
   }, feedback.route_config || routeConfig);
+  const persistent = taskPlan?.parent?.persistent_operation
+    || intent.goal_plan?.persistent_operation
+    || null;
+  const currentSubgoal = taskPlan?.parent?.current_subgoal
+    || intent.goal_plan?.current_subgoal
+    || persistent?.current_subgoal
+    || null;
+  const operationRevision = Number(taskPlan?.parent?.operation_revision
+    ?? persistent?.revision
+    ?? intent.goal_plan?.operation_revision
+    ?? 0);
   return {
     version: taskPlan ? "sae-operation-v2+side-aware-goal-v2" : "sae-operation-v1",
     operation: intent.operation,
+    persistent_operation: persistent,
+    current_subgoal: currentSubgoal,
+    operation_revision: Number.isFinite(operationRevision) ? operationRevision : 0,
     target_column: intent.target_column,
     goal_plan: intent.goal_plan || null,
     operation_policy: intent.goal_plan?.operation_policy || null,
@@ -788,12 +913,15 @@ function operationState(intent, allocation, input, built, taskPlan = null, feedb
       assigned_units: task.assigned_units,
       compatible_units: task.compatible_units || [],
       progress: task.progress,
+      wait_state: task.wait_state || null,
+      review_request: task.review_request || null,
       activation_reason: task.activation_reason || "",
       tactical_opportunities: task.tactical_opportunities || [],
       next_action: task.next_action
     })),
     phase_dispatch: phaseDispatch,
     tactical_summary: tacticalSummary,
+    task_execution_summary: taskExecutionSummary(taskPlan),
     units,
     phase: input.phase,
     phase_kind: phaseKind(input.phase),
@@ -856,6 +984,9 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       lowOddsThreshold: Number(config.task_management_options?.low_odds_replan_threshold || 2),
       replanCooldownActions: Number(config.task_management_options?.replan_cooldown_actions || 3),
       passiveHoldThreshold: Number(config.task_management_options?.passive_hold_replan_threshold || 3),
+      reviewPolicy: config.task_management_options?.review_policy || "legacy",
+      dependencyPolicy: config.task_management_options?.dependency_policy || "hard_soft_conditional_v1",
+      monitorPolicy: config.task_management_options?.monitor_policy || "legacy_children",
       replanOnNewTacticalOpportunity: config.task_management_options?.replan_on_new_tactical_opportunity !== false
     })
     : null;
@@ -868,7 +999,9 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
   let lastBuiltInput = null;
   let lastActionEffect = null;
   let recentCombatResults = [];
+  const routeObstacles = new Map();
   let lastTaskProgressDelta = {};
+  let currentReviewChecks = [];
   function runtimeInput(input = {}) {
     if (!config.performance || typeof config.performance !== "object") return input;
     return {
@@ -888,27 +1021,41 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     return lastBuiltInput?.state === input?.state ? lastBuiltContext : null;
   }
   async function runPendingTaskCheck(input, deadline = null) {
-    if (!pendingTaskCheck || !taskChecker || !taskManager) return;
-    const pending = pendingTaskCheck;
+    if (!taskChecker || !taskManager) return;
+    const reviews = taskManager.pendingReviews(input).slice(0, 1);
+    if (config.task_management_options?.review_policy === "model_review_wait_v1" && !reviews.length) {
+      pendingTaskCheck = null;
+      return;
+    }
+    if (!pendingTaskCheck && !reviews.length) return;
+    const pending = pendingTaskCheck || { stepRecord: {}, events: [] };
     pendingTaskCheck = null;
     const timeoutMs = requestTimeoutForDeadline(deadline, taskChecker.timeoutMs || 60000);
     if (timeoutMs != null && timeoutMs < 1000) {
       pending.stepRecord.task_observation ||= {};
       pending.stepRecord.task_observation.check = {
         skipped: true,
-        reason: "step_deadline_exhausted"
+        reason: "step_deadline_exhausted",
+        review_requests: clone(reviews)
       };
+      taskManager.recordReviewAttempt(reviews.map((request) => request.id), input, pending.stepRecord.task_observation.check);
+      currentReviewChecks.push(pending.stepRecord.task_observation.check);
       return;
     }
+    const reviewPlan = taskManager.plan || pending.taskPlan;
     const checked = await taskChecker.check({
       input,
-      taskPlan: taskManager.plan || pending.taskPlan,
+      taskPlan: { ...reviewPlan, scoring_recovery: scoringRecoveryEvidence(input.ctx, input.side, reviewPlan) },
       stepRecord: pending.stepRecord,
-      events: pending.events,
+      events: [...new Set([...pending.events, ...reviews.flatMap((request) => request.reasons)])],
+      reviewRequests: reviews,
       timeoutMs
     });
     pending.stepRecord.task_observation ||= {};
     pending.stepRecord.task_observation.check = checked;
+    currentReviewChecks.push(checked);
+    taskManager.recordReviewAttempt(checked.ok && !checked.result?.abstain && reviews.some((request) => request.id === checked.result?.review_id) ? [checked.result.review_id]
+      : reviews.map((request) => request.id), input, checked);
     if (!checked.ok) return;
     const localSupplyConflict = pending.events.includes("supply_worsened")
       && checked.result?.supply_preserved === true;
@@ -917,7 +1064,10 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       return;
     }
     const beforeStatus = taskManager.plan?.children?.find((task) => task.id === checked.result?.task_id)?.status;
-    const checkedPlan = taskManager.applyCheck(checked.result);
+    const checkedPlan = taskManager.applyCheck(checked.result, input);
+    const lastReview = checkedPlan?.children?.find((task) => task.id === checked.result?.task_id)?.review_history?.at(-1);
+    checked.review_application = !checked.result?.abstain && Number(checked.result?.confidence) >= 0.5
+      && lastReview?.review_id === checked.result?.review_id && lastReview?.at?.step === input.step ? lastReview : null;
     pending.stepRecord.task_observation.plan = checkedPlan || pending.stepRecord.task_observation.plan;
     checked.applied_task_transition = {
       task_id: checked.result?.task_id,
@@ -928,13 +1078,14 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
   async function plan(input, options = {}) {
     input = runtimeInput(input);
     const deadline = options.deadline == null ? null : Number(options.deadline);
-    await runPendingTaskCheck(input, deadline);
+    currentReviewChecks = [];
     if (taskManager?.plan) {
       const refreshedContext = buildContext(config, { state: input.state, decisionMode: "hierarchical_sae",
         includeInitialMap: false, privateCandidates: false });
       rememberBuiltContext(input, refreshedContext);
       taskManager.refresh({ ...input, ctx: refreshedContext.ctx });
     }
+    await runPendingTaskCheck({ ...input, ctx: contextFor(input)?.ctx || input.ctx }, deadline);
     const key = phaseKey(input);
     const cached = cache.get(key);
     // Multi-task plans should survive ordinary enemy movement. Rebuild only
@@ -980,6 +1131,8 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
         planning_attempted: false,
         replanned: false,
         replan_reason: "",
+        task_reviews: clone(currentReviewChecks),
+        task_plan: taskPlan,
         operation: refreshed.operation_state
       };
       return refreshed;
@@ -1009,6 +1162,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
         planning_attempted: false,
         replanned: false,
         replan_reason: "",
+        task_reviews: clone(currentReviewChecks),
         task_plan: taskPlan,
         task_management: "multi_task",
         operation: reused.operation_state
@@ -1024,21 +1178,41 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       includeInitialMap: false,
       privateCandidates: false
     }));
+    const previousOperation = persistentOperationFromPlan(taskManager?.plan)
+      || persistentOperationFromPlan(lastPlan);
     const payload = publicPayload(config, built.publicContext, []);
     const strategicPayload = compactAgentPayload(payload, { includeInitialMap: false });
+    strategicPayload.planning_request = openGoalEnabled ? "goal_plan" : "strategic_intent";
     strategicPayload.request_capabilities = { tools_callable: false, output: "structured strategic JSON", facts_source: "provided state; do not invent tool results" };
+    if (previousOperation) strategicPayload.persistent_operation = previousOperation;
+    strategicPayload.scoring_recovery = scoringRecoveryEvidence(built.ctx, input.side, taskManager?.plan);
+    strategicPayload.verified_route_obstacles = [...routeObstacles.values()].slice(-24);
+    strategicPayload.task_execution_constraints = taskExecutionSummary(taskManager?.plan);
+    strategicPayload.combat_preparation = combatPreparationEvidence(built.ctx, input.side);
     if (taskManager) strategicPayload.task_policy = {
       scoring_anchor_policy: input.state?.scenario === "july" && input.side === "axis"
         ? config.task_management_options?.scoring_anchor_policy || "none" : "none",
-      max_child_tasks: config.task_management_options?.max_child_tasks || 6
+      max_child_tasks: config.task_management_options?.max_child_tasks || 6,
+      monitor_policy: config.task_management_options?.monitor_policy || "legacy_children",
+      dependency_policy: config.task_management_options?.dependency_policy || "hard_soft_conditional_v1"
     };
     if (taskManager?.plan) strategicPayload.previous_task_acceptance = taskManager.plan.children.map((task) => ({
       id: task.id, title: task.title, status: task.status, acceptance_contract: task.acceptance_contract,
       completion_criteria: task.completion_criteria, completion_evidence: task.completion_evidence,
+      acceptance_diagnostics: task.acceptance_diagnostics, dependency_status: task.dependency_status,
+      action_window: task.action_window,
       failure_evidence: task.failure_evidence, observation_only: task.observation_only,
       scoring_anchor_state: task.scoring_anchor_state, scoring_anchor_loss_count: task.scoring_anchor_loss_count,
-      scoring_anchor_history: task.scoring_anchor_history
+      scoring_anchor_history: task.scoring_anchor_history,
+      assigned_units: task.assigned_units, normalization_corrections: task.normalization_corrections
     }));
+    if (strategicPayload.task_policy?.scoring_anchor_policy === "july_terminal_v1") {
+      strategicPayload.task_policy.breakthrough_access_policy = "model_selected_blockers_v1";
+      strategicPayload.breakthrough_planning = taskManager?.plan?.breakthrough_planning || {
+        guidance: "Choose whether enemy contact blocks your route. Plan preparation, blocker reduction and follow-on exploitation when needed; bypass and alternate routes remain available."
+      };
+    }
+    strategicPayload.monitors = taskMonitors(taskManager?.plan);
     if (executionLedger) strategicPayload.goal_history = goalHistory.report({ ...input, ctx: built.ctx }, taskManager?.plan);
     if (recentCombatResults.length) strategicPayload.recent_combat_results = clone(recentCombatResults);
     if (reasoningMemory) strategicPayload.context.reasoning_memory = reasoningMemory.forPrompt(input);
@@ -1065,7 +1239,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
           messages: [{ role: "system", content: resolveSidePrompt(input.side, openGoalEnabled ? "external.goal_manager_system" : "external.strategic_planner_system")
             + (executionLedger ? `\n${promptValue("execution_ledger.planning")}` : "") }, { role: "user", content: JSON.stringify(strategicPayload) }],
           temperature: runtime.profile.defaults.temperature,
-          max_tokens: Math.min(Number(config.context?.strategicMaxTokens || 3600), runtime.profile.limits.output),
+          max_tokens: Math.min(Number(config.task_management_options?.strategic_output_tokens || config.context?.strategicMaxTokens || 3600), runtime.profile.limits.output),
           response_format: runtime.profile.capabilities.structured_output ? { type: "json_object" } : undefined,
           thinking: thinkingRequest(runtime)
         };
@@ -1075,7 +1249,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
         strategic = strategicResult.ok ? parsePlanningResponse(strategicResult, openGoalEnabled ? "goal_plan" : "strategic_intent", "strategic planner") : { error: `model API status ${strategicResult.status}` };
         if (strategicResult.ok && strategic.error) {
           const record = runtime.transport?.find((item) => item.request_id === strategicResult.request_id);
-          if (record) record.protocol_failure = { stage: "strategic", error: strategic.error };
+          if (record) record.protocol_failure = { stage: "strategic", error: strategic.error, parse_status: strategic.parse_status };
         }
       }
       catch (error) {
@@ -1092,6 +1266,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       retained.reused = true;
       retained.battlefield_fingerprint = currentFingerprint;
       retained.record = { ...retained.record, reused: true, replanned: false, replan_reason: replanReason,
+        task_reviews: clone(currentReviewChecks),
         planning_attempted: true, allocation_fallback: false, allocation_fallback_reason: "",
         strategic_fallback: true, strategic_fallback_reason: strategic.error, retained_previous_plan: true,
         task_plan: taskPlan, operation: retained.operation_state,
@@ -1107,12 +1282,15 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     failedReplanReason = null;
     const goalPlan = openGoalEnabled
       ? strategic.error
-        ? localGoalPlan({ publicContext: built.publicContext, state: input.state, side: input.side })
-        : groundGoalPlan(strategic, { publicContext: built.publicContext, state: input.state, side: input.side, ctx: built.ctx })
+        ? localGoalPlan({ publicContext: built.publicContext, state: input.state, side: input.side,
+          previousOperation, replanReason })
+        : groundGoalPlan(strategic, { publicContext: built.publicContext, state: input.state, side: input.side,
+          ctx: built.ctx, previousOperation, replanReason })
       : null;
     if (goalPlan && strategic.error) goalPlan.source = "local_default";
     if (goalPlan && executionLedger) {
-      goalPlan.goal_revision = goalHistory.revise({ ...goalPlan.primary_goal, campaign_goal: goalPlan.campaign_goal }, { input: { ...input, ctx: built.ctx },
+      goalPlan.goal_revision = goalHistory.revise({ ...goalPlan.primary_goal, campaign_goal: goalPlan.campaign_goal,
+        persistent_operation: goalPlan.persistent_operation, current_subgoal: goalPlan.current_subgoal }, { input: { ...input, ctx: built.ctx },
         plan: taskManager?.plan, rulesEvaluation: built.publicContext.victory, reason: replanReason || "opening_goal" });
     }
     const intent = normalizeIntent(goalPlan ? goalIntent(goalPlan) : strategic, input.state);
@@ -1146,7 +1324,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
           audit_stage: "allocation",
           messages: [{ role: "system", content: resolveSidePrompt(input.side, "external.force_allocator_system") }, { role: "user", content: JSON.stringify(forcePayload) }],
           temperature: runtime.profile.defaults.temperature,
-          max_tokens: Math.min(Number(config.context?.allocationMaxTokens || 3000), runtime.profile.limits.output),
+          max_tokens: Math.min(Number(config.task_management_options?.allocation_output_tokens || config.context?.allocationMaxTokens || 3000), runtime.profile.limits.output),
           response_format: runtime.profile.capabilities.structured_output ? { type: "json_object" } : undefined,
           thinking: thinkingRequest(runtime)
         };
@@ -1230,6 +1408,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
       }
     };
     cache.set(key, result);
+    result.record.task_reviews = clone(currentReviewChecks);
     lastPlan = clone(result);
     return clone(result);
   }
@@ -1238,6 +1417,18 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     if (!stepRecord) return;
     const key = phaseKey(input);
     const rejected = stepRecord.action_attempts || [];
+    const rejectedMoves = rejected.filter((item) => !item.accepted && ["move", "move_intent"].includes(item.action?.type));
+    const observedContext = rejectedMoves.length ? contextFor(input)?.ctx || buildContext(config, { state: input.state,
+      decisionMode: "hierarchical_sae", includeInitialMap: false, privateCandidates: false }).ctx : null;
+    for (const attempt of rejectedMoves) {
+      const action = attempt.action;
+      const target = action.destination || action.target || action.path?.at(-1);
+      for (const obstacle of terrainRouteEvidence(observedContext, action.unit, target)) {
+        const key = `${obstacle.unit}:${obstacle.from}:${obstacle.to}:${obstacle.mode}`;
+        routeObstacles.set(key, { ...obstacle, observed_step: input.step, observed_turn: input.turn });
+      }
+    }
+    stepRecord.verified_route_obstacles = [...routeObstacles.values()].slice(-24);
     const pathFailures = rejected.filter((item) => /no legal path found/.test(item.reason || ""));
     const sameTargets = new Map();
     for (const item of pathFailures) {
@@ -1298,6 +1489,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     if (executionLedger) taskPlan.goal_history = goalHistory.report({ ...input, ctx: built.ctx }, taskPlan);
     if (executionLedger) taskPlan.archived_task_plans = taskManager.archives;
     if (executionLedger) taskPlan.task_execution_history = taskManager.executionHistory;
+    if (executionLedger) taskPlan.task_review_history = taskManager.reviewHistory;
     if (lastPlan) {
       lastPlan.operation_state = operationState(
         lastPlan.strategic_intent,
@@ -1335,6 +1527,7 @@ function createSaeRuntime({ config, runtime, client, taskChecker = null, decisio
     lastBuiltInput = null;
     lastActionEffect = null;
     recentCombatResults = [];
+    routeObstacles.clear();
     lastTaskProgressDelta = {};
   }
   return { cache, clear, contextFor, finalize, settleTurn, observe, plan, replanReasons, taskManager };
@@ -1348,7 +1541,10 @@ module.exports = {
   parsePlanningResponse,
   buildPhaseUnitFacts,
   buildTacticalSummary,
+  scoringRecoveryEvidence,
   taskRouteEvidence,
+  terrainRouteEvidence,
+  combatPreparationEvidence,
   deriveActionEffect,
   operationState,
   phaseKey,

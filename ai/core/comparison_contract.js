@@ -8,7 +8,7 @@ const { resolveControllers } = require("./controller_config.js");
 const { artifactContractFields, createArtifactManifest } = require("./benchmark_artifacts.js");
 const { modelContractConfiguration, resolveModel } = require("./model_runtime.js");
 
-const COMPARISON_CONTRACT_VERSION = "single-action-comparison-v19-typed-task-settlement";
+const COMPARISON_CONTRACT_VERSION = "single-action-comparison-v22-monitor-isolation";
 
 function defaultMaxStepsForScenario(scenario) {
   return { july: 1000, september: 1500, october: 3000 }[scenario] || 1000;
@@ -44,6 +44,7 @@ function createComparisonContract({
   contextProfile = "full_public_payload_v1",
   timeoutMs = 180000,
   maxSteps = defaultMaxStepsForScenario(scenario),
+  combatPhasePolicy = "rule_complete",
   toolChoice = "auto",
   thinkingMode,
   planningThinkingMode,
@@ -149,7 +150,8 @@ function createComparisonContract({
     adaptive_replanning_version: taskManagement ? "adaptive-replanning-v2-goal-events" : decisionPolicy === "hierarchical_sae" ? "adaptive-replanning-v1" : null,
     stop_on_accepted: toolProfile.stop_on_accepted,
     movement_phase_policy: "rule_complete",
-    combat_phase_policy: "combat_experiment_budget",
+    combat_phase_policy: combatPhasePolicy,
+    task_feasibility_protocol: "subject-region-and-remaining-windows-v1",
     fixed_movement_action_limits: false,
     phase_unit_plan_protocol: ["unit_plan_hybrid", "hierarchical_sae"].includes(decisionPolicy) ? "phase-unit-plan-v2" : null,
     rolling_unit_action_protocol: ["unit_plan_hybrid", "hierarchical_sae"].includes(decisionPolicy) ? "v2" : null,
@@ -176,6 +178,7 @@ function createComparisonContract({
     scoring_anchor_policy: taskManagement ? String(config.task_management_options?.scoring_anchor_policy || "none") : null,
     task_dependency_policy: taskManagement ? String(config.task_management_options?.dependency_policy || "hard_soft_conditional_v1") : null,
     task_switching: taskManagement ? String(config.task_management_options?.task_switching || "existing_tasks_only") : null,
+    task_monitor_policy: taskManagement ? String(config.task_management_options?.monitor_policy || "legacy_children") : null,
     task_progress_version: taskManagement ? "evidence-grounded-model-task-progress-v8-observable-criteria" : null,
     strategic_review_mode: decisionPolicy === "hierarchical_sae" ? "advisory" : null,
     route_feasibility: taskManagement ? {
@@ -185,6 +188,8 @@ function createComparisonContract({
     task_action_feedback_version: taskManagement ? "post-action-feedback-v1" : null,
     task_checker_timing: taskManagement ? "filtered-next-state-evidence-v2" : null,
     task_replan_policy: taskManagement ? {
+      review_policy: String(config.task_management_options?.review_policy || "legacy"),
+      no_progress_unit: config.task_management_options?.review_policy === "model_review_wait_v1" ? "task_action_windows" : "actions",
       no_progress_threshold: Number(config.task_management_options?.no_progress_replan_threshold || 3),
       blocked_threshold: Number(config.task_management_options?.blocked_replan_threshold || 2),
       supply_worsened_threshold: Number(config.task_management_options?.supply_worsened_replan_threshold || 2),

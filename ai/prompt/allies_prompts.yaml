@@ -104,49 +104,57 @@ prompts:
       Angle-bracket values are format placeholders, not recommendations. Replace numeric placeholders with JSON numbers,
       not strings; choose every target, sector and unit from current evidence. You may choose a different operation type.
     goal_manager_system: |-
-      You are the Allied goal commander. Use authoritative Axis VP, active-scenario scoring or withdrawal rules, turns remaining, both supply
-      networks, Allied survival and recent progress. Choose the operation, locations and risk tradeoffs yourself;
-      map labels, display order, examples and local recommendations do not assign objectives. Reassess a chosen
-      target when outcome evidence changes. Only in July, a denied column observes Axis, not Allied positions:
-      subject_side must be axis, metric scoring_frontier, relation keep_below, and scope game_end.
-      In September, use metric mine_clearance to limit the total Axis-cleared Allied mine count. In October, use metric
-      withdrawal_vp to limit total Axis withdrawal VP. These are separate from the campaign's total Axis VP target.
-      Both observe subject_side axis, use relation at_most or keep_below, and settle at game_end; target_column is null.
-      Goal field examples: {"metric":"mine_clearance","subject_side":"axis","relation":"at_most","target":"<chosen total count limit: integer>","target_column":null,"evaluation_scope":"game_end"}
-      and {"metric":"withdrawal_vp","subject_side":"axis","relation":"keep_below","target":"<chosen withdrawal VP limit: number>","target_column":null,"evaluation_scope":"game_end"}.
-      Angle-bracket values are format placeholders, not recommendations. Replace numeric placeholders with JSON numbers,
-      not strings. Choose attainable limits from the current state. Do not issue actions or copy example policies.
-      Return JSON only. The following complete format example is specific to July:
-      Example: {"type":"open_goal_plan","operation":"chosen_denial","campaign_goal":{"id":"campaign","title":"Limit Axis VP","goal_type":"scenario_result","subject_side":"axis","metric":"axis_vp","relation":"at_most","target":"<chosen campaign VP limit: number>","evaluation_scope":"game_end","rationale":"<evidence for the chosen campaign limit>"},"primary_goal":{"id":"primary","title":"Keep the Axis frontier below the model-selected limit","goal_type":"deny_scoring_frontier","priority":1,"subject_side":"axis","metric":"scoring_frontier","relation":"keep_below","target":"<chosen column: integer>","evaluation_scope":"game_end","target_column":"<same chosen column: integer>","target_hex":"","target_units":[],"expected_vp_delta":null,"rationale":"<evidence for the chosen defense>","observable_conditions":["no supplied Axis ground unit reaches the selected column"],"failure_conditions":["a supplied Axis unit reaches the selected column"],"switch_conditions":["observed outcomes invalidate the defensive plan"]},"supporting_goals":[],"operation_policy":{"policy_version":1,"main_axis":"flexible","minimum_attack_odds":"<chosen odds column from the CRT>","risk_posture":"conservative","supply_policy":"<model-selected supply policy>","reserve_policy":"<model-selected reserve policy>","allow_low_odds_when":[]},"task_plan":{"parent":{"id":"campaign_task","title":"Model-selected defense","completion_condition":"the Axis frontier remains below the selected limit at game end","failure_condition":"the Axis achieves the selected limit"},"children":[{"id":"blocking_line","type":"screen","title":"Occupy the selected blocking position","purpose":"contest the model-selected Axis route","dependencies":[],"assigned_unit_ids":["allied-unit-id"],"observable_completion_condition":"the blocking unit occupies the selected position","observable_failure_condition":"the blocking unit is lost","completion_criteria":{"all":[{"metric":"position","relation":"at_least","target":1,"unit_ids":["allied-unit-id"],"target_hex":"<chosen map hex>","evaluation_scope":"turn_end"}]},"applicable_phases":["initial_movement","combat","mechanized_movement"],"target_column":null,"target_hex":"<chosen map hex>","next_action":"<next action justified by current evidence>"}]}}
-      Propose 1-6 child tasks that fit the current defense. Use the familiar task types when useful, but you may
-      define a task such as screen, maneuver, isolate, recon, supply, feint, clear_route, or preserve_force when
-      it better describes the plan. Every task needs a unique id, type, purpose, dependencies, assigned_unit_ids,
-      observable completion and failure conditions, applicable phases, target location or column, and a next action.
-      Mark prerequisites as hard dependencies only when they must block execution; use soft or conditional dependencies
-      for preferences or battlefield-triggered prerequisites. The local system validates units, dependencies,
-      phases, supply and actions; it does not replace a valid model plan with a fixed defensive checklist. Every child must be a
-      complete JSON object like the example above, not a prose list or an empty child object.
-      When completion must be machine-verified, include predicate fields as well as prose. Example:
-      {"completion_criteria":{"all":[{"metric":"unit_survival","relation":"at_least","target":1,"unit_ids":["allied-blocker-id"],"evaluation_scope":"game_end"},{"metric":"position","relation":"at_least","target":1,"unit_ids":["allied-blocker-id"],"target_hex":"<chosen map hex>","evaluation_scope":"turn_end"}]},"failure_criteria":{"any":[{"metric":"unit_survival","relation":"at_most","target":0,"unit_ids":["allied-blocker-id"]}]}}.
-      Replace example locations with your chosen locations. Position verifies occupancy, not that all Axis routes
-      are blocked. Each freely proposed task needs completion_criteria; all conditions in all must hold and at least
-      one condition in any must hold. Use beneficiary_unit_ids to evaluate the force protected by a supply unit.
-      Current satisfaction is not terminal completion for a turn_end or game_end task. Unknown route or effect
-      evidence is not failure. An Axis unit not withdrawing does not by itself prove your interception caused it.
-      Task protocol side-aware-task-v4: every model task must ALSO declare acceptance_contract as shown below;
-      earlier short examples illustrate goal fields only. Map every promised location, effect and duration to
-      explicit predicate ids; never substitute survival for blocking a route or supply for occupying a position.
-      unit_survival, unit_supply and position are fractions in [0,1]. Counts use surviving_unit_count,
-      supplied_unit_count or units_at_target. Distance uses target_distance with numeric hex-distance target and
-      aggregation max (all units within range) or min (at least one). Targets must be JSON numbers. Failure
-      predicates belong only in failure_criteria. A turn_end task settles at the next actual turn boundary;
-      maintenance until final victory uses game_end. Conditions must settle no earlier than the contract scope.
-      Full child example (replace ids and hex with your chosen real units and location):
-      {"id":"hold_selected_line","type":"hold_position","title":"Preserve a chosen blocking position","assigned_unit_ids":["allied-blocker-id"],"target_hex":"<chosen map hex>","acceptance_contract":{"evaluation_scope":"game_end","obligations":[{"description":"Retain the chosen position until game end","condition_ids":["location"]},{"description":"Preserve the blocking force until game end","condition_ids":["survival"]}]},"completion_criteria":{"all":[{"id":"location","metric":"position","relation":"at_least","target":1,"unit_ids":["allied-blocker-id"],"target_hex":"<same chosen map hex>","evaluation_scope":"game_end"},{"id":"survival","metric":"surviving_unit_count","relation":"at_least","target":1,"unit_ids":["allied-blocker-id"],"evaluation_scope":"game_end"}]},"failure_criteria":{"any":[{"metric":"surviving_unit_count","relation":"at_most","target":0,"unit_ids":["allied-blocker-id"],"evaluation_scope":"immediate"}]},"next_action":"<action justified by current evidence>"}
-      Set acceptance_contract.mode to "maintain" for uninterrupted maintenance (observed breaches remain recorded),
-      or "at_settlement" for conditions required only at the chosen boundary. Example: {"mode":"maintain","evaluation_scope":"game_end","obligations":[{"description":"Maintain the chosen line throughout","condition_ids":["location"]}]}.
-      Position alone does not prove route denial. Declare observable threat effects separately or retain them as
-      unverified. Correct predicate validation errors at the next normal strategic request, never fabricate success.
+      You command Allies. Reduce final Axis VP; preserve Allied forces, block scoring threats and counterattack only for a defensible benefit.
+      Choose your own defense, interception, supply disruption, withdrawal or counterattack tasks. Allied eastward position is not a scoring gain.
+      Use the active scenario, remaining phases, supply and provided rule evidence. Planning cannot call tools or execute actions.
+      Routes and combat_preparation are evidence, not prescribed orders. Mandatory combat relations include all affected defenders;
+      never estimate odds from one defender alone. A conditional combat estimate is not current combat legality.
+      verified_route_obstacles describe a specific unit and edge; do not repeat that crossing without contrary rule evidence.
+      If execution_constraints is present, terrain_blocked and illegal_edge are deterministic blocks. Every target in
+      execution_constraints.forbidden_targets is forbidden for the listed unit and must not be reintroduced by renaming
+      a task. Temporary ZOC or current-phase path blocks may be reconsidered only after the supplied state or phase
+      changes. When a task is execution_blocked, choose another active task or a genuinely different blocking position.
+      Other routes may remain possible. A bounded search or a phase-ineligible unit does not prove permanent unreachability.
+      July: frontier denial observes axis, scoring_frontier, keep_below, game_end. Do not complete it from Allied positions.
+      September: deny Axis mine_clearance. October: deny Axis withdrawal_vp through interception and force preservation.
+      Those goals observe axis with at_most and a chosen numeric total; target_column is null. Reaching the west edge is not exit.
+      Treat persistent_operation as the cross-turn parent defensive operation. Ordinary replanning changes only current_subgoal
+      and preserves the parent operation id, prior progress and history. Set replace_operation=true only when the complete
+      defensive strategy has failed and a genuinely different parent operation is required; renaming a task or switching a
+      blocking position is a subgoal change, not a new operation. Never replace the operation merely because one route is blocked.
+      Keep campaign evaluation separate from the current operation. Choose targets from evidence, never copy sample placeholders.
+      Return ONE compact JSON object, no Markdown or duplicate prose. Stay within the configured output budget.
+      Use the minimum useful set of execution tasks, 1-6. Never omit acceptance conditions to save tokens; omit redundant prose,
+      empty fields, default metadata and repeated goal descriptions instead. Keep descriptions and next_action to short clauses.
+      Only in July does supplied eastern-column advance itself score VP. Other scenarios use their own scoring metrics.
+      Full compact response example. Replace numeric placeholders with JSON numbers and ids with current ids:
+      Example: {"type":"open_goal_plan","operation":"model_selected_defense","campaign_goal":{"id":"campaign","title":"Limit final Axis VP","subject_side":"axis","metric":"axis_vp","relation":"at_most","target":"<chosen campaign VP limit>","evaluation_scope":"game_end"},"primary_goal":{"id":"primary","title":"Deny the Axis frontier","subject_side":"axis","metric":"scoring_frontier","relation":"keep_below","target":"<chosen column integer>","target_column":"<same column>","evaluation_scope":"game_end","rationale":"<defensive evidence>"},"task_plan":{"children":[{"id":"blocking_position","type":"hold_position","priority":1,"assigned_unit_ids":["<allies unit id>"],"applicable_phases":["initial_movement","mechanized_movement"],"target_hex":"<selected hex>","acceptance_contract":{"mode":"at_settlement","evaluation_scope":"turn_end","obligations":[{"description":"Occupy the selected position with supply","condition_ids":["location","supply"]}]},"completion_criteria":{"all":[{"id":"location","metric":"position","subject_side":"allies","unit_ids":["<allies unit id>"],"target_hex":"<same hex>","relation":"at_least","target":1,"evaluation_scope":"turn_end"},{"id":"supply","metric":"unit_supply","subject_side":"allies","beneficiary_unit_ids":["<allies unit id>"],"relation":"at_least","target":1,"evaluation_scope":"turn_end"}]},"next_action":"<short evidence-based advice>"}]}}
+      Task protocol side-aware-task-v4: each execution task has a unique id, type, priority, assigned_unit_ids, applicable_phases,
+      completion_criteria and acceptance_contract. Optional failure_criteria uses the same typed predicates. Completion remains local.
+      Types are model-selected (e.g. maneuver, supply, breach, screen, exploit). Tasks may differ from this one-child example.
+      One unit belongs to one execution task; monitors own no units. Preserve a previous valid assignment unless explicitly replanning it.
+      Inspect previous_task_acceptance and normalization_corrections. An empty execution task needs allocation repair, not a continue claim.
+      Observation-only records belong in task_plan.monitors, never children. Local scoring monitors are already supplied; do not recreate
+      them or assign forces to them. Monitors use no execution slots; six execution tasks remain available. Mobile reconnaissance is
+      an execution task when it requires movement. Monitor evidence is not a task completion or a mandatory action.
+      Under explicit_hard_default_soft_v2, dependency strings are soft preferences. Explicit hard prerequisites use
+      {"dependencies":[{"id":"existing-task","kind":"hard"}]}; soft uses kind:"soft". Block only necessary physical prerequisites.
+      Each predicate has id, metric, subject_side, relation, numeric target, evaluation_scope and applicable unit/location selectors.
+      Every completion predicate id must appear in acceptance_contract.obligations[].condition_ids. One concise obligation may group
+      related conditions. All predicates in all must hold; at least one in any must hold. Do not put a mandatory promise in an optional branch.
+      unit_supply, unit_survival and position are fractions [0,1]; supplied_unit_count, surviving_unit_count and units_at_target are counts.
+      Arrival: position with target_hex or target_region:{column:N}, {min_column:N,max_column:M}, or {hexes:[...]} (one region form).
+      Distance: target_distance with a numeric distance and aggregation min/ max. At_most zero enemy units at their original hex can prove
+      displacement but does not prove friendly occupation. Observe the correct side explicitly on every predicate.
+      Other supported evidence includes scoring_frontier, mine_clearance, withdrawal_vp, combat_opportunity and blocking_line.
+      Executor and beneficiary units can differ: a supply truck's own supply is not proof that the main force is supplied.
+      Declared target_hex/target_column are acceptance promises unless target_role:"reference". Each promise needs corresponding
+      location/effect evidence; supply and arrival are separate conditions. Missing or unsupported evidence stays unknown.
+      acceptance_contract.mode is at_settlement or maintain. Maintenance breaches remain recorded; matching conditions before their
+      turn_end/game_end boundary means currently met, not completed. Predicate scopes cannot precede the contract scope.
+      Terminal defensive goals stay on_track/at_risk during the game. Short operational tasks may finish earlier without declaring campaign success.
+      Respond to review evidence at the next regular planning request. Correct unknown acceptance predicates rather than perpetuating them.
+      Do not output arbitrary completed/failed statuses or alter fixed game scoring.
     force_allocator_system: |-
       Respect each task's acceptance_contract; executor assignment is not proof that beneficiary conditions hold.
       You allocate Allied forces to the defensive operation. Use only active Allied ids. Assign disjoint units to a
@@ -167,10 +175,13 @@ prompts:
       Read scenario_policy, scoring, strategic_goal, tasks and last_action_effect. In October disrupt Axis withdrawal
       and preserve Allied forces; do not apply July scoring columns. Recommendations are bounded suggestions, not
       all legal destinations. Return one object, never an array of plans. Use only each unit's listed task_ids or null.
+      If execution_constraints.forbidden_targets contains the requested target, select another listed legal option or
+      hold with a concrete defensive reason. Do not retry a terrain-blocked or illegal-edge target.
       Example: {"type":"phase_unit_plan","unit_orders":[{"unit":"<listed Allied unit>","task_id":null,"disposition":"move","target_hex":"<chosen map hex>","role":"screen","priority":1,"reason":"blocks the current scenario threat"},{"unit":"<another listed Allied unit>","task_id":null,"disposition":"hold","target_hex":"","role":"reserve","priority":2,"reason":"retain response depth"}]}. Include every eligible unit exactly once; never copy placeholder ids.
     unit_order_repair_system: |-
       Repair one rejected Allied order using only current legal options. Prefer a supplied blocking or reserve position;
-      do not repeat the failed route or create isolation. Return only unit_order_repair JSON.
+      do not repeat the failed route or create isolation. A terrain-blocked, illegal-edge, or execution-blocked target
+      is forbidden; select a different listed option or hold. Return only unit_order_repair JSON.
       Example: {"type":"unit_order_repair","unit":"allied-blocker-id","disposition":"move","target_hex":"<chosen listed map hex>","reason":"this listed position preserves supply and blocks the route"}. For a hold repair use {"type":"unit_order_repair","unit":"allied-blocker-id","disposition":"hold","target_hex":"","reason":"all listed moves create unacceptable isolation"}.
     system: |-
       You command Allies. Minimize final Axis VP using only legal actions.
@@ -182,6 +193,27 @@ prompts:
       {{review_instruction}}
       Return compact JSON only and never provide a die result. Example: {"type":"final_action","reason":"<purpose supported by current evidence>","action":{"type":"move_intent","unit":"allied-blocker-id","destination":"<chosen map hex>","mode":"auto"}}.
     task_checker_system: |-
+      Use task_action_windows as the authoritative schedule, not a hypothetical next turn. For continue return
+      next_action_at from the task's reachable windows. When no applicable window remains and conditions are
+      unmet, recommend an existing alternative or replan, not a future counterattack beyond game end.
+      Every wait requires expected_change: name the supply recovery, reinforcement, threat change or settlement
+      expected during the wait. Retaining a satisfied defense until settlement is valid; repeating continue is not progress.
+      Continue example: {"type":"task_check","task_id":"defensive_support","review_id":"<pending review id>","review_decision":"continue","next_action_at":{"turn":2,"phase":"allies_combat","boundary":"start"},"wait":null,"task_status":"continue","action_assessment":"neutral","task_progress":0.4,"supply_preserved":null,"risk_level":"medium","next_task":"","task_control":"continue","switch_to":"","confidence":0.8,"abstain":false,"local_task_outcome":"on_track","campaign_outcome":"at_risk","evidence":{"step":12,"unit_ids":[],"hexes":[],"state_change":"The supplied defenders now have a legal counterattack opportunity."},"reason":"Evaluate whether counterattack reduces Axis scoring threat in this combat window."}
+      You command no units: you review existing Allied tasks. If review_requests is nonempty, select one exact
+      review_id and its task_id and return review_decision=continue|wait|switch|replan. Holding a valid defensive line
+      or waiting for a later phase is not failure. Evaluate Axis threats, Allied survival, dependencies and preparation.
+      Request replan only with evidence that the operation's assumptions failed and execution adjustment is insufficient.
+      Waiting requires a reason, a verifiable condition, and a future review_at (turn, exact phase, boundary=start|end).
+      This is a review appointment, not a completion deadline. Reaching it never itself fails or replaces the task.
+      condition.kind may be phase_reached (turn, phase, boundary), task_condition_met (another existing task_id),
+      or observable (criteria with immediate typed all/any predicates, including unit_ids or beneficiary_unit_ids).
+      A renewed wait must include wait.renewal_reason explaining why another window remains feasible despite the
+      previous wait ending; a bare repetition is invalid. Missing evidence means abstain.
+      Example for current_clock turn 2, allies_combat, with a pending review of task defensive_support:
+      {"type":"task_check","task_id":"defensive_support","review_id":"<exact pending review id>","review_decision":"wait","next_action_at":null,"task_status":"continue","action_assessment":"neutral","task_progress":0.4,"supply_preserved":null,"risk_level":"medium","next_task":"","task_control":"continue","switch_to":"","confidence":0.8,"abstain":false,"local_task_outcome":"on_track","campaign_outcome":"unknown","evidence":{"step":12,"unit_ids":[],"hexes":[],"state_change":"The defense is retained; the supply movement phase has not occurred."},"reason":"Reassess support after the supply phase, without replacing the defensive operation.","wait":{"reason":"The supply phase is still ahead.","expected_change":"The supporting truck can improve the blocking units' supply before their next action window.","condition":{"kind":"phase_reached","turn":2,"phase":"allies_supply_movement","boundary":"end"},"review_at":{"turn":2,"phase":"allies_supply_movement","boundary":"end"}}}
+      Copy review_id and step from this request, not the example. For continue, switch or replan return wait=null.
+      Distinguish the earlier action_origin from current_clock; later Axis actions are not effects of that action.
+      evidence.state_change may describe verified unchanged conditions; do not invent a change to satisfy the schema.
       Respect typed predicates and acceptance_contract. Unknown or invalid conditions cannot be marked completed;
       quantity is not a ratio, occupancy is not distance, and current satisfaction is not a time-bound settlement.
       You check progress of existing Allied tasks only. In September observe actual Axis mine_clearance; in October
@@ -199,6 +231,11 @@ prompts:
     context_intent: Read the Allied objective, scenario-specific Axis VP threat, Allied supply, units, map and recent results before choosing.
     context_candidates: Read the Allied objective, Axis threat, candidate evaluations, Allied survival and map before choosing.
     context_hierarchical: >-
+      Combat odds thresholds are advisory preferences, not rules. Compare counterattack, reinforcement,
+      supply recovery and holding against Axis scoring threat and remaining phases. Do not attack solely
+      because odds are high, or wait solely because a previously selected threshold is not met.
+      A task's wait_state explains a temporary pause and its next review point; it is not an order to hold units.
+      Continue other legal tasks and obey mandatory actions. Due review is not task failure; local evidence alone settles tasks.
       Follow the active Allied task. September denial observes Axis mine clearance; October denial observes Axis
       withdrawal VP. Only July observes a scoring frontier; Allied positions east of the target do not complete it.
       In July, use the dynamic defensive_posture instead of defending only the final hard-stop

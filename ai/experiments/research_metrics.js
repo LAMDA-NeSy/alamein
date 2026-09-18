@@ -115,7 +115,7 @@ function taskEvidenceMetrics(transcript) {
     : Object.values(final || {}).find((item) => item?.child_statuses);
   for (const archive of settlement?.archived_task_plans || []) {
     for (const task of archive.children || []) {
-      remember(task, false);
+      remember(task);
     }
   }
   for (const [id, status] of Object.entries(settlement?.child_statuses || {})) {
@@ -123,13 +123,22 @@ function taskEvidenceMetrics(transcript) {
   }
   for (const task of settlement?.children || []) remember(task);
   const taskList = [...tasks.values()];
+  const outcomes = {
+    replaced_task_count: taskList.filter((task) => task.status === "replaced").length,
+    by_source: Object.fromEntries([...new Set(taskList.map((task) => task.source || "unknown"))].map((source) => {
+      const group = taskList.filter((task) => (task.source || "unknown") === source);
+      return [source, { total: group.length, completed: group.filter((task) => task.status === "completed").length }];
+    }))
+  };
   const hasCriteria = (task) => {
     const criteria = task.completion_criteria || task.observable_completion_criteria;
     return Array.isArray(criteria) ? criteria.length > 0 : !!criteria && typeof criteria === "object";
   };
-  const measurable = taskList.filter((task) => hasCriteria(task) && task.verification_status !== "unverified");
+  const measurable = taskList.filter((task) => hasCriteria(task) && task.verification_status !== "unverified"
+    && task.completion_evidence?.status !== "unknown" && !task.completion_evidence?.validation_errors?.length);
   if (!measurable.length) {
-    return { available: false, evidence_coverage: taskList.length ? 0 : null,
+    return { ...outcomes, available: false, evidence_coverage: taskList.length ? 0 : null,
+      unverified_task_count: taskList.length,
       task_count: taskList.length, measurable_task_count: 0, progress_count: null, progress_rate: null,
       completion_rate: null, blocking_rate: null, completed_count: null, blocked_count: null };
   }
@@ -140,9 +149,9 @@ function taskEvidenceMetrics(transcript) {
       && (change.delta > 0 || change.status_after === "completed"))).length;
   const completed = measurable.filter((task) => task.status === "completed").length;
   const blocked = measurable.filter((task) => task.status === "blocked").length;
-  return { available: true, evidence_coverage: measurable.length / Math.max(1, taskList.length),
+  return { ...outcomes, available: true, evidence_coverage: measurable.length / Math.max(1, taskList.length),
     task_count: taskList.length, measurable_task_count: measurable.length,
-    unverified_task_count: taskList.filter((task) => !hasCriteria(task) || task.verification_status === "unverified").length,
+    unverified_task_count: taskList.length - measurable.length,
     progress_count: progressCount,
     progress_rate: progressCount / Math.max(1, observations.length),
     completion_rate: completed / measurable.length, blocking_rate: blocked / measurable.length,
@@ -213,6 +222,9 @@ function scenarioMetrics(transcript) {
     task_evidence_coverage: taskEvidence.evidence_coverage,
     task_count: taskEvidence.task_count,
     measurable_task_count: taskEvidence.measurable_task_count,
+    unverified_task_count: taskEvidence.unverified_task_count,
+    replaced_task_count: taskEvidence.replaced_task_count,
+    task_outcomes_by_source: taskEvidence.by_source,
     axis_task_target_completion_rate: null,
     main_attack_route_progress_rate: null,
     supply_maintenance_rate: null,
@@ -937,7 +949,7 @@ function buildResearchReport(runs, metadata = {}) {
   };
   return {
     generated_at: new Date().toISOString(),
-    metric_version: "wargame-research-metrics-v5-verified-outcomes",
+    metric_version: "wargame-research-metrics-v7-latest-task-evidence",
     definitions: {
       average_vp: "Sum of final VP from complete games divided by the number of complete games.",
       vp_delta: "Final VP minus the scenario starting VP. Positive values favor Axis; negative values favor Allies.",

@@ -66,6 +66,10 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
       checker_timeout_ms: Math.max(1000, Number(raw.task_checker_timeout_ms || 60000)),
       checker_max_calls_per_turn: Math.max(1, Number(raw.task_checker_max_calls_per_turn || 4)),
       checker_cooldown_actions: Math.max(0, Number(raw.task_checker_cooldown_actions ?? 3)),
+      review_policy: String(raw.task_review_policy || "legacy"),
+      monitor_policy: String(raw.monitor_policy || "legacy_children"),
+      strategic_output_tokens: Math.max(1000, Number(raw.strategic_output_tokens || 3600)),
+      allocation_output_tokens: Math.max(500, Number(raw.allocation_output_tokens || 3000)),
       route_feasibility_budget_ms: Math.max(1, Number(raw.route_feasibility_budget_ms || 2000)),
       route_feasibility_scope: String(raw.route_feasibility_scope || "task_units_only"),
       task_generation: String(raw.task_generation || "fixed_skeleton"),
@@ -104,8 +108,14 @@ function normalizeAgentMethod(methodId, raw, options = {}) {
   if (taskManagement && !["none", "july_terminal_v1"].includes(taskManagement.scoring_anchor_policy)) {
     throw new Error(`agent method ${methodId} has unknown scoring_anchor_policy`);
   }
-  if (taskManagement && taskManagement.dependency_policy !== "hard_soft_conditional_v1") {
-    throw new Error(`agent method ${methodId} task_dependency_policy must be hard_soft_conditional_v1`);
+  if (taskManagement && !["legacy", "model_review_wait_v1"].includes(taskManagement.review_policy)) {
+    throw new Error(`agent method ${methodId} has unknown task_review_policy`);
+  }
+  if (taskManagement && !["legacy_children", "separate_monitors_v1"].includes(taskManagement.monitor_policy)) {
+    throw new Error(`agent method ${methodId} has unknown monitor_policy`);
+  }
+  if (taskManagement && !["hard_soft_conditional_v1", "explicit_hard_default_soft_v2"].includes(taskManagement.dependency_policy)) {
+    throw new Error(`agent method ${methodId} has unknown task_dependency_policy`);
   }
   if (taskManagement && taskManagement.task_switching !== "existing_tasks_only") {
     throw new Error(`agent method ${methodId} task_switching must be existing_tasks_only`);

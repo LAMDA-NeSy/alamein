@@ -352,17 +352,21 @@ function defaultMockResponse(runtime, body) {
       })
     };
   }
-  else if (planningPayload?.protocol === "task-check-evidence-v2") {
-    const task = planningPayload.active_tasks?.[0];
+  else if (["task-check-evidence-v2", "task-check-review-v3", "task-check-review-v4-action-windows"].includes(planningPayload?.protocol)) {
+    const review = planningPayload.review_requests?.[0];
+    const task = planningPayload.review_tasks?.find((item) => item.id === review?.task_id) || planningPayload.active_tasks?.[0];
     message = {
       role: "assistant",
       content: JSON.stringify({
         type: "task_check",
         task_id: task?.id || "",
         task_status: "continue",
+        ...(review ? { review_id: review.id,
+          review_decision: planningPayload.task_action_windows?.[task?.id]?.remaining_count === 0 && task?.completion_evidence?.status !== "met" ? "replan" : "continue",
+          next_action_at: planningPayload.task_action_windows?.[task?.id]?.next || null, wait: null } : {}),
         action_assessment: "neutral",
         task_progress: Number(task?.progress || 0),
-        supply_preserved: true,
+        supply_preserved: null,
         risk_level: "medium",
         next_task: "",
         confidence: 1,
@@ -379,13 +383,16 @@ function defaultMockResponse(runtime, body) {
       })
     };
   }
-  else if (messages.some((item) => {
+  else if (["goal_plan", "strategic_intent"].includes(planningPayload?.planning_request)
+    || planningPayload?.goal_management?.protocol === "side-aware-goal-v2"
+    || !planningPayload?.planning_request && messages.some((item) => {
     const content = String(item.content);
     return item.role === "system" && (content.includes("strategic commander") || content.includes("goal commander"));
   })) {
     const strategicSystem = String(messages.find((item) => item.role === "system")?.content || "");
     const scenario = planningPayload?.context?.game?.scenario || "july";
-    const allies = /Allied (?:goal|strategic) commander/i.test(strategicSystem);
+    const activeSide = planningPayload?.context?.game?.active_side;
+    const allies = activeSide ? activeSide === "allies" : /Allied (?:goal|strategic) commander/i.test(strategicSystem);
     const operation = scenario === "september"
       ? allies ? "protect_minefield" : "clear_mines"
       : scenario === "october"
